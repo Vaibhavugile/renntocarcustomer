@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'dart:developer' as developer;
 import 'package:google_fonts/google_fonts.dart';
 
 import '../../../../core/config/app_config.dart';
@@ -10,7 +11,6 @@ import '../../../customer/models/customer.dart';
 import '../../../customer/services/customer_service.dart';
 import '../../../pricing/manager/pricing_manager.dart';
 import '../../../pricing/models/km_pricing_package.dart';
-import '../../../pricing/models/rental_package.dart';
 import '../../../pricing/models/pricing_config.dart';
 import '../../../pricing/models/pricing_profile.dart';
 import '../../../pricing/engine/pricing_engine.dart';
@@ -117,6 +117,9 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   @override
   void initState() {
     super.initState();
+    print('🔥🔥🔥 ADMIN NEW BOOKING SCREEN INIT 🔥🔥🔥');
+    print('🔥 Tenant ID: $_tenantId');
+    print('🔥 Admin New Booking Screen loaded successfully');
     _loadBranches();
     _loadCustomers();
   }
@@ -159,7 +162,9 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
         _customers = customers;
         _loadingCustomers = false;
       });
-    } catch (e) {
+    } catch (e, stackTrace) {
+      print('❌ ADMIN PRICING ERROR: $e');
+      print(stackTrace);
       if (!mounted) return;
       setState(() {
         _loadingCustomers = false;
@@ -265,6 +270,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   }
 
   Future<void> _searchAvailability() async {
+    print('🔥 SEARCH AVAILABILITY CALLED | tenant=$_tenantId | pickup=$_pickupDateTime | return=$_returnDateTime');
     FocusScope.of(context).unfocus();
 
     final pickup = _pickupDateTime;
@@ -329,6 +335,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   }
 
   Future<void> _selectVehicle(Car car) async {
+    print('🔥 SELECT VEHICLE CALLED | car=${car.id} | name=${car.name} | pricingProfileId=${car.pricingProfileId}');
     FocusScope.of(context).unfocus();
     setState(() {
       _loading = true;
@@ -411,6 +418,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   }
 
   Future<void> _continueFromVehicle() async {
+    print('🔥 CONTINUE VEHICLE → BRANCH | car=${_selectedCar?.id} | branch=$_selectedBranchId');
     final car = _selectedCar;
     final branchId = _selectedBranchId;
 
@@ -462,6 +470,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   }
 
   Future<void> _selectCustomer() async {
+    print('🔥 SELECT CUSTOMER CALLED | customers=${_customers.length}');
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -473,13 +482,22 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
         onSearchChanged: (value) {
           setState(() => _customerSearch = value);
         },
-        onSelected: (customer) {
+        onSelected: (customer) async {
           Navigator.pop(context);
+
+          if (!mounted) return;
+
           setState(() {
             _selectedCustomer = customer;
             _customerSearch = '';
-            _step = 5;
           });
+
+          print('🔥 CUSTOMER SELECTED');
+          print('🔥 Customer ID: ${customer.customerId}');
+          print('🔥 Customer Name: ${customer.fullName}');
+          print('🔥 Starting pricing load...');
+
+          await _loadPricing();
         },
         onCreateNew: () async {
           Navigator.pop(context);
@@ -487,8 +505,13 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
           if (customer != null && mounted) {
             setState(() {
               _selectedCustomer = customer;
-              _step = 5;
             });
+
+            print('🔥 NEW CUSTOMER CREATED');
+            print('🔥 Customer ID: ${customer.customerId}');
+            print('🔥 Starting pricing load...');
+
+            await _loadPricing();
           }
         },
       ),
@@ -558,6 +581,15 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   }
 
   Future<void> _loadPricing() async {
+    print('');
+    print('==========================================');
+    print('🔥🔥🔥 _loadPricing() CALLED 🔥🔥🔥');
+    print('==========================================');
+    print('🔥 Tenant ID: $_tenantId');
+    print('🔥 Selected Car: ${_selectedCar?.id}');
+    print('🔥 Car Name: ${_selectedCar?.name}');
+    print('🔥 Pricing Profile ID: ${_selectedCar?.pricingProfileId}');
+    print('==========================================');
     final car = _selectedCar;
     if (car == null) return;
 
@@ -567,20 +599,140 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     });
 
     try {
+      // Always load the vehicle pricing profile directly from Firestore.
+      // This prevents an old PricingManager cache from hiding newly-created
+      // KM packages such as pricing_seltos/kmPackages.
+      developer.log(
+        '========== ADMIN BOOKING PRICING DEBUG START ==========',
+        name: 'AdminNewBooking',
+      );
+      print('========== ADMIN BOOKING PRICING DEBUG START ==========');
+      print('tenantId = $_tenantId');
+      print('car.id = ${car.id}');
+      print('car.name = ${car.name}');
+      print('car.pricingProfileId = [${car.pricingProfileId}]');
+      developer.log('tenantId = $_tenantId', name: 'AdminNewBooking');
+      developer.log('car.id = ${car.id}', name: 'AdminNewBooking');
+      developer.log('car.name = ${car.name}', name: 'AdminNewBooking');
+      developer.log('car.pricingProfileId = [${car.pricingProfileId}]', name: 'AdminNewBooking');
+
+      if (car.pricingProfileId.trim().isEmpty) {
+        developer.log(
+          'ERROR: selected car has EMPTY pricingProfileId',
+          name: 'AdminNewBooking',
+        );
+        throw Exception('This vehicle has no pricing profile assigned.');
+      }
+
+      print('🔥 Calling PricingManager.loadPricingForCar...');
+      print('🔥 tenantId = $_tenantId');
+      print('🔥 pricingProfileId = ${car.pricingProfileId}');
       final profile = await PricingManager.instance.loadPricingForCar(
         tenantId: _tenantId,
-        pricingProfileId: car.pricingProfileId,
+        pricingProfileId: car.pricingProfileId.trim(),
       );
+      print('🔥 PricingManager.loadPricingForCar returned.');
+      print('🔥 Profile is ${profile == null ? 'NULL' : 'NOT NULL'}');
+
+      developer.log(
+        'PricingManager returned profile = ${profile == null ? 'NULL' : 'NOT NULL'}',
+        name: 'AdminNewBooking',
+      );
+      print('PricingManager returned profile = ${profile == null ? 'NULL' : 'NOT NULL'}');
 
       if (profile == null) {
+        developer.log(
+          'ERROR: No PricingProfile returned for tenant=$_tenantId profileId=${car.pricingProfileId}',
+          name: 'AdminNewBooking',
+        );
         throw Exception('Pricing is unavailable for this vehicle.');
+      }
+
+      developer.log('profile.id = ${profile.id}', name: 'AdminNewBooking');
+      developer.log('profile.kmPricingMode = ${profile.kmPricingMode}', name: 'AdminNewBooking');
+      developer.log('profile.kmPackages.length = ${profile.kmPackages.length}', name: 'AdminNewBooking');
+      print('profile.id = ${profile.id}');
+      print('profile.kmPricingMode = ${profile.kmPricingMode}');
+      print('profile.kmPackages.length = ${profile.kmPackages.length}');
+
+      for (final package in profile.kmPackages) {
+        print('PACKAGE => id=${package.id}, name=${package.name}, includedKm=${package.includedKm}, unlimitedKm=${package.unlimitedKm}, dailyRate=${package.dailyRate}, hourlyRate=${package.hourlyRate}, extraKmRate=${package.extraKmRate}');
+        developer.log(
+          'PACKAGE => id=${package.id}, name=${package.name}, includedKm=${package.includedKm}, unlimitedKm=${package.unlimitedKm}, dailyRate=${package.dailyRate}, hourlyRate=${package.hourlyRate}, extraKmRate=${package.extraKmRate}',
+          name: 'AdminNewBooking',
+        );
+      }
+
+      // Diagnostic raw Firestore read. This is intentionally only for debugging
+      // the exact document and field shape when the parsed package list is empty.
+      if (profile.kmPackages.isEmpty) {
+        developer.log(
+          'Parsed kmPackages is EMPTY. Reading raw Firestore document...',
+          name: 'AdminNewBooking',
+        );
+
+        print('Parsed kmPackages EMPTY. Reading raw Firestore document...');
+        final rawDoc = await _firestore
+            .collection('tenants')
+            .doc(_tenantId)
+            .collection('pricingProfiles')
+            .doc(car.pricingProfileId.trim())
+            .get();
+
+        developer.log(
+          'RAW pricing doc exists = ${rawDoc.exists}',
+          name: 'AdminNewBooking',
+        );
+        print('RAW pricing doc exists = ${rawDoc.exists}');
+        developer.log(
+          'RAW pricing doc path = tenants/$_tenantId/pricingProfiles/${car.pricingProfileId.trim()}',
+          name: 'AdminNewBooking',
+        );
+
+        final rawData = rawDoc.data();
+        print('RAW pricing document keys = ${rawData?.keys.toList()}');
+        print('RAW kmPackages = ${rawData?['kmPackages']}');
+        print('RAW packages = ${rawData?['packages']}');
+        print('RAW kmPricingMode = ${rawData?['kmPricingMode']}');
+        developer.log(
+          'RAW pricing document keys = ${rawData?.keys.toList()}',
+          name: 'AdminNewBooking',
+        );
+        developer.log(
+          'RAW kmPackages = ${rawData?['kmPackages']}',
+          name: 'AdminNewBooking',
+        );
+        developer.log(
+          'RAW packages = ${rawData?['packages']}',
+          name: 'AdminNewBooking',
+        );
+        developer.log(
+          'RAW kmPricingMode = ${rawData?['kmPricingMode']}',
+          name: 'AdminNewBooking',
+        );
+
+        if (!rawDoc.exists || rawData == null) {
+          throw Exception(
+            'Pricing document does not exist at tenants/$_tenantId/pricingProfiles/${car.pricingProfileId.trim()}.',
+          );
+        }
+
+        throw Exception(
+          'Pricing profile exists, but PricingProfile.fromMap returned 0 KM packages. Check the DEBUG logs for RAW kmPackages field.',
+        );
       }
 
       final packages = profile.kmPackages;
 
-      // Keep the exact same KM-package source as the customer booking flow.
-      // Prefer the first finite KM package; fall back to the first package
-      // (normally Unlimited) only when no finite package exists.
+      if (profile.kmPricingMode == KmPricingMode.package &&
+          packages.isEmpty) {
+        throw Exception(
+          'No KM packages were found in pricing profile "${profile.id}".',
+        );
+      }
+
+      // Prefer a finite KM package as the initial selection.
+      // Unlimited remains available in the list and can be selected manually.
       KmPricingPackage? selected;
       if (packages.isNotEmpty) {
         try {
@@ -591,17 +743,21 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       }
 
       if (!mounted) return;
+      // IMPORTANT: customer flow shows the KM package screen BEFORE pricing.
+      // Do not jump directly to step 6 here.
       setState(() {
         _pricingProfile = profile;
-        _packages = packages;
+        _packages = List<KmPricingPackage>.from(packages);
         _selectedPackage = selected;
         _pricingResult = null;
         _loading = false;
-        _step = 6;
+        _step = 5;
       });
-
-      _calculatePricing();
-    } catch (e) {
+    } catch (e, stackTrace) {
+      print('❌❌❌ ADMIN PRICING ERROR ❌❌❌');
+      print('❌ Error: $e');
+      print('❌ StackTrace:');
+      print(stackTrace);
       if (!mounted) return;
       setState(() {
         _loading = false;
@@ -612,13 +768,9 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   }
 
   void _calculatePricing() {
+    print('🔥 CALCULATE PRICING CALLED | profile=${_pricingProfile?.id} | package=${_selectedPackage?.id}');
     final profile = _pricingProfile;
     if (profile == null) return;
-
-    if (_selectedPackage == null && profile.kmPricingMode == KmPricingMode.package) {
-      _showError('No KM packages are configured for this vehicle pricing profile.');
-      return;
-    }
 
     final config = PricingManager.instance.pricing;
     if (config == null) {
@@ -627,6 +779,14 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     }
 
     try {
+      final selectedPackage = _selectedPackage;
+      if (selectedPackage == null) {
+        _showError('Please select a KM package.');
+        return;
+      }
+
+      // PricingEngine supports the current KmPricingPackage architecture.
+      // Do not cast KmPricingPackage to the legacy RentalPackage model.
       final result = _pricingEngine.calculate(
         config: config,
         pricingProfileId: profile.id,
@@ -634,9 +794,11 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
         returnDateTime: _returnDateTime,
         actualKm: 0,
         plannedKm: 0,
-        selectedKmPackageId: _selectedPackage?.id,
-        selectedKm: _selectedPackage?.includedKm,
-        unlimitedKm: _selectedPackage?.unlimitedKm ?? false,
+        selectedKmPackageId: selectedPackage.id,
+        selectedKm: selectedPackage.unlimitedKm
+            ? null
+            : selectedPackage.includedKm,
+        unlimitedKm: selectedPackage.unlimitedKm,
         includeSecurityDeposit: true,
       );
 
@@ -647,7 +809,33 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     }
   }
 
+  double _packageDisplayRate(KmPricingPackage package) {
+    if (package.dailyRate > 0) {
+      return package.dailyRate;
+    }
+    if (package.hourlyRate > 0) {
+      return package.hourlyRate;
+    }
+    if (package.weekendRate > 0) {
+      return package.weekendRate;
+    }
+    if (package.weeklyRate > 0) {
+      return package.weeklyRate;
+    }
+    return package.monthlyRate;
+  }
+
+  void _selectPackage(KmPricingPackage package) {
+    print('🔥 KM PACKAGE SELECTED | id=${package.id} | name=${package.name} | includedKm=${package.includedKm} | unlimited=${package.unlimitedKm}');
+    developer.log('KM PACKAGE SELECTED: id=${package.id}, name=${package.name}, includedKm=${package.includedKm}, unlimited=${package.unlimitedKm}', name: 'AdminNewBooking');
+    setState(() {
+      _selectedPackage = package;
+    });
+    _calculatePricing();
+  }
+
   Future<void> _continueToReview() async {
+    print('🔥 CONTINUE TO REVIEW | customer=${_selectedCustomer?.customerId} | car=${_selectedCar?.id} | pricing=${_pricingResult?.total}');
     if (_selectedCustomer == null) {
       _showError('Please select a customer.');
       return;
@@ -711,6 +899,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   }
 
   Future<void> _createBooking() async {
+    print('🔥 CREATE BOOKING CALLED | customer=${_selectedCustomer?.customerId} | car=${_selectedCar?.id} | total=${_pricingResult?.total}');
     final customer = _selectedCustomer;
     final car = _selectedCar;
     final branch = _selectedBranch;
@@ -934,6 +1123,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
 
   @override
   Widget build(BuildContext context) {
+    print('🔥 ADMIN NEW BOOKING BUILD | step=$_step | car=${_selectedCar?.id} | packages=${_packages.length}');
     return Scaffold(
       backgroundColor: background,
       appBar: AppBar(
@@ -945,7 +1135,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
           icon: const Icon(Icons.arrow_back_ios_new_rounded, color: heading),
         ),
         title: Text(
-          'New Booking',
+          _step == 5 ? 'Choose KM Package' : 'New Booking',
           style: GoogleFonts.manrope(
             color: heading,
             fontSize: 20,
@@ -959,11 +1149,49 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
             ListView(
               padding: const EdgeInsets.fromLTRB(18, 8, 18, 120),
               children: [
-                _buildProgress(),
-                const SizedBox(height: 18),
+                if (_step != 5) _buildProgress(),
+                if (_step != 5) const SizedBox(height: 18),
                 _buildStepContent(),
               ],
             ),
+            if (_step == 5 && !_loading && !_creatingBooking && _packages.isNotEmpty)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: Container(
+                  padding: const EdgeInsets.fromLTRB(10, 12, 10, 10),
+                  decoration: BoxDecoration(
+                    color: background.withOpacity(.96),
+                    border: const Border(
+                      top: BorderSide(color: border),
+                    ),
+                    boxShadow: const [
+                      BoxShadow(
+                        color: Color(0x12000000),
+                        blurRadius: 16,
+                        offset: Offset(0, -5),
+                      ),
+                    ],
+                  ),
+                  child: SafeArea(
+                    top: false,
+                    child: _primaryButton(
+                      'Continue',
+                      Icons.arrow_forward_rounded,
+                      () {
+                        print('🔥 CONTINUE FROM KM PACKAGE PRESSED');
+                        if (_selectedPackage == null) {
+                          _showError('Please select a KM package.');
+                          return;
+                        }
+                        _calculatePricing();
+                        setState(() => _step = 6);
+                      },
+                    ),
+                  ),
+                ),
+              ),
             if (_loading || _creatingBooking)
               Positioned.fill(
                 child: Container(
@@ -1298,66 +1526,216 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   }
 
   Widget _buildPackage() {
+    print('🔥 BUILD KM PACKAGE SCREEN | packages=${_packages.length} | selected=${_selectedPackage?.id}');
+    developer.log(
+      'BUILD KM PACKAGE SCREEN: packages=${_packages.length}, selected=${_selectedPackage?.id}',
+      name: 'AdminNewBooking',
+    );
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _summaryCard(title: _selectedCar?.name ?? 'Vehicle', subtitle: _selectedCustomer?.fullName ?? 'Customer', icon: Icons.route_rounded, trailing: '4'),
-        const SizedBox(height: 14),
-        _sectionCard(
-          title: 'KM Package',
-          subtitle: _packages.isEmpty
-              ? 'No KM packages were returned by this vehicle pricing profile.'
-              : 'Select the KM allowance for the complete rental.',
-          child: _packages.isEmpty
-              ? _emptyCard('No KM packages', 'Pricing will be calculated from the vehicle pricing profile.')
-              : Column(children: _packages.map(_packageCard).toList()),
+        Text(
+          'Select your KM package',
+          style: GoogleFonts.manrope(
+            color: heading,
+            fontSize: 27,
+            height: 1.08,
+            fontWeight: FontWeight.w900,
+          ),
         ),
-        const SizedBox(height: 16),
-        _primaryButton('Continue to Pricing', Icons.calculate_rounded, () {
-          _calculatePricing();
-          setState(() => _step = 6);
-        }),
+        const SizedBox(height: 8),
+        Text(
+          'Choose the distance package that best fits your trip.',
+          style: GoogleFonts.manrope(
+            color: body,
+            fontSize: 13,
+            height: 1.45,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: 22),
+        if (_packages.isEmpty)
+          _emptyCard(
+            'No KM packages',
+            'Pricing will be calculated from the vehicle pricing profile.',
+          )
+        else
+          ..._packages.map(_packageCard),
+        const SizedBox(height: 100),
       ],
     );
   }
 
-  void _selectPackage(KmPricingPackage package) {
-    setState(() {
-      _selectedPackage = package;
-      _pricingResult = null;
-    });
-    _calculatePricing();
-  }
-
   Widget _packageCard(KmPricingPackage package) {
     final selected = _selectedPackage?.id == package.id;
-    final rate = package.dailyRate;
+
+    print(
+      '🔥 RENDER PACKAGE | id=${package.id} | name=${package.name} | '
+      'includedKm=${package.includedKm} | selected=$selected | '
+      'hourly=${package.hourlyRate} | daily=${package.dailyRate} | '
+      'weekend=${package.weekendRate} | extraKm=${package.extraKmRate}',
+    );
+
     return GestureDetector(
       onTap: () => _selectPackage(package),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 180),
-        margin: const EdgeInsets.only(bottom: 9),
-        padding: const EdgeInsets.all(14),
+        width: double.infinity,
+        margin: const EdgeInsets.only(bottom: 16),
+        padding: const EdgeInsets.fromLTRB(14, 14, 14, 15),
         decoration: BoxDecoration(
-          color: selected ? softAccent : background,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: selected ? primary : border, width: selected ? 1.4 : 1),
+          color: card,
+          borderRadius: BorderRadius.circular(25),
+          border: Border.all(
+            color: selected ? primary : const Color(0xFFE4E8E7),
+            width: selected ? 1.8 : 1.1,
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(selected ? .06 : .035),
+              blurRadius: selected ? 14 : 10,
+              offset: const Offset(0, 4),
+            ),
+          ],
         ),
-        child: Row(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(selected ? Icons.radio_button_checked_rounded : Icons.radio_button_off_rounded, color: selected ? primary : muted),
-            const SizedBox(width: 10),
-            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(package.name, style: GoogleFonts.manrope(color: heading, fontWeight: FontWeight.w900)),
-              const SizedBox(height: 3),
-              Text(package.unlimitedKm ? 'Unlimited KM' : '${package.includedKm ?? 0} KM included', style: GoogleFonts.manrope(color: body, fontSize: 10.5, fontWeight: FontWeight.w600)),
-              if (package.extraKmRate > 0 && !package.unlimitedKm)
-                Text('₹${package.extraKmRate.toStringAsFixed(2)} / extra KM', style: GoogleFonts.manrope(color: muted, fontSize: 9.5)),
-            ])),
-            Text(_money(rate), style: GoogleFonts.manrope(color: primary, fontWeight: FontWeight.w900)),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  width: 68,
+                  height: 68,
+                  decoration: BoxDecoration(
+                    color: selected ? primary : softAccent,
+                    borderRadius: BorderRadius.circular(19),
+                  ),
+                  child: Icon(
+                    Icons.speed_rounded,
+                    color: selected ? Colors.white : primary,
+                    size: 34,
+                  ),
+                ),
+                const SizedBox(width: 17),
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          package.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: GoogleFonts.manrope(
+                            color: heading,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                        const SizedBox(height: 5),
+                        Text(
+                          package.unlimitedKm
+                              ? 'Unlimited KM'
+                              : '${package.includedKm ?? 0} KM included',
+                          style: GoogleFonts.manrope(
+                            color: primary,
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Icon(
+                  selected
+                      ? Icons.radio_button_checked_rounded
+                      : Icons.radio_button_off_rounded,
+                  color: selected ? primary : const Color(0xFFDDE3E1),
+                  size: 34,
+                ),
+              ],
+            ),
+            const SizedBox(height: 20),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(vertical: 13),
+              decoration: BoxDecoration(
+                color: selected ? const Color(0xFFE8FFFC) : const Color(0xFFF6F8F7),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Row(
+                children: [
+                  _packageRateColumn('Hourly', package.hourlyRate, true),
+                  _packageRateDivider(),
+                  _packageRateColumn('Daily', package.dailyRate, false),
+                  _packageRateDivider(),
+                  _packageRateColumn('Weekend', package.weekendRate, false),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Icon(
+                  Icons.tune_rounded,
+                  color: body,
+                  size: 19,
+                ),
+                const SizedBox(width: 7),
+                Text(
+                  package.unlimitedKm
+                      ? 'Unlimited KM included'
+                      : '₹${package.extraKmRate.toStringAsFixed(0)} / extra KM',
+                  style: GoogleFonts.manrope(
+                    color: body,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
           ],
         ),
       ),
+    );
+  }
+
+  Widget _packageRateColumn(String label, double value, bool first) {
+    return Expanded(
+      child: Column(
+        children: [
+          Text(
+            label,
+            style: GoogleFonts.manrope(
+              color: muted,
+              fontSize: 11.5,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 5),
+          Text(
+            _money(value),
+            style: GoogleFonts.manrope(
+              color: heading,
+              fontSize: 14,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _packageRateDivider() {
+    return Container(
+      width: 1,
+      height: 38,
+      color: const Color(0xFFE4EAE8),
     );
   }
 
