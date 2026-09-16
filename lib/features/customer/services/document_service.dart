@@ -7,10 +7,6 @@ import 'package:firebase_storage/firebase_storage.dart';
 import '../models/customer_document.dart';
 
 class DocumentService {
-  final FirebaseFirestore _firestore;
-  final FirebaseStorage _storage;
-  final FirebaseAuth _auth;
-
   DocumentService({
     FirebaseFirestore? firestore,
     FirebaseStorage? storage,
@@ -18,6 +14,10 @@ class DocumentService {
   })  : _firestore = firestore ?? FirebaseFirestore.instance,
         _storage = storage ?? FirebaseStorage.instance,
         _auth = auth ?? FirebaseAuth.instance;
+
+  final FirebaseFirestore _firestore;
+  final FirebaseStorage _storage;
+  final FirebaseAuth _auth;
 
   CollectionReference<Map<String, dynamic>> _documents(
     String tenantId,
@@ -34,18 +34,18 @@ class DocumentService {
   Future<List<CustomerDocument>> getDocuments({
     required String tenantId,
     required String customerId,
+    bool admin = false,
   }) async {
-    _validateIdentity(tenantId, customerId);
+    if (!admin) {
+      _validateIdentity(tenantId, customerId);
+    }
 
     final snapshot = await _documents(tenantId, customerId)
         .orderBy('createdAt', descending: true)
         .get();
 
     return snapshot.docs
-        .map((doc) => CustomerDocument.fromMap(
-              doc.id,
-              doc.data(),
-            ))
+        .map((doc) => CustomerDocument.fromMap(doc.id, doc.data()))
         .toList();
   }
 
@@ -53,14 +53,14 @@ class DocumentService {
     required String tenantId,
     required String customerId,
     required CustomerDocumentType type,
+    bool admin = false,
   }) async {
-    _validateIdentity(tenantId, customerId);
+    if (!admin) {
+      _validateIdentity(tenantId, customerId);
+    }
 
     final snapshot = await _documents(tenantId, customerId)
-        .where(
-          'documentType',
-          isEqualTo: _typeKey(type),
-        )
+        .where('documentType', isEqualTo: _typeKey(type))
         .limit(1)
         .get();
 
@@ -77,17 +77,18 @@ class DocumentService {
     required String documentNumber,
     required File frontFile,
     required File backFile,
+    bool admin = false,
   }) async {
-    _validateIdentity(tenantId, customerId);
+    if (!admin) {
+      _validateIdentity(tenantId, customerId);
+    }
 
     if (documentNumber.trim().isEmpty) {
       throw Exception('Document number is required.');
     }
-
     if (!await frontFile.exists()) {
       throw Exception('Front document image was not found.');
     }
-
     if (!await backFile.exists()) {
       throw Exception('Back document image was not found.');
     }
@@ -96,6 +97,7 @@ class DocumentService {
       tenantId: tenantId,
       customerId: customerId,
       type: type,
+      admin: admin,
     );
 
     final documentRef = existing == null
@@ -107,7 +109,6 @@ class DocumentService {
     final frontRef = _storage.ref(
       'tenants/$tenantId/customers/$customerId/documents/$documentKey/front.jpg',
     );
-
     final backRef = _storage.ref(
       'tenants/$tenantId/customers/$customerId/documents/$documentKey/back.jpg',
     );
@@ -138,94 +139,119 @@ class DocumentService {
       ),
     );
 
-    final frontUrl = await frontRef.getDownloadURL();
-    final backUrl = await backRef.getDownloadURL();
-
-    final now = FieldValue.serverTimestamp();
-
     final data = {
       'tenantId': tenantId,
       'customerId': customerId,
       'documentType': documentKey,
       'documentNumber': documentNumber.trim(),
-      'frontImageUrl': frontUrl,
-      'backImageUrl': backUrl,
+      'frontImageUrl': await frontRef.getDownloadURL(),
+      'backImageUrl': await backRef.getDownloadURL(),
       'status': 'pending',
       'rejectionReason': '',
       'verifiedAt': null,
       'verifiedBy': '',
-      'updatedAt': now,
-      if (existing == null) 'createdAt': now,
+      'updatedAt': FieldValue.serverTimestamp(),
+      if (existing == null) 'createdAt': FieldValue.serverTimestamp(),
     };
 
-    await documentRef.set(
-      data,
-      SetOptions(merge: true),
-    );
+    await documentRef.set(data, SetOptions(merge: true));
 
-    // Keep the customer-level KYC status synchronized with the
-    // document workflow. Full verification is still performed by
-    // the admin/backend; uploading documents only moves the customer
-    // into the pending state.
     await _firestore
         .collection('tenants')
         .doc(tenantId)
         .collection('customers')
         .doc(customerId)
-        .set(
-      {
-        'tenantId': tenantId,
-        'customerId': customerId,
-        'kycStatus': 'pending',
-        'updatedAt': FieldValue.serverTimestamp(),
-      },
-      SetOptions(merge: true),
-    );
+        .set({
+      'tenantId': tenantId,
+      'customerId': customerId,
+      'kycStatus': 'pending',
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
 
     final saved = await documentRef.get();
-
     if (!saved.exists || saved.data() == null) {
       throw Exception('Unable to save document information.');
     }
 
-    return CustomerDocument.fromMap(
-      saved.id,
-      saved.data()!,
-    );
+    return CustomerDocument.fromMap(saved.id, saved.data()!);
   }
 
-  Future<void> deleteDocument({
+  Future<void> verifyDocument({
     required String tenantId,
     required String customerId,
-    required CustomerDocumentType type,
+    required String documentId,
+    required String adminId,
   }) async {
-    _validateIdentity(tenantId, customerId);
+    await _documents(tenantId, customerId).doc(documentId).update({
+      'status': 'verified',
+      'rejectionReason': '',
+      'verifiedAt': FieldValue.serverTimestamp(),
+      'verifiedBy': adminId,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
 
-    final existing = await getDocument(
+    await _syncCustomerKycStatus(tenantId, customerId);
+  }
+
+  Future<void> rejectDocument({
+    required String tenantId,
+    required String customerId,
+    required String documentId,
+    required String adminId,
+    required String reason,
+  }) async {
+    if (reason.trim().isEmpty) {
+      throw Exception('Rejection reason is required.');
+    }
+
+    await _documents(tenantId, customerId).doc(documentId).update({
+      'status': 'rejected',
+      'rejectionReason': reason.trim(),
+      'verifiedAt': null,
+      'verifiedBy': adminId,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+
+    await _syncCustomerKycStatus(tenantId, customerId);
+  }
+
+  Future<void> _syncCustomerKycStatus(
+    String tenantId,
+    String customerId,
+  ) async {
+    final docs = await getDocuments(
       tenantId: tenantId,
       customerId: customerId,
-      type: type,
+      admin: true,
     );
 
-    if (existing == null) return;
+    final license = docs.any((d) =>
+        d.type == CustomerDocumentType.drivingLicense &&
+        d.status == CustomerDocumentStatus.verified);
 
-    final key = _typeKey(type);
+    final governmentId = docs.any((d) =>
+        d.type == CustomerDocumentType.governmentId &&
+        d.status == CustomerDocumentStatus.verified);
 
-    final folder = _storage.ref(
-      'tenants/$tenantId/customers/$customerId/documents/$key',
-    );
+    String status = 'not_started';
 
-    try {
-      await folder.child('front.jpg').delete();
-    } catch (_) {}
+    if (docs.any((d) => d.status == CustomerDocumentStatus.rejected)) {
+      status = 'rejected';
+    } else if (license && governmentId) {
+      status = 'verified';
+    } else if (docs.any((d) => d.status == CustomerDocumentStatus.pending)) {
+      status = 'pending';
+    }
 
-    try {
-      await folder.child('back.jpg').delete();
-    } catch (_) {}
-
-    await _documents(tenantId, customerId)
-        .doc(existing.documentId)
-        .delete();
+    await _firestore
+        .collection('tenants')
+        .doc(tenantId)
+        .collection('customers')
+        .doc(customerId)
+        .set({
+      'kycStatus': status,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
   }
 
   Future<bool> hasVerifiedRequiredDocuments({
@@ -252,24 +278,11 @@ class DocumentService {
     return licenseVerified && governmentIdVerified;
   }
 
-  void _validateIdentity(
-    String tenantId,
-    String customerId,
-  ) {
+  void _validateIdentity(String tenantId, String customerId) {
     final user = _auth.currentUser;
-
-    if (user == null) {
-      throw Exception('User is not authenticated.');
-    }
-
-    if (tenantId.trim().isEmpty) {
-      throw Exception('Tenant ID is required.');
-    }
-
-    if (customerId.trim().isEmpty) {
-      throw Exception('Customer ID is required.');
-    }
-
+    if (user == null) throw Exception('User is not authenticated.');
+    if (tenantId.trim().isEmpty) throw Exception('Tenant ID is required.');
+    if (customerId.trim().isEmpty) throw Exception('Customer ID is required.');
     if (user.uid != customerId) {
       throw Exception('Customer identity mismatch.');
     }

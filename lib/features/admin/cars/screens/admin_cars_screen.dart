@@ -4,7 +4,8 @@ import 'package:google_fonts/google_fonts.dart';
 import '../../../../core/config/app_config.dart';
 import '../../../cars/models/car.dart';
 import '../../../cars/services/car_service.dart';
-
+import 'admin_add_car_screen.dart';
+import 'admin_edit_car_screen.dart';
 class AdminCarsScreen extends StatefulWidget {
   const AdminCarsScreen({
     super.key,
@@ -340,27 +341,22 @@ class _AdminCarsScreenState
                 _actionTile(
                   icon: Icons.edit_outlined,
                   title: 'Edit vehicle',
-                  onTap: () {
-                    Navigator.pop(context);
+                 onTap: () async {
+  Navigator.pop(context);
 
-                    ScaffoldMessenger.of(
-                      context,
-                    ).showSnackBar(
-                      SnackBar(
-                        content: Text(
-                          'Edit vehicle will be connected next.',
-                          style:
-                              GoogleFonts.manrope(
-                            fontWeight:
-                                FontWeight.w600,
-                          ),
-                        ),
-                        behavior:
-                            SnackBarBehavior
-                                .floating,
-                      ),
-                    );
-                  },
+  final result = await Navigator.push(
+    context,
+    MaterialPageRoute(
+      builder: (_) => AdminEditCarScreen(
+        car: car,
+      ),
+    ),
+  );
+
+  if (result == true && mounted) {
+    await _loadCars();
+  }
+},
                 ),
 
                 _actionTile(
@@ -494,22 +490,19 @@ class _AdminCarsScreenState
       ),
       floatingActionButton:
           FloatingActionButton.extended(
-        onPressed: () {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(
-            SnackBar(
-              content: Text(
-                'Add Car screen will be connected next.',
-                style: GoogleFonts.manrope(
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              behavior:
-                  SnackBarBehavior.floating,
-            ),
-          );
-        },
+        onPressed: () async {
+  final result = await Navigator.push(
+    context,
+    MaterialPageRoute(
+      builder: (_) =>
+          const AdminAddCarScreen(),
+    ),
+  );
+
+  if (result == true && mounted) {
+    await _loadCars();
+  }
+},
         backgroundColor: primary,
         foregroundColor: Colors.white,
         elevation: 4,

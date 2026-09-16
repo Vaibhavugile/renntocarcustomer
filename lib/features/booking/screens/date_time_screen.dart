@@ -1,9 +1,9 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
 import '../../../core/config/app_config.dart';
 import 'package:customer_app_car_rental/features/cars/models/car.dart';
 import 'branch_selection_screen.dart';
+import 'package:customer_app_car_rental/features/admin/availability/services/admin_availability_service.dart';
 
 class DateTimeScreen extends StatefulWidget {
   final Car car;
@@ -33,27 +33,21 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
   static const Color border = Color(0xFFE5EBE9);
 
   // ============================================================
-  // FIREBASE
+  // SHARED AVAILABILITY ENGINE
   // ============================================================
 
-  final FirebaseFirestore _firestore =
-      FirebaseFirestore.instance;
+  /// Customer and Admin intentionally use the exact same availability
+  /// service. There is no customer-specific availability calculation here.
+  final AdminAvailabilityService _availabilityService =
+      AdminAvailabilityService.instance;
 
   String get _tenantId => AppConfig.tenant.tenantId;
 
-  CollectionReference<Map<String, dynamic>> get _bookings {
-    return _firestore
-        .collection('tenants')
-        .doc(_tenantId)
-        .collection('bookings');
-  }
-
-  CollectionReference<Map<String, dynamic>> get _vehicleBlocks {
-    return _firestore
-        .collection('tenants')
-        .doc(_tenantId)
-        .collection('vehicleBlocks');
-  }
+  /// Snapshot used by the calendar UI for the currently visible month.
+  ///
+  /// The actual selected rental range is ALWAYS re-checked with
+  /// getAvailabilityForRange(), including cross-month rentals.
+  AdminAvailabilitySnapshot? _availabilitySnapshot;
 
   // ============================================================
   // DATE/TIME STATE
@@ -70,35 +64,6 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
   bool _loadingAvailability = true;
   bool _checkingAvailability = false;
   bool _datesConfirmed = false;
-
-  final List<_BlockedInterval> _blockedIntervals = [];
-
-  // ============================================================
-  // BLOCKING BOOKING STATUSES
-  // ============================================================
-
-  static const Set<String> _blockingStatuses = {
-    'pending',
-    'confirmed',
-    'pickup_pending',
-    'active',
-    'return_pending',
-  };
-
-  bool _isBlockingStatus(dynamic value) {
-    if (value == null) {
-      return false;
-    }
-
-    final status = value
-        .toString()
-        .trim()
-        .toLowerCase()
-        .replaceAll('-', '_')
-        .replaceAll(' ', '_');
-
-    return _blockingStatuses.contains(status);
-  }
 
   // ============================================================
   // INIT
@@ -298,13 +263,17 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
   }
 
   // ============================================================
-  // FIREBASE AVAILABILITY
+  // SHARED AVAILABILITY
   // ============================================================
 
+  /// Loads the visible calendar month through the same availability engine
+  /// used by the Admin screens.
+  ///
+  /// This snapshot is only for rendering day states. Exact booking
+  /// availability is checked again against the complete rental range before
+  /// the customer continues.
   Future<void> _loadAvailability() async {
-    if (!mounted) {
-      return;
-    }
+    if (!mounted) return;
 
     setState(() {
       _loadingAvailability = true;
@@ -312,290 +281,61 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
     });
 
     try {
-      /*
-       * We intentionally query all bookings for this tenant/car
-       * that can potentially affect future availability.
-       *
-       * Blocking statuses:
-       * pending
-       * confirmed
-       * pickup_pending
-       * active
-       * return_pending
-       *
-       * Cancelled bookings are deliberately ignored.
-       */
-
-      final bookingSnapshot = await _bookings
-          .where(
-            'carId',
-            isEqualTo: widget.car.id,
-          )
-          .where(
-            'status',
-            whereIn: _blockingStatuses.toList(),
-          )
-          .get();
-
-      final intervals = <_BlockedInterval>[];
-
-      for (final document
-          in bookingSnapshot.docs) {
-        final data = document.data();
-
-        final pickup =
-            _readDateTime(
-          data['pickupDateTime'],
-        );
-
-        final returnDateTime =
-            _readDateTime(
-          data['returnDateTime'],
-        );
-
-        if (pickup == null ||
-            returnDateTime == null) {
-          continue;
-        }
-
-        if (!returnDateTime.isAfter(pickup)) {
-          continue;
-        }
-
-        intervals.add(
-          _BlockedInterval(
-            id: document.id,
-            pickup: pickup,
-            returnDateTime: returnDateTime,
-          ),
-        );
-      }
-
-      /*
-       * Vehicle blocks such as maintenance or manual blocking.
-       */
-
-      final blockSnapshot = await _vehicleBlocks
-          .where(
-            'carId',
-            isEqualTo: widget.car.id,
-          )
-          .where(
-            'status',
-            isEqualTo: 'active',
-          )
-          .get();
-
-      for (final document
-          in blockSnapshot.docs) {
-        final data = document.data();
-
-        final start =
-            _readDateTime(
-          data['startDateTime'],
-        );
-
-        final end =
-            _readDateTime(
-          data['endDateTime'],
-        );
-
-        if (start == null ||
-            end == null) {
-          continue;
-        }
-
-        if (!end.isAfter(start)) {
-          continue;
-        }
-
-        intervals.add(
-          _BlockedInterval(
-            id: 'block_${document.id}',
-            pickup: start,
-            returnDateTime: end,
-          ),
-        );
-      }
-
-      intervals.sort(
-        (a, b) => a.pickup.compareTo(
-          b.pickup,
-        ),
+      final snapshot = await _availabilityService.getMonthAvailability(
+        month: _calendarMonth,
+        tenantId: _tenantId,
       );
 
-      if (!mounted) {
-        return;
-      }
+      if (!mounted) return;
 
       setState(() {
-        _blockedIntervals
-          ..clear()
-          ..addAll(intervals);
-
+        _availabilitySnapshot = snapshot;
         _loadingAvailability = false;
       });
-    } catch (e) {
-      if (!mounted) {
-        return;
-      }
+    } catch (_) {
+      if (!mounted) return;
 
       setState(() {
+        _availabilitySnapshot = null;
         _loadingAvailability = false;
-
-        _errorMessage =
-            'Unable to check vehicle availability.';
+        _errorMessage = 'Unable to check vehicle availability.';
       });
     }
   }
 
-  DateTime? _readDateTime(dynamic value) {
-    if (value == null) {
-      return null;
-    }
+  /// Performs a fresh, exact availability check using the shared Admin
+  /// availability engine. This intentionally reloads Firebase data so a
+  /// recently-created booking/block is not missed.
+  Future<bool> _isRangeAvailable(
+    DateTime start,
+    DateTime end,
+  ) async {
+    if (!end.isAfter(start)) return false;
 
-    if (value is Timestamp) {
-      return value.toDate();
-    }
+    try {
+      final snapshot = await _availabilityService.getAvailabilityForRange(
+        rangeStart: start,
+        rangeEnd: end,
+        tenantId: _tenantId,
+      );
 
-    if (value is DateTime) {
-      return value;
-    }
+      final matchingCars = snapshot.cars
+          .where((car) => car.id == widget.car.id)
+          .toList();
+      final freshCar = matchingCars.isEmpty ? null : matchingCars.first;
 
-    if (value is String) {
-      return DateTime.tryParse(value);
-    }
+      if (freshCar == null) return false;
 
-    return null;
-  }
-
-  // ============================================================
-  // OVERLAP
-  // ============================================================
-
-  bool _overlaps(
-    DateTime pickup,
-    DateTime returnDateTime,
-    DateTime blockedPickup,
-    DateTime blockedReturn,
-  ) {
-    return pickup.isBefore(blockedReturn) &&
-        returnDateTime.isAfter(blockedPickup);
-  }
-
-  bool _isAvailableForRange(
-    DateTime pickup,
-    DateTime returnDateTime,
-  ) {
-    if (!returnDateTime.isAfter(pickup)) {
+      return _availabilityService.isCarAvailableForRange(
+        car: freshCar,
+        start: start,
+        end: end,
+        bookings: snapshot.bookings,
+        blocks: snapshot.blocks,
+      );
+    } catch (_) {
       return false;
     }
-
-    for (final blocked
-        in _blockedIntervals) {
-      if (_overlaps(
-        pickup,
-        returnDateTime,
-        blocked.pickup,
-        blocked.returnDateTime,
-      )) {
-        return false;
-      }
-    }
-
-    return true;
-  }
-
-  bool _isPickupTimeBlocked(
-    DateTime pickup) {
-    for (final blocked
-        in _blockedIntervals) {
-      if (pickup.isAtSameMomentAs(
-            blocked.pickup,
-          ) ||
-          (pickup.isAfter(
-                blocked.pickup,
-              ) &&
-              pickup.isBefore(
-                blocked.returnDateTime,
-              ))) {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  // ============================================================
-  // CALENDAR DAY AVAILABILITY
-  // ============================================================
-
-  bool _hasAvailableTimeOnDate(
-    DateTime date,
-  ) {
-    final dayStart = DateTime(
-      date.year,
-      date.month,
-      date.day,
-    );
-
-    final dayEnd =
-        dayStart.add(
-      const Duration(days: 1),
-    );
-
-    final blocks = _blockedIntervals
-        .where(
-          (block) =>
-              block.returnDateTime
-                  .isAfter(dayStart) &&
-              block.pickup
-                  .isBefore(dayEnd),
-        )
-        .toList()
-      ..sort(
-        (a, b) => a.pickup.compareTo(
-          b.pickup,
-        ),
-      );
-
-    /*
-     * No booking/block touches this date.
-     */
-    if (blocks.isEmpty) {
-      return true;
-    }
-
-    DateTime cursor = dayStart;
-
-    for (final block in blocks) {
-      final start =
-          block.pickup.isBefore(dayStart)
-              ? dayStart
-              : block.pickup;
-
-      final end =
-          block.returnDateTime.isAfter(dayEnd)
-              ? dayEnd
-              : block.returnDateTime;
-
-      /*
-       * There is a free period before this block.
-       */
-      if (start.isAfter(cursor)) {
-        return true;
-      }
-
-      if (end.isAfter(cursor)) {
-        cursor = end;
-      }
-
-      if (!cursor.isBefore(dayEnd)) {
-        return false;
-      }
-    }
-
-    return cursor.isBefore(dayEnd);
   }
 
   // ============================================================
@@ -615,7 +355,6 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
   DateTime? _dragCurrentDate;
   bool _isDraggingRange = false;
   String _dragMode = 'new';
-
 
   DateTime _dateOnly(DateTime date) {
     return DateTime(date.year, date.month, date.day);
@@ -665,6 +404,8 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
     setState(() {
       _calendarMonth = previous;
     });
+
+    _loadAvailability();
   }
 
   void _nextMonth() {
@@ -675,6 +416,8 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
         1,
       );
     });
+
+    _loadAvailability();
   }
 
   List<DateTime?> _calendarDays(DateTime month) {
@@ -712,76 +455,76 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
       return _CalendarDayState.available;
     }
 
-    final dayStart = DateTime(
-      date.year,
-      date.month,
-      date.day,
-    );
-    final dayEnd = dayStart.add(
-      const Duration(days: 1),
-    );
-
-    final blocks = _blockedIntervals
-        .where(
-          (block) =>
-              block.returnDateTime.isAfter(dayStart) &&
-              block.pickup.isBefore(dayEnd),
-        )
-        .toList()
-      ..sort(
-        (a, b) => a.pickup.compareTo(b.pickup),
-      );
-
-    if (blocks.isEmpty) {
-      return _CalendarDayState.available;
-    }
-
-    final merged = <_BlockedInterval>[];
-
-    for (final block in blocks) {
-      final start = block.pickup.isBefore(dayStart)
-          ? dayStart
-          : block.pickup;
-      final end = block.returnDateTime.isAfter(dayEnd)
-          ? dayEnd
-          : block.returnDateTime;
-
-      if (merged.isEmpty ||
-          start.isAfter(merged.last.returnDateTime)) {
-        merged.add(
-          _BlockedInterval(
-            id: block.id,
-            pickup: start,
-            returnDateTime: end,
-          ),
-        );
-      } else if (end.isAfter(merged.last.returnDateTime)) {
-        final previous = merged.removeLast();
-        merged.add(
-          _BlockedInterval(
-            id: previous.id,
-            pickup: previous.pickup,
-            returnDateTime: end,
-          ),
-        );
-      }
-    }
-
-    if (merged.length == 1 &&
-        !merged.first.pickup.isAfter(dayStart) &&
-        !merged.first.returnDateTime.isBefore(dayEnd)) {
+    final snapshot = _availabilitySnapshot;
+    if (snapshot == null) {
       return _CalendarDayState.full;
     }
 
-    DateTime cursor = dayStart;
+    final matchingCars = snapshot.cars
+        .where((item) => item.id == widget.car.id)
+        .toList();
+    final car = matchingCars.isEmpty ? null : matchingCars.first;
 
-    for (final block in merged) {
-      if (block.pickup.isAfter(cursor)) {
+    if (car == null || !car.isActive || !car.isAvailable) {
+      return _CalendarDayState.full;
+    }
+
+    final status = car.status.trim().toLowerCase();
+    if (status == 'inactive' || status == 'unavailable') {
+      return _CalendarDayState.full;
+    }
+
+    final dayStart = DateTime(date.year, date.month, date.day);
+    final dayEnd = dayStart.add(const Duration(days: 1));
+
+    final bookings = _availabilityService.conflictsForCar(
+      carId: widget.car.id,
+      start: dayStart,
+      end: dayEnd,
+      bookings: snapshot.bookings,
+    );
+    final blocks = _availabilityService.blocksForCar(
+      carId: widget.car.id,
+      start: dayStart,
+      end: dayEnd,
+      blocks: snapshot.blocks,
+    );
+
+    if (bookings.isEmpty && blocks.isEmpty) {
+      return _CalendarDayState.available;
+    }
+
+    final intervals = <_AvailabilityInterval>[
+      ...bookings.map(
+        (item) => _AvailabilityInterval(
+          item.pickupDateTime,
+          item.returnDateTime,
+        ),
+      ),
+      ...blocks.map(
+        (item) => _AvailabilityInterval(
+          item.startDateTime,
+          item.endDateTime,
+        ),
+      ),
+    ]..sort((a, b) => a.start.compareTo(b.start));
+
+    var cursor = dayStart;
+
+    for (final interval in intervals) {
+      final start = interval.start.isBefore(dayStart)
+          ? dayStart
+          : interval.start;
+      final end = interval.end.isAfter(dayEnd)
+          ? dayEnd
+          : interval.end;
+
+      if (start.isAfter(cursor)) {
         return _CalendarDayState.partial;
       }
 
-      if (block.returnDateTime.isAfter(cursor)) {
-        cursor = block.returnDateTime;
+      if (end.isAfter(cursor)) {
+        cursor = end;
       }
 
       if (!cursor.isBefore(dayEnd)) {
@@ -1469,12 +1212,15 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
       return;
     }
 
-    if (_isPickupTimeBlocked(
+    final pickupMomentAvailable = await _isRangeAvailable(
       pickup,
-    )) {
+      pickup.add(const Duration(minutes: 1)),
+    );
+
+    if (!pickupMomentAvailable) {
       setState(() {
         _errorMessage =
-            'This pickup time is already booked for this car.';
+            'This pickup time is already unavailable for this car.';
       });
 
       return;
@@ -1572,17 +1318,20 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
       return;
     }
 
-    if (pickup != null &&
-        !_isAvailableForRange(
-          pickup,
-          returnDateTime,
-        )) {
-      setState(() {
-        _errorMessage =
-            'This car is already booked during the selected time.';
-      });
+    if (pickup != null) {
+      final available = await _isRangeAvailable(
+        pickup,
+        returnDateTime,
+      );
 
-      return;
+      if (!available) {
+        setState(() {
+          _errorMessage =
+              'This car is already unavailable during the selected time.';
+        });
+
+        return;
+      }
     }
 
     setState(() {
@@ -1596,153 +1345,16 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
   // ============================================================
 
   Future<bool> _finalAvailabilityCheck() async {
-    final pickup =
-        _pickupDateTime;
+    final pickup = _pickupDateTime;
+    final returnDateTime = _returnDateTime;
 
-    final returnDateTime =
-        _returnDateTime;
-
-    if (pickup == null ||
-        returnDateTime == null) {
+    if (pickup == null || returnDateTime == null) {
       return false;
     }
 
-    try {
-      /*
-       * 1. Check the actual car.
-       */
-      final carDoc = await _firestore
-          .collection('tenants')
-          .doc(_tenantId)
-          .collection('cars')
-          .doc(widget.car.id)
-          .get();
-
-      if (!carDoc.exists ||
-          carDoc.data() == null) {
-        return false;
-      }
-
-      final carData =
-          carDoc.data()!;
-
-      final isActive =
-          carData['isActive'] != false;
-
-      final isAvailable =
-          carData['isAvailable'] != false;
-
-      final status =
-          carData['status']
-                  ?.toString()
-                  .toLowerCase() ??
-              'active';
-
-      if (!isActive ||
-          !isAvailable ||
-          status != 'active') {
-        return false;
-      }
-
-      /*
-       * 2. Re-read blocking bookings.
-       *
-       * This is the final check immediately
-       * before proceeding.
-       */
-      final bookingSnapshot =
-          await _bookings
-              .where(
-                'carId',
-                isEqualTo: widget.car.id,
-              )
-              .where(
-                'status',
-                whereIn:
-                    _blockingStatuses
-                        .toList(),
-              )
-              .get();
-
-      for (final document
-          in bookingSnapshot.docs) {
-        final data =
-            document.data();
-
-        final existingPickup =
-            _readDateTime(
-          data['pickupDateTime'],
-        );
-
-        final existingReturn =
-            _readDateTime(
-          data['returnDateTime'],
-        );
-
-        if (existingPickup == null ||
-            existingReturn == null) {
-          continue;
-        }
-
-        if (_overlaps(
-          pickup,
-          returnDateTime,
-          existingPickup,
-          existingReturn,
-        )) {
-          return false;
-        }
-      }
-
-      /*
-       * 3. Re-read active vehicle blocks.
-       */
-      final blockSnapshot =
-          await _vehicleBlocks
-              .where(
-                'carId',
-                isEqualTo: widget.car.id,
-              )
-              .where(
-                'status',
-                isEqualTo: 'active',
-              )
-              .get();
-
-      for (final document
-          in blockSnapshot.docs) {
-        final data =
-            document.data();
-
-        final start =
-            _readDateTime(
-          data['startDateTime'],
-        );
-
-        final end =
-            _readDateTime(
-          data['endDateTime'],
-        );
-
-        if (start == null ||
-            end == null) {
-          continue;
-        }
-
-        if (_overlaps(
-          pickup,
-          returnDateTime,
-          start,
-          end,
-        )) {
-          return false;
-        }
-      }
-
-      return true;
-    } catch (_) {
-      return false;
-    }
+    // One authoritative final check. The shared service reloads the car,
+    // bookings and vehicle blocks for the COMPLETE requested period.
+    return _isRangeAvailable(pickup, returnDateTime);
   }
 
   // ============================================================
@@ -1807,25 +1419,14 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
       return;
     }
 
-    if (!_isAvailableForRange(
-      pickup,
-      returnDateTime,
-    )) {
-      setState(() {
-        _errorMessage =
-            'This car is already booked during the selected time.';
-      });
-
-      return;
-    }
-
+    // Final authoritative check. This uses the complete pickup -> return
+    // range, so rentals spanning multiple months are handled correctly.
     setState(() {
       _checkingAvailability = true;
       _errorMessage = null;
     });
 
-    final available =
-        await _finalAvailabilityCheck();
+    final available = await _finalAvailabilityCheck();
 
     if (!mounted) {
       return;
@@ -2822,17 +2423,12 @@ class _CalendarDay extends StatelessWidget {
 }
 
 // ============================================================
-// BLOCKED INTERVAL
+// AVAILABILITY INTERVAL
 // ============================================================
 
-class _BlockedInterval {
-  final String id;
-  final DateTime pickup;
-  final DateTime returnDateTime;
+class _AvailabilityInterval {
+  final DateTime start;
+  final DateTime end;
 
-  const _BlockedInterval({
-    required this.id,
-    required this.pickup,
-    required this.returnDateTime,
-  });
-}       
+  const _AvailabilityInterval(this.start, this.end);
+}

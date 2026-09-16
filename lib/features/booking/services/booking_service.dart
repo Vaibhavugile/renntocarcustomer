@@ -1,7 +1,11 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
 import '../models/booking.dart';
+import '../../cars/models/car.dart';
+import '../../admin/availability/services/admin_availability_service.dart';
 
 /// Firebase booking data layer.
 ///
@@ -12,12 +16,14 @@ import '../models/booking.dart';
 /// - Availability checks consider vehicle status, blocks and blocking bookings.
 ///
 /// NOTE:
-/// The Flutter client check is an important safety layer, but final production
-/// double-booking prevention should also be enforced by the Node.js/MySQL
-/// backend with a server-side transaction/locking strategy.
+/// This service is Firebase-only. Availability is checked again immediately
+/// before a booking is written. Firestore Security Rules must independently
+/// enforce tenant/admin/customer authorization.
 class BookingService {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final FirebaseAuth _auth = FirebaseAuth.instance;
+  final AdminAvailabilityService _availabilityService =
+      AdminAvailabilityService.instance;
 
   CollectionReference<Map<String, dynamic>> _bookings(
     String tenantId,
@@ -43,13 +49,13 @@ class BookingService {
           .doc(tenantId)
           .collection('branches');
 
-  CollectionReference<Map<String, dynamic>> _blocks(
+  CollectionReference<Map<String, dynamic>> _customers(
     String tenantId,
   ) =>
       _firestore
           .collection('tenants')
           .doc(tenantId)
-          .collection('vehicleBlocks');
+          .collection('customers');
 
   User _requireUser() {
     final user = _auth.currentUser;
@@ -83,6 +89,11 @@ class BookingService {
   // AVAILABILITY
   // ============================================================
 
+  /// Uses the same availability engine as the Admin calendar and
+  /// Customer Date/Time selection.
+  ///
+  /// This keeps vehicle status, active blocks, booking status handling,
+  /// expired pending bookings and time-overlap rules consistent everywhere.
   Future<bool> isCarAvailable({
     required String tenantId,
     required String carId,
@@ -92,99 +103,36 @@ class BookingService {
   }) async {
     _validateDateRange(pickupDateTime, returnDateTime);
 
-    final carDoc = await _cars(tenantId).doc(carId).get();
+    final snapshot = await _availabilityService.getAvailabilityForRange(
+      rangeStart: pickupDateTime,
+      rangeEnd: returnDateTime,
+      tenantId: tenantId,
+    );
 
-    if (!carDoc.exists || carDoc.data() == null) {
+    Car? car;
+    for (final item in snapshot.cars) {
+      if (item.id == carId) {
+        car = item;
+        break;
+      }
+    }
+
+    if (car == null) {
       return false;
     }
 
-    final car = carDoc.data()!;
+    final bookings = snapshot.bookings.where((booking) {
+      if (excludeBookingId == null) return true;
+      return booking.id != excludeBookingId;
+    }).toList();
 
-    final isActive = car['isActive'] != false;
-    final isAvailable = car['isAvailable'] != false;
-
-    final status =
-        car['status']?.toString().toLowerCase() ?? 'active';
-
-    if (!isActive || !isAvailable || status != 'active') {
-      return false;
-    }
-
-    // Scheduled maintenance / manual blocks.
-    final blocks = await _blocks(tenantId)
-        .where('carId', isEqualTo: carId)
-        .where('status', isEqualTo: 'active')
-        .get();
-
-    for (final doc in blocks.docs) {
-      final data = doc.data();
-
-      final start = _dateTime(data['startDateTime']);
-      final end = _dateTime(data['endDateTime']);
-
-      if (start == null || end == null) continue;
-
-      if (_timesOverlap(
-        pickupDateTime,
-        returnDateTime,
-        start,
-        end,
-      )) {
-        return false;
-      }
-    }
-
-    // Existing bookings for this vehicle.
-    final existing = await _bookings(tenantId)
-        .where('carId', isEqualTo: carId)
-        .get();
-
-    final now = DateTime.now();
-
-    for (final doc in existing.docs) {
-      final booking = Booking.fromMap(
-        doc.id,
-        doc.data(),
-      );
-
-      if (excludeBookingId != null &&
-          booking.bookingId == excludeBookingId) {
-        continue;
-      }
-
-      if (!booking.isBlockingAvailability) {
-        continue;
-      }
-
-      // Expired pending bookings no longer hold the vehicle.
-      if (booking.status == BookingStatus.pending) {
-        final expiry = booking.expiresAt;
-        if (expiry != null && !expiry.isAfter(now)) {
-          continue;
-        }
-      }
-
-      if (_timesOverlap(
-        pickupDateTime,
-        returnDateTime,
-        booking.pickupDateTime,
-        booking.returnDateTime,
-      )) {
-        return false;
-      }
-    }
-
-    return true;
-  }
-
-  bool _timesOverlap(
-    DateTime requestedStart,
-    DateTime requestedEnd,
-    DateTime existingStart,
-    DateTime existingEnd,
-  ) {
-    return existingStart.isBefore(requestedEnd) &&
-        existingEnd.isAfter(requestedStart);
+    return _availabilityService.isCarAvailableForRange(
+      car: car,
+      start: pickupDateTime,
+      end: returnDateTime,
+      bookings: bookings,
+      blocks: snapshot.blocks,
+    );
   }
 
   void _validateDateRange(
@@ -223,12 +171,44 @@ class BookingService {
       throw Exception('Pickup branch is required.');
     }
 
+    // Customer ID, Firebase UID and customer document ID are the same
+    // identifier in this application.
+    final customerDoc = await _customers(tenantId)
+        .doc(user.uid)
+        .get();
+
+    if (!customerDoc.exists || customerDoc.data() == null) {
+      throw Exception(
+        'Customer profile was not found. Please complete your profile first.',
+      );
+    }
+
+    final customerData = customerDoc.data()!;
+
+    if (customerData['tenantId']?.toString() != tenantId) {
+      throw Exception('Customer tenant mismatch.');
+    }
+
+    if (customerData['isActive'] == false) {
+      throw Exception('Customer account is inactive.');
+    }
+
+    // If firebaseUid is stored, it must match the document ID/auth UID.
+    final storedFirebaseUid =
+        customerData['firebaseUid']?.toString().trim() ?? '';
+
+    if (storedFirebaseUid.isNotEmpty && storedFirebaseUid != user.uid) {
+      throw Exception('Customer Firebase identity mismatch.');
+    }
+
     // Enrich the booking with immutable snapshots before saving.
     final enriched = await _buildHistoricalSnapshot(
       tenantId: tenantId,
       booking: booking,
+      customerId: user.uid,
     );
 
+    // Final authoritative availability check immediately before write.
     final available = await isCarAvailable(
       tenantId: tenantId,
       carId: enriched.carId,
@@ -243,12 +223,21 @@ class BookingService {
     }
 
     final reference = _bookings(tenantId).doc();
-
     final data = enriched.toMap();
 
     data['bookingId'] = reference.id;
     data['tenantId'] = tenantId;
+
+    // customerId == Firestore customer document ID == Firebase Auth UID.
     data['customerId'] = user.uid;
+    data['customerFirebaseUid'] = user.uid;
+    data['firebaseUid'] = user.uid;
+
+    data['createdBy'] = user.uid;
+    data['createdByRole'] = 'customer';
+    data['bookingSource'] = 'customer';
+    data['bookingChannel'] = 'app';
+
     data['createdAt'] = FieldValue.serverTimestamp();
     data['updatedAt'] = FieldValue.serverTimestamp();
 
@@ -272,6 +261,336 @@ class BookingService {
     );
   }
 
+  // ============================================================
+  // ADMIN AUTHORIZATION
+  // ============================================================
+
+  Future<Map<String, dynamic>> _requireTenantAdmin({
+    required String tenantId,
+  }) async {
+    final user = _requireUser();
+
+    final adminDoc = await _firestore
+        .collection('tenants')
+        .doc(tenantId)
+        .collection('admins')
+        .doc(user.uid)
+        .get();
+
+    if (!adminDoc.exists || adminDoc.data() == null) {
+      throw Exception('Admin access is required.');
+    }
+
+    final data = adminDoc.data()!;
+
+    if (data['tenantId']?.toString() != tenantId) {
+      throw Exception('Admin tenant mismatch.');
+    }
+
+    if (data['isActive'] != true) {
+      throw Exception('Admin account is inactive.');
+    }
+
+    return data;
+  }
+
+  Future<Booking> createBookingForAdmin({
+    required String tenantId,
+    required Booking booking,
+  }) async {
+    final adminUser = _requireUser();
+
+    await _requireTenantAdmin(
+      tenantId: tenantId,
+    );
+
+    _validateTenant(booking, tenantId);
+    _validateDateRange(
+      booking.pickupDateTime,
+      booking.returnDateTime,
+    );
+
+    if (booking.carId.trim().isEmpty) {
+      throw Exception('Car is required.');
+    }
+
+    if (booking.pickupBranchId.trim().isEmpty) {
+      throw Exception('Pickup branch is required.');
+    }
+
+    if (booking.customerId.trim().isEmpty) {
+      throw Exception('Customer is required.');
+    }
+
+    // customerId is intentionally the same value as:
+    // 1. Firestore customers/{customerId} document ID
+    // 2. customer.customerId field
+    // 3. customer.firebaseUid field
+    // 4. Firebase Authentication UID
+    final customerId = booking.customerId.trim();
+
+    final customerDoc = await _customers(tenantId)
+        .doc(customerId)
+        .get();
+
+    if (!customerDoc.exists || customerDoc.data() == null) {
+      throw Exception('Selected customer was not found.');
+    }
+
+    // The selected customer document ID must be the customer ID.
+    if (customerDoc.id != customerId) {
+      throw Exception('Customer identity mismatch.');
+    }
+
+    final customerData = customerDoc.data()!;
+
+    if (customerData['tenantId']?.toString() != tenantId) {
+      throw Exception('Customer tenant mismatch.');
+    }
+
+    if (customerData['isActive'] == false) {
+      throw Exception('Selected customer is inactive.');
+    }
+
+    final storedCustomerId =
+        customerData['customerId']?.toString().trim() ?? '';
+    final linkedFirebaseUid =
+        customerData['firebaseUid']?.toString().trim() ?? '';
+
+    if (storedCustomerId.isNotEmpty && storedCustomerId != customerId) {
+      throw Exception('Customer ID field does not match document ID.');
+    }
+
+    if (linkedFirebaseUid.isNotEmpty &&
+        linkedFirebaseUid != customerId) {
+      throw Exception(
+        'Customer Firebase UID must match the customer ID.',
+      );
+    }
+
+    // Because customerId == Firebase UID in this architecture, the admin
+    // booking always belongs to the selected customer's Firebase account.
+    if (linkedFirebaseUid.isEmpty) {
+      throw Exception(
+        'Selected customer does not have a Firebase account yet.',
+      );
+    }
+
+    final enriched = await _buildHistoricalSnapshot(
+      tenantId: tenantId,
+      booking: booking,
+      customerId: customerId,
+      useAuthenticatedUserAsCustomer: false,
+    );
+
+    // Final authoritative availability check immediately before write.
+    final available = await isCarAvailable(
+      tenantId: tenantId,
+      carId: enriched.carId,
+      pickupDateTime: enriched.pickupDateTime,
+      returnDateTime: enriched.returnDateTime,
+    );
+
+    if (!available) {
+      throw Exception(
+        'This car is no longer available for the selected dates.',
+      );
+    }
+
+    final reference = _bookings(tenantId).doc();
+    final data = enriched.toMap();
+
+    data['bookingId'] = reference.id;
+    data['tenantId'] = tenantId;
+
+    // IMPORTANT:
+    // Admin-created booking uses the SELECTED CUSTOMER'S Firebase UID.
+    data['customerId'] = customerId;
+    data['customerFirebaseUid'] = customerId;
+    data['firebaseUid'] = customerId;
+
+    // Admin audit information.
+    data['createdBy'] = adminUser.uid;
+    data['createdByRole'] = 'admin';
+    data['bookingSource'] = 'admin';
+    data['bookingChannel'] = 'walk_in';
+
+    data['createdAt'] = FieldValue.serverTimestamp();
+    data['updatedAt'] = FieldValue.serverTimestamp();
+
+    data['carId'] = enriched.carId;
+    data['branchId'] = enriched.branchId;
+    data['pickupBranchId'] = enriched.pickupBranchId;
+    data['returnBranchId'] = enriched.returnBranchId;
+
+    await reference.set(data);
+
+    final saved = await reference.get();
+
+    if (!saved.exists || saved.data() == null) {
+      throw Exception('Unable to create booking.');
+    }
+
+    return Booking.fromMap(
+      saved.id,
+      saved.data()!,
+    );
+  }
+
+  // ============================================================
+  // ADMIN BOOKING READS
+  // ============================================================
+
+  Future<Booking?> getBookingForAdmin({
+    required String tenantId,
+    required String bookingId,
+  }) async {
+    await _requireTenantAdmin(
+      tenantId: tenantId,
+    );
+
+    final doc = await _bookings(tenantId)
+        .doc(bookingId)
+        .get();
+
+    if (!doc.exists || doc.data() == null) {
+      return null;
+    }
+
+    final booking = Booking.fromMap(
+      doc.id,
+      doc.data()!,
+    );
+
+    _validateTenant(booking, tenantId);
+
+    return booking;
+  }
+
+  Future<List<Booking>> getAllBookingsForAdmin({
+    required String tenantId,
+    String? carId,
+    String? customerId,
+  }) async {
+    await _requireTenantAdmin(
+      tenantId: tenantId,
+    );
+
+    Query<Map<String, dynamic>> query =
+        _bookings(tenantId);
+
+    if (carId != null && carId.trim().isNotEmpty) {
+      query = query.where(
+        'carId',
+        isEqualTo: carId.trim(),
+      );
+    }
+
+    if (customerId != null &&
+        customerId.trim().isNotEmpty) {
+      query = query.where(
+        'customerId',
+        isEqualTo: customerId.trim(),
+      );
+    }
+
+    final snapshot = await query.get();
+
+    final bookings = snapshot.docs
+        .map(
+          (doc) => Booking.fromMap(
+            doc.id,
+            doc.data(),
+          ),
+        )
+        .where(
+          (booking) =>
+              booking.tenantId == tenantId,
+        )
+        .toList();
+
+    bookings.sort(
+      (a, b) => b.pickupDateTime.compareTo(
+        a.pickupDateTime,
+      ),
+    );
+
+    return bookings;
+  }
+
+  Future<void> updateBookingStatusForAdmin({
+    required String tenantId,
+    required String bookingId,
+    required BookingStatus status,
+  }) async {
+    await _requireTenantAdmin(
+      tenantId: tenantId,
+    );
+
+    final reference =
+        _bookings(tenantId).doc(bookingId);
+
+    final doc = await reference.get();
+
+    if (!doc.exists || doc.data() == null) {
+      throw Exception('Booking not found.');
+    }
+
+    final booking = Booking.fromMap(
+      doc.id,
+      doc.data()!,
+    );
+
+    _validateTenant(booking, tenantId);
+
+    await reference.update({
+      'status': _statusToString(status),
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  Future<void> cancelBookingForAdmin({
+    required String tenantId,
+    required String bookingId,
+    String reason = '',
+  }) async {
+    await _requireTenantAdmin(
+      tenantId: tenantId,
+    );
+
+    final reference =
+        _bookings(tenantId).doc(bookingId);
+
+    final doc = await reference.get();
+
+    if (!doc.exists || doc.data() == null) {
+      throw Exception('Booking not found.');
+    }
+
+    final booking = Booking.fromMap(
+      doc.id,
+      doc.data()!,
+    );
+
+    _validateTenant(booking, tenantId);
+
+    if (booking.status != BookingStatus.pending &&
+        booking.status != BookingStatus.confirmed &&
+        booking.status != BookingStatus.pickupPending) {
+      throw Exception(
+        'This booking cannot be cancelled.',
+      );
+    }
+
+    await reference.update({
+      'status': 'cancelled',
+      'cancellationReason': reason,
+      'cancelledBy': _auth.currentUser!.uid,
+      'cancelledByRole': 'admin',
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
   /// Copies current car/branch/customer information into the booking.
   ///
   /// This prevents historical bookings from changing when an admin edits
@@ -279,8 +598,12 @@ class BookingService {
   Future<Booking> _buildHistoricalSnapshot({
     required String tenantId,
     required Booking booking,
+    required String customerId,
+    bool useAuthenticatedUserAsCustomer = true,
   }) async {
-    final user = _requireUser();
+    final user = useAuthenticatedUserAsCustomer
+        ? _requireUser()
+        : null;
 
     BookingCarSnapshot? carSnapshot = booking.car;
     BookingBranchSnapshot? pickupBranch = booking.pickupBranch;
@@ -358,16 +681,16 @@ class BookingService {
       );
     }
 
-    // The customer snapshot should always represent the authenticated user.
+    // Customer snapshot.
+    //
+    // Customer ID is always the Firebase UID and the Firestore customer
+    // document ID in this application.
     var customerName = booking.customerName;
     var customerPhone = booking.customerPhone;
     var customerEmail = booking.customerEmail;
 
-    final customerDoc = await _firestore
-        .collection('tenants')
-        .doc(tenantId)
-        .collection('customers')
-        .doc(user.uid)
+    final customerDoc = await _customers(tenantId)
+        .doc(customerId)
         .get();
 
     if (customerDoc.exists && customerDoc.data() != null) {
@@ -380,30 +703,34 @@ class BookingService {
 
       if (customerPhone.trim().isEmpty) {
         customerPhone =
-            customerData['phone']?.toString() ??
-                user.phoneNumber ??
-                '';
+            customerData['phone']?.toString() ?? '';
       }
 
       if (customerEmail.trim().isEmpty) {
         customerEmail =
-            customerData['email']?.toString() ??
-                user.email ??
-                '';
+            customerData['email']?.toString() ?? '';
       }
     }
 
-    if (customerPhone.trim().isEmpty) {
-      customerPhone = user.phoneNumber ?? '';
-    }
+    if (useAuthenticatedUserAsCustomer) {
+      final user = _requireUser();
 
-    if (customerEmail.trim().isEmpty) {
-      customerEmail = user.email ?? '';
+      if (user.uid != customerId) {
+        throw Exception('Customer identity mismatch.');
+      }
+
+      if (customerPhone.trim().isEmpty) {
+        customerPhone = user.phoneNumber ?? '';
+      }
+
+      if (customerEmail.trim().isEmpty) {
+        customerEmail = user.email ?? '';
+      }
     }
 
     return booking.copyWith(
       tenantId: tenantId,
-      customerId: user.uid,
+      customerId: customerId,
       branchId: booking.branchId.isNotEmpty
           ? booking.branchId
           : booking.pickupBranchId,
@@ -443,7 +770,12 @@ class BookingService {
     );
 
     _validateTenant(booking, tenantId);
-    _validateCustomer(booking, user.uid);
+
+    final ownsBooking = booking.customerId == user.uid;
+
+    if (!ownsBooking) {
+      throw Exception('Customer identity mismatch.');
+    }
 
     return booking;
   }
@@ -473,9 +805,10 @@ class BookingService {
       );
 
       _validateTenant(booking, tenantId);
-      _validateCustomer(booking, user.uid);
 
-      bookings.add(booking);
+      if (booking.customerId == user.uid) {
+        bookings.add(booking);
+      }
     }
 
     bookings.sort(
@@ -498,34 +831,29 @@ class BookingService {
           isEqualTo: user.uid,
         )
         .snapshots()
-        .map(
-      (snapshot) {
-        final bookings = <Booking>[];
+        .map((snapshot) {
+      final bookings = snapshot.docs
+          .map(
+            (doc) => Booking.fromMap(
+              doc.id,
+              doc.data(),
+            ),
+          )
+          .where(
+            (booking) =>
+                booking.tenantId == tenantId &&
+                booking.customerId == user.uid,
+          )
+          .toList();
 
-        for (final doc in snapshot.docs) {
-          final booking = Booking.fromMap(
-            doc.id,
-            doc.data(),
-          );
+      bookings.sort(
+        (a, b) => b.pickupDateTime.compareTo(
+          a.pickupDateTime,
+        ),
+      );
 
-          _validateTenant(booking, tenantId);
-          _validateCustomer(
-            booking,
-            user.uid,
-          );
-
-          bookings.add(booking);
-        }
-
-        bookings.sort(
-          (a, b) => b.pickupDateTime.compareTo(
-            a.pickupDateTime,
-          ),
-        );
-
-        return bookings;
-      },
-    );
+      return bookings;
+    });
   }
 
   // ============================================================
@@ -536,8 +864,6 @@ class BookingService {
     required String tenantId,
     required DateTime month,
   }) async {
-    final user = _requireUser();
-
     final start = DateTime(
       month.year,
       month.month,
@@ -550,30 +876,17 @@ class BookingService {
       1,
     );
 
-    final snapshot = await _bookings(tenantId)
+    final bookings = await getCustomerBookings(
+      tenantId: tenantId,
+    );
+
+    final result = bookings
         .where(
-          'customerId',
-          isEqualTo: user.uid,
+          (booking) =>
+              booking.returnDateTime.isAfter(start) &&
+              booking.pickupDateTime.isBefore(end),
         )
-        .get();
-
-    final result = <Booking>[];
-
-    for (final doc in snapshot.docs) {
-      final booking = Booking.fromMap(
-        doc.id,
-        doc.data(),
-      );
-
-      _validateTenant(booking, tenantId);
-      _validateCustomer(booking, user.uid);
-
-      // Include bookings that overlap the month.
-      if (booking.returnDateTime.isAfter(start) &&
-          booking.pickupDateTime.isBefore(end)) {
-        result.add(booking);
-      }
-    }
+        .toList();
 
     result.sort(
       (a, b) => a.pickupDateTime.compareTo(
@@ -868,6 +1181,130 @@ class BookingService {
   }
 
   // ============================================================
+  // ADMIN PICKUP / RETURN OPERATIONS
+  // ============================================================
+
+  Future<void> markPickupStartedForAdmin({
+    required String tenantId,
+    required String bookingId,
+  }) async {
+    await _requireTenantAdmin(
+      tenantId: tenantId,
+    );
+
+    final reference =
+        _bookings(tenantId).doc(bookingId);
+
+    final doc = await reference.get();
+
+    if (!doc.exists || doc.data() == null) {
+      throw Exception('Booking not found.');
+    }
+
+    final booking = Booking.fromMap(
+      doc.id,
+      doc.data()!,
+    );
+
+    _validateTenant(booking, tenantId);
+
+    if (booking.status != BookingStatus.confirmed &&
+        booking.status != BookingStatus.pickupPending) {
+      throw Exception(
+        'This booking is not ready for pickup.',
+      );
+    }
+
+    await reference.update({
+      'status': 'active',
+      'actualPickupDateTime':
+          FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+      'lastActionBy': _auth.currentUser!.uid,
+      'lastActionByRole': 'admin',
+    });
+  }
+
+  Future<void> markReturnStartedForAdmin({
+    required String tenantId,
+    required String bookingId,
+  }) async {
+    await _requireTenantAdmin(
+      tenantId: tenantId,
+    );
+
+    final reference =
+        _bookings(tenantId).doc(bookingId);
+
+    final doc = await reference.get();
+
+    if (!doc.exists || doc.data() == null) {
+      throw Exception('Booking not found.');
+    }
+
+    final booking = Booking.fromMap(
+      doc.id,
+      doc.data()!,
+    );
+
+    _validateTenant(booking, tenantId);
+
+    if (booking.status != BookingStatus.active) {
+      throw Exception(
+        'This booking is not active.',
+      );
+    }
+
+    await reference.update({
+      'status': 'return_pending',
+      'updatedAt': FieldValue.serverTimestamp(),
+      'lastActionBy': _auth.currentUser!.uid,
+      'lastActionByRole': 'admin',
+    });
+  }
+
+  Future<void> markReturnCompletedForAdmin({
+    required String tenantId,
+    required String bookingId,
+  }) async {
+    await _requireTenantAdmin(
+      tenantId: tenantId,
+    );
+
+    final reference =
+        _bookings(tenantId).doc(bookingId);
+
+    final doc = await reference.get();
+
+    if (!doc.exists || doc.data() == null) {
+      throw Exception('Booking not found.');
+    }
+
+    final booking = Booking.fromMap(
+      doc.id,
+      doc.data()!,
+    );
+
+    _validateTenant(booking, tenantId);
+
+    if (booking.status != BookingStatus.returnPending &&
+        booking.status != BookingStatus.active) {
+      throw Exception(
+        'This booking is not ready for return completion.',
+      );
+    }
+
+    await reference.update({
+      'status': 'completed',
+      'actualReturnDateTime':
+          FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+      'lastActionBy': _auth.currentUser!.uid,
+      'lastActionByRole': 'admin',
+    });
+  }
+
+  // ============================================================
   // HELPERS
   // ============================================================
 
@@ -892,24 +1329,6 @@ class BookingService {
       case BookingStatus.noShow:
         return 'no_show';
     }
-  }
-
-  DateTime? _dateTime(dynamic value) {
-    if (value == null) return null;
-
-    if (value is Timestamp) {
-      return value.toDate();
-    }
-
-    if (value is DateTime) {
-      return value;
-    }
-
-    if (value is String) {
-      return DateTime.tryParse(value);
-    }
-
-    return null;
   }
 
   int _toInt(dynamic value) {

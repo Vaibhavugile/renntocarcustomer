@@ -1,7 +1,33 @@
 import 'km_pricing_package.dart';
 
 class PricingProfile {
+  // ===========================================================================
+  // IDENTITY
+  // ===========================================================================
+
+  /// Firestore pricing profile document ID.
   final String id;
+
+  /// Tenant that owns this pricing profile.
+  final String tenantId;
+
+  /// Vehicle this pricing profile belongs to.
+  ///
+  /// Example:
+  /// car_001
+  final String vehicleId;
+
+  /// Human-readable pricing profile name.
+  ///
+  /// Example:
+  /// Hyundai Creta Pricing
+  final String name;
+
+  /// Currency used by this pricing profile.
+  ///
+  /// Example:
+  /// INR
+  final String currency;
 
   // ===========================================================================
   // BASIC PRICING
@@ -14,9 +40,13 @@ class PricingProfile {
   //
 
   final double hourlyRate;
+
   final double dailyRate;
+
   final double weekendRate;
+
   final double weeklyRate;
+
   final double monthlyRate;
 
   // ===========================================================================
@@ -47,28 +77,28 @@ class PricingProfile {
   final double extraKmRate;
 
   // ===========================================================================
-  // NEW KM PACKAGE SYSTEM
+  // KM PACKAGE SYSTEM
   // ===========================================================================
   //
-  // Every package has its own:
+  // Every package can have its own:
   //
-  // 150 KM
-  //   Hourly
-  //   Daily
-  //   Weekend
-  //   Weekly
-  //   Monthly
-  //   Extra KM
+  // - Included KM
+  // - Hourly rate
+  // - Daily rate
+  // - Weekend rate
+  // - Weekly rate
+  // - Monthly rate
+  // - Extra KM rate
   //
-  // 250 KM
-  //   Hourly
-  //   Daily
-  //   Weekend
-  //   Weekly
-  //   Monthly
-  //   Extra KM
+  // Example:
   //
-  // etc.
+  // 150 KM package
+  // 250 KM package
+  // 500 KM package
+  // 750 KM package
+  // 1000 KM package
+  // 1500 KM package
+  // Unlimited package
   //
 
   final List<KmPricingPackage> kmPackages;
@@ -79,8 +109,8 @@ class PricingProfile {
   //
   // Previous unlimited system is retained.
   //
-  // For the new package system, unlimited can also simply be represented
-  // as a KmPricingPackage with unlimitedKm = true.
+  // For the package system, unlimited can also be represented
+  // using a KmPricingPackage with unlimitedKm == true.
   //
 
   final bool unlimitedKmEnabled;
@@ -91,18 +121,23 @@ class PricingProfile {
   // TIME SETTINGS
   // ===========================================================================
 
+  /// Grace period before late/extension charges begin.
   final int gracePeriodMinutes;
 
+  /// Charge for an additional rental hour.
   final double extraHourRate;
 
+  /// Charge for an additional rental day.
   final double extraDayRate;
 
+  /// Charge applied for late return.
   final double lateReturnRate;
 
   // ===========================================================================
   // DEPOSIT
   // ===========================================================================
 
+  /// Security deposit required for this vehicle.
   final double securityDeposit;
 
   // ===========================================================================
@@ -118,6 +153,12 @@ class PricingProfile {
   const PricingProfile({
     required this.id,
 
+    // Identity
+    required this.tenantId,
+    required this.vehicleId,
+    required this.name,
+    required this.currency,
+
     // Basic pricing
     required this.hourlyRate,
     required this.dailyRate,
@@ -132,7 +173,7 @@ class PricingProfile {
     required this.perKmRate,
     required this.extraKmRate,
 
-    // NEW package system
+    // Package system
     required this.kmPackages,
 
     // Unlimited
@@ -203,6 +244,22 @@ class PricingProfile {
       id: id,
 
       // -----------------------------------------------------------------------
+      // IDENTITY
+      // -----------------------------------------------------------------------
+
+      tenantId:
+          map['tenantId']?.toString() ?? '',
+
+      vehicleId:
+          map['vehicleId']?.toString() ?? '',
+
+      name:
+          map['name']?.toString() ?? '',
+
+      currency:
+          map['currency']?.toString() ?? 'INR',
+
+      // -----------------------------------------------------------------------
       // BASIC PRICING
       // -----------------------------------------------------------------------
 
@@ -251,7 +308,7 @@ class PricingProfile {
       ),
 
       // -----------------------------------------------------------------------
-      // NEW KM PACKAGES
+      // KM PACKAGES
       // -----------------------------------------------------------------------
 
       kmPackages: _toPackageList(
@@ -301,7 +358,8 @@ class PricingProfile {
       // STATUS
       // -----------------------------------------------------------------------
 
-      isActive: map['isActive'] ?? false,
+      isActive:
+          map['isActive'] ?? false,
     );
   }
 
@@ -311,6 +369,18 @@ class PricingProfile {
 
   Map<String, dynamic> toMap() {
     return {
+      // -----------------------------------------------------------------------
+      // IDENTITY
+      // -----------------------------------------------------------------------
+
+      'tenantId': tenantId,
+
+      'vehicleId': vehicleId,
+
+      'name': name,
+
+      'currency': currency,
+
       // -----------------------------------------------------------------------
       // BASIC PRICING
       // -----------------------------------------------------------------------
@@ -340,7 +410,7 @@ class PricingProfile {
       'extraKmRate': extraKmRate,
 
       // -----------------------------------------------------------------------
-      // NEW KM PACKAGES
+      // KM PACKAGES
       // -----------------------------------------------------------------------
 
       'kmPackages': kmPackages
@@ -353,38 +423,157 @@ class PricingProfile {
       // UNLIMITED KM
       // -----------------------------------------------------------------------
 
-      'unlimitedKmEnabled': unlimitedKmEnabled,
+      'unlimitedKmEnabled':
+          unlimitedKmEnabled,
 
-      'unlimitedKmSurcharge': unlimitedKmSurcharge,
+      'unlimitedKmSurcharge':
+          unlimitedKmSurcharge,
 
       // -----------------------------------------------------------------------
       // TIME SETTINGS
       // -----------------------------------------------------------------------
 
-      'gracePeriodMinutes': gracePeriodMinutes,
+      'gracePeriodMinutes':
+          gracePeriodMinutes,
 
-      'extraHourRate': extraHourRate,
+      'extraHourRate':
+          extraHourRate,
 
-      'extraDayRate': extraDayRate,
+      'extraDayRate':
+          extraDayRate,
 
-      'lateReturnRate': lateReturnRate,
+      'lateReturnRate':
+          lateReturnRate,
 
       // -----------------------------------------------------------------------
       // DEPOSIT
       // -----------------------------------------------------------------------
 
-      'securityDeposit': securityDeposit,
+      'securityDeposit':
+          securityDeposit,
 
       // -----------------------------------------------------------------------
       // STATUS
       // -----------------------------------------------------------------------
 
-      'isActive': isActive,
+      'isActive':
+          isActive,
     };
   }
 
   // ===========================================================================
-  // HELPERS
+  // COPY WITH
+  // ===========================================================================
+
+  PricingProfile copyWith({
+    String? id,
+    String? tenantId,
+    String? vehicleId,
+    String? name,
+    String? currency,
+    double? hourlyRate,
+    double? dailyRate,
+    double? weekendRate,
+    double? weeklyRate,
+    double? monthlyRate,
+    KmPricingMode? kmPricingMode,
+    int? includedKmPerDay,
+    List<int>? kmOptions,
+    double? perKmRate,
+    double? extraKmRate,
+    List<KmPricingPackage>? kmPackages,
+    bool? unlimitedKmEnabled,
+    double? unlimitedKmSurcharge,
+    int? gracePeriodMinutes,
+    double? extraHourRate,
+    double? extraDayRate,
+    double? lateReturnRate,
+    double? securityDeposit,
+    bool? isActive,
+  }) {
+    return PricingProfile(
+      id: id ?? this.id,
+
+      tenantId:
+          tenantId ?? this.tenantId,
+
+      vehicleId:
+          vehicleId ?? this.vehicleId,
+
+      name:
+          name ?? this.name,
+
+      currency:
+          currency ?? this.currency,
+
+      hourlyRate:
+          hourlyRate ?? this.hourlyRate,
+
+      dailyRate:
+          dailyRate ?? this.dailyRate,
+
+      weekendRate:
+          weekendRate ?? this.weekendRate,
+
+      weeklyRate:
+          weeklyRate ?? this.weeklyRate,
+
+      monthlyRate:
+          monthlyRate ?? this.monthlyRate,
+
+      kmPricingMode:
+          kmPricingMode ?? this.kmPricingMode,
+
+      includedKmPerDay:
+          includedKmPerDay ?? this.includedKmPerDay,
+
+      kmOptions:
+          kmOptions ?? this.kmOptions,
+
+      perKmRate:
+          perKmRate ?? this.perKmRate,
+
+      extraKmRate:
+          extraKmRate ?? this.extraKmRate,
+
+      kmPackages:
+          kmPackages ?? this.kmPackages,
+
+      unlimitedKmEnabled:
+          unlimitedKmEnabled ??
+          this.unlimitedKmEnabled,
+
+      unlimitedKmSurcharge:
+          unlimitedKmSurcharge ??
+          this.unlimitedKmSurcharge,
+
+      gracePeriodMinutes:
+          gracePeriodMinutes ??
+          this.gracePeriodMinutes,
+
+      extraHourRate:
+          extraHourRate ??
+          this.extraHourRate,
+
+      extraDayRate:
+          extraDayRate ??
+          this.extraDayRate,
+
+      lateReturnRate:
+          lateReturnRate ??
+          this.lateReturnRate,
+
+      securityDeposit:
+          securityDeposit ??
+          this.securityDeposit,
+
+      isActive:
+          isActive ?? this.isActive,
+    );
+  }
+
+  // ===========================================================================
+  // CONVERSION HELPERS
   // ===========================================================================
 
   static double _toDouble(
@@ -416,7 +605,7 @@ class PricingProfile {
   static List<int> _toIntList(
     dynamic value,
   ) {
-    if (value is List) {
+    if (value is Iterable) {
       return value
           .map(
             (item) => _toInt(item),
@@ -433,17 +622,19 @@ class PricingProfile {
   static List<KmPricingPackage> _toPackageList(
     dynamic value,
   ) {
-    if (value is! List) {
+    if (value is! Iterable) {
       return [];
     }
 
-    final packages = <KmPricingPackage>[];
+    final packages =
+        <KmPricingPackage>[];
 
-    for (int index = 0; index < value.length; index++) {
-      final item = value[index];
+    int index = 0;
 
+    for (final item in value) {
       if (item is Map) {
-        final map = Map<String, dynamic>.from(item);
+        final map =
+            Map<String, dynamic>.from(item);
 
         packages.add(
           KmPricingPackage.fromMap(
@@ -453,6 +644,8 @@ class PricingProfile {
           ),
         );
       }
+
+      index++;
     }
 
     return packages;
