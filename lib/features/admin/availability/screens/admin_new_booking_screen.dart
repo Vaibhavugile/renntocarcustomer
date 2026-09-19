@@ -19,6 +19,12 @@ import '../services/admin_availability_service.dart';
 import '../../../booking/services/booking_service.dart';
 import '../../customers/screens/admin_add_customer_screen.dart';
 
+enum AdminRentalType {
+  hourly,
+  daily,
+  weekend,
+}
+
 /// Complete admin-side rental booking flow.
 ///
 /// Flow:
@@ -56,16 +62,29 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
 
   String get _tenantId => AppConfig.tenant.tenantId;
 
+  AdminRentalType? _rentalType;
+
   DateTime _pickupDate = DateTime.now();
   DateTime _returnDate = DateTime.now().add(const Duration(days: 1));
   TimeOfDay _pickupTime = const TimeOfDay(hour: 10, minute: 0);
   TimeOfDay _returnTime = const TimeOfDay(hour: 10, minute: 0);
 
+  // Full active fleet is shown after rental type selection.
+  List<Car> _fleetCars = [];
   List<Car> _availableCars = [];
+  final Set<DateTime> _blockedFullDays = <DateTime>{};
+  bool _loadingCalendar = false;
   Car? _selectedCar;
   AdminAvailabilitySnapshot? _availabilitySnapshot;
 
+  // Month currently displayed by the premium availability calendar.
+  DateTime _calendarMonth = DateTime(DateTime.now().year, DateTime.now().month, 1);
+  // Direct in-calendar range selection. No second date-picker is opened.
+  DateTime? _calendarSelectionStart;
+  DateTime? _calendarSelectionEnd;
+
   List<Map<String, dynamic>> _branches = [];
+  List<Map<String, dynamic>> _allBranches = [];
   String? _selectedBranchId;
 
   List<Customer> _customers = [];
@@ -80,6 +99,21 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   String _paymentMethod = 'cash';
   double _paidAmount = 0;
   String _bookingNote = '';
+  String _depositMethod = 'cash';
+  double _depositAmount = 0;
+  String _depositAssetDetails = '';
+
+  // Booking-level admin pricing overrides. These do not modify the saved
+  // vehicle pricing profile.
+  double? _adminRentalPrice;
+  double? _adminExtraKmCharge;
+  double? _adminExtraTimeCharge;
+  double? _adminAddOnTotal;
+  double? _adminProtectionTotal;
+  double? _adminDiscountAmount;
+  double? _adminTaxAmount;
+  double? _adminTotal;
+  bool _adminTotalManuallyEdited = false;
 
   int _step = 1;
   bool _loading = false;
@@ -87,21 +121,107 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   bool _creatingBooking = false;
   String? _error;
 
-  DateTime get _pickupDateTime => DateTime(
+  DateTime get _pickupDateTime {
+    if (_rentalType == AdminRentalType.hourly) {
+      return DateTime(
         _pickupDate.year,
         _pickupDate.month,
         _pickupDate.day,
         _pickupTime.hour,
         _pickupTime.minute,
       );
+    }
 
-  DateTime get _returnDateTime => DateTime(
+    return DateTime(
+      _pickupDate.year,
+      _pickupDate.month,
+      _pickupDate.day,
+      0,
+      0,
+      0,
+    );
+  }
+
+  /// Daily/weekend bookings occupy the complete return date until 11:59:59.999 PM.
+  /// Hourly bookings use the exact selected return time.
+  DateTime get _returnDateTime {
+    if (_rentalType == AdminRentalType.hourly) {
+      return DateTime(
         _returnDate.year,
         _returnDate.month,
         _returnDate.day,
         _returnTime.hour,
         _returnTime.minute,
       );
+    }
+
+    return DateTime(
+      _returnDate.year,
+      _returnDate.month,
+      _returnDate.day,
+      23,
+      59,
+      59,
+      999,
+    );
+  }
+
+  // FIRST availability search happens before rental type is selected.
+  // At that point we treat the requested dates as whole calendar days so the
+  // admin can discover every vehicle that can serve the requested period.
+  DateTime get _initialAvailabilityStart => DateTime(
+        _pickupDate.year,
+        _pickupDate.month,
+        _pickupDate.day,
+      );
+
+  DateTime get _initialAvailabilityEnd => DateTime(
+        _returnDate.year,
+        _returnDate.month,
+        _returnDate.day,
+        23,
+        59,
+        59,
+        999,
+      );
+
+  String get _rentalTypeLabel {
+    switch (_rentalType) {
+      case AdminRentalType.hourly:
+        return 'Hourly';
+      case AdminRentalType.daily:
+        return 'Daily';
+      case AdminRentalType.weekend:
+        return 'Weekend';
+      case null:
+        return 'Select rental type';
+    }
+  }
+
+  bool get _isHourly => _rentalType == AdminRentalType.hourly;
+
+  bool get _isWeekend => _rentalType == AdminRentalType.weekend;
+
+  RentalType? get _pricingRentalType {
+    switch (_rentalType) {
+      case AdminRentalType.hourly:
+        return RentalType.hourly;
+      case AdminRentalType.daily:
+        return RentalType.daily;
+      case AdminRentalType.weekend:
+        return RentalType.weekend;
+      case null:
+        return null;
+    }
+  }
+
+  bool _isCarAssignedToTenant(Car car) {
+    return car.tenantId == _tenantId && car.isActive;
+  }
+
+
+  DateTime _dayOnly(DateTime value) =>
+      DateTime(value.year, value.month, value.day);
 
   Map<String, dynamic>? get _selectedBranch {
     if (_selectedBranchId == null) return null;
@@ -122,6 +242,19 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     print('🔥 Admin New Booking Screen loaded successfully');
     _loadBranches();
     _loadCustomers();
+    _loadFleetCars();
+  }
+
+  Future<void> _loadFleetCars() async {
+    try {
+      final cars = await _carService.getCars(tenantId: _tenantId);
+      if (!mounted) return;
+      setState(() => _fleetCars = cars);
+      print('🔥 FLEET CARS LOADED | count=${cars.length}');
+    } catch (e, stackTrace) {
+      print('❌ FLEET LOAD ERROR: $e');
+      print(stackTrace);
+    }
   }
 
   Future<void> _loadBranches() async {
@@ -134,17 +267,20 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
           .get();
 
       if (!mounted) return;
+      final loadedBranches = snapshot.docs.map((doc) {
+        final data = doc.data();
+        return <String, dynamic>{
+          'id': doc.id,
+          'name': data['name']?.toString() ?? 'Branch',
+          'city': data['city']?.toString() ?? '',
+          'address': data['address']?.toString() ?? '',
+          'phone': data['phone']?.toString() ?? '',
+        };
+      }).toList();
+
       setState(() {
-        _branches = snapshot.docs.map((doc) {
-          final data = doc.data();
-          return <String, dynamic>{
-            'id': doc.id,
-            'name': data['name']?.toString() ?? 'Branch',
-            'city': data['city']?.toString() ?? '',
-            'address': data['address']?.toString() ?? '',
-            'phone': data['phone']?.toString() ?? '',
-          };
-        }).toList();
+        _allBranches = loadedBranches;
+        _branches = List<Map<String, dynamic>>.from(loadedBranches);
       });
     } catch (_) {}
   }
@@ -184,39 +320,236 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     }).toList();
   }
 
-  Future<void> _selectPickupDate() async {
-    final selected = await showDatePicker(
+  /// Opens one calendar where the admin selects BOTH pickup and return dates.
+  /// This fixes the old single-day CalendarDatePicker behaviour.
+  Future<void> _selectRentalDateRange() async {
+    FocusScope.of(context).unfocus();
+
+    final today = _dayOnly(DateTime.now());
+    final maxDate = today.add(const Duration(days: 730));
+    var start = _pickupDate.isBefore(today) ? today : _dayOnly(_pickupDate);
+    var end = _returnDate.isAfter(start) ? _dayOnly(_returnDate) : start.add(const Duration(days: 1));
+
+    if (end.isAfter(maxDate)) {
+      end = maxDate;
+    }
+
+    final initialRange = DateTimeRange(start: start, end: end);
+
+    final selected = await showDateRangePicker(
       context: context,
-      initialDate: _pickupDate,
-      firstDate: DateTime.now(),
-      lastDate: DateTime.now().add(const Duration(days: 730)),
+      firstDate: today,
+      lastDate: maxDate,
+      initialDateRange: initialRange,
+      currentDate: start,
+      selectableDayPredicate: _isSelectableCalendarDay,
+      saveText: 'Apply dates',
+      helpText: _isHourly
+          ? 'Select pickup and return dates'
+          : _isWeekend
+              ? 'Select weekend pickup and return dates'
+              : 'Select daily rental period',
       builder: _pickerTheme,
     );
+
     if (selected == null) return;
-    setState(() {
-      _pickupDate = selected;
-      if (!_returnDate.isAfter(_pickupDate)) {
-        _returnDate = _pickupDate.add(const Duration(days: 1));
+
+    final pickup = _dayOnly(selected.start);
+    final returnDate = _dayOnly(selected.end);
+
+    if (!returnDate.isAfter(pickup)) {
+      _showError('Please select a return date after the pickup date.');
+      return;
+    }
+
+    if (_isWeekend) {
+      var cursor = pickup;
+      while (!cursor.isAfter(returnDate)) {
+        if (cursor.weekday != DateTime.saturday &&
+            cursor.weekday != DateTime.sunday) {
+          _showError('Weekend rental can only cover Saturday/Sunday dates.');
+          return;
+        }
+        cursor = cursor.add(const Duration(days: 1));
       }
-      _resetFromAvailability();
+    }
+
+    if (_selectedCar != null && _rangeContainsBlockedDay(pickup, returnDate)) {
+      _showError('The selected period contains a day when this vehicle is unavailable.');
+      return;
+    }
+
+    setState(() {
+      _pickupDate = pickup;
+      _returnDate = returnDate;
+      _resetAfterDateChange(keepVehicle: _selectedCar != null);
     });
+
+    if (_selectedCar != null) {
+      await _loadAvailabilityCalendar();
+    }
   }
 
-  Future<void> _selectReturnDate() async {
+  /// Kept as compatibility methods because existing date tiles may still call them.
+  /// Both now open the SAME range calendar instead of a one-day picker.
+  Future<void> _selectPickupDate() => _selectRentalDateRange();
+
+  Future<void> _selectReturnDate() => _selectRentalDateRange();
+
+  /// Allows the admin to edit pickup directly from the date tile below the
+  /// vehicle calendar without changing the in-calendar range selection UX.
+  Future<void> _selectPickupDateOnly() async {
+    FocusScope.of(context).unfocus();
+
+    final today = _dayOnly(DateTime.now());
+    final maxDate = today.add(const Duration(days: 730));
+
     final selected = await showDatePicker(
       context: context,
-      initialDate: _returnDate.isAfter(_pickupDate)
-          ? _returnDate
-          : _pickupDate.add(const Duration(days: 1)),
-      firstDate: _pickupDate,
-      lastDate: DateTime.now().add(const Duration(days: 730)),
+      initialDate: _pickupDate.isBefore(today) ? today : _pickupDate,
+      firstDate: today,
+      lastDate: maxDate,
+      helpText: 'Select pickup date',
+      cancelText: 'Cancel',
+      confirmText: 'Apply',
+      selectableDayPredicate: (day) {
+        final normalized = _dayOnly(day);
+        if (_blockedFullDays.contains(normalized)) return false;
+        if (_isWeekend &&
+            normalized.weekday != DateTime.saturday &&
+            normalized.weekday != DateTime.sunday) {
+          return false;
+        }
+        return true;
+      },
       builder: _pickerTheme,
     );
-    if (selected == null) return;
+
+    if (selected == null || !mounted) return;
+
+    final pickup = _dayOnly(selected);
+    var returnDate = _dayOnly(_returnDate);
+
+    if (!returnDate.isAfter(pickup)) {
+      returnDate = pickup.add(const Duration(days: 1));
+    }
+
+    if (_rangeContainsBlockedDay(pickup, returnDate)) {
+      _showError('The selected period contains a booked or blocked day.');
+      return;
+    }
+
+    if (_isWeekend) {
+      var cursor = pickup;
+      while (!cursor.isAfter(returnDate)) {
+        if (cursor.weekday != DateTime.saturday &&
+            cursor.weekday != DateTime.sunday) {
+          _showError('Weekend rental can only cover Saturday/Sunday dates.');
+          return;
+        }
+        cursor = cursor.add(const Duration(days: 1));
+      }
+    }
+
     setState(() {
-      _returnDate = selected;
-      _resetFromAvailability();
+      _pickupDate = pickup;
+      _returnDate = returnDate;
+      _calendarSelectionStart = pickup;
+      _calendarSelectionEnd = returnDate;
+      _pricingResult = null;
+      _resetAfterDateChange(keepVehicle: _selectedCar != null);
     });
+
+    if (_selectedCar != null) {
+      await _loadAvailabilityCalendar();
+    }
+  }
+
+  /// Allows the admin to edit return directly from the date tile below the
+  /// vehicle calendar while enforcing return > pickup.
+  Future<void> _selectReturnDateOnly() async {
+    FocusScope.of(context).unfocus();
+
+    final today = _dayOnly(DateTime.now());
+    final minDate = _pickupDate.add(const Duration(days: 1));
+    final maxDate = today.add(const Duration(days: 730));
+
+    final safeFirstDate = minDate.isAfter(today) ? minDate : today;
+    var initial = _returnDate.isAfter(safeFirstDate)
+        ? _returnDate
+        : safeFirstDate;
+
+    if (initial.isAfter(maxDate)) initial = maxDate;
+
+    final selected = await showDatePicker(
+      context: context,
+      initialDate: _dayOnly(initial),
+      firstDate: _dayOnly(safeFirstDate),
+      lastDate: maxDate,
+      helpText: 'Select return date',
+      cancelText: 'Cancel',
+      confirmText: 'Apply',
+      selectableDayPredicate: (day) {
+        final normalized = _dayOnly(day);
+        if (!normalized.isAfter(_pickupDate)) return false;
+        if (_blockedFullDays.contains(normalized)) return false;
+        if (_isWeekend &&
+            normalized.weekday != DateTime.saturday &&
+            normalized.weekday != DateTime.sunday) {
+          return false;
+        }
+        return true;
+      },
+      builder: _pickerTheme,
+    );
+
+    if (selected == null || !mounted) return;
+
+    final returnDate = _dayOnly(selected);
+
+    if (!returnDate.isAfter(_pickupDate)) {
+      _showError('Return date must be after pickup date.');
+      return;
+    }
+
+    if (_rangeContainsBlockedDay(_pickupDate, returnDate)) {
+      _showError('The selected period contains a booked or blocked day.');
+      return;
+    }
+
+    if (_isWeekend) {
+      var cursor = _dayOnly(_pickupDate);
+      while (!cursor.isAfter(returnDate)) {
+        if (cursor.weekday != DateTime.saturday &&
+            cursor.weekday != DateTime.sunday) {
+          _showError('Weekend rental can only cover Saturday/Sunday dates.');
+          return;
+        }
+        cursor = cursor.add(const Duration(days: 1));
+      }
+    }
+
+    setState(() {
+      _returnDate = returnDate;
+      _calendarSelectionStart = _dayOnly(_pickupDate);
+      _calendarSelectionEnd = returnDate;
+      _pricingResult = null;
+      _resetAfterDateChange(keepVehicle: _selectedCar != null);
+    });
+
+    if (_selectedCar != null) {
+      await _loadAvailabilityCalendar();
+    }
+  }
+
+  bool _rangeContainsBlockedDay(DateTime start, DateTime end) {
+    var cursor = _dayOnly(start);
+    final last = _dayOnly(end);
+    while (!cursor.isAfter(last)) {
+      if (_blockedFullDays.contains(cursor)) return true;
+      cursor = cursor.add(const Duration(days: 1));
+    }
+    return false;
   }
 
   Widget _pickerTheme(BuildContext context, Widget? child) {
@@ -232,29 +565,130 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   }
 
   Future<void> _selectPickupTime() async {
+    if (!_isHourly) return;
+
     final selected = await showTimePicker(
       context: context,
       initialTime: _pickupTime,
       builder: _pickerTheme,
     );
     if (selected == null) return;
+
     setState(() {
       _pickupTime = selected;
-      _resetFromAvailability();
+      _pricingResult = null;
+
     });
   }
 
   Future<void> _selectReturnTime() async {
+    if (!_isHourly) return;
+
     final selected = await showTimePicker(
       context: context,
       initialTime: _returnTime,
       builder: _pickerTheme,
     );
     if (selected == null) return;
+
     setState(() {
       _returnTime = selected;
-      _resetFromAvailability();
+      _pricingResult = null;
+
     });
+  }
+
+  bool _isSelectableCalendarDay(DateTime day, DateTime? start, DateTime? end) {
+    final normalized = _dayOnly(day);
+    if (_blockedFullDays.contains(normalized)) return false;
+
+    if (_isWeekend &&
+        normalized.weekday != DateTime.saturday &&
+        normalized.weekday != DateTime.sunday) {
+      return false;
+    }
+
+    return true;
+  }
+
+  void _resetAfterDateChange({bool keepVehicle = false}) {
+    _availableCars = [];
+    _availabilitySnapshot = null;
+    _blockedFullDays.clear();
+    if (!keepVehicle) _selectedCar = null;
+    _selectedBranchId = null;
+    _pricingProfile = null;
+    _packages = [];
+    _selectedPackage = null;
+    _pricingResult = null;
+    _step = keepVehicle ? 4 : 1;
+  }
+
+  Future<void> _loadAvailabilityCalendar() async {
+    final car = _selectedCar;
+    if (car == null || !mounted) return;
+
+    final monthStart = DateTime(_calendarMonth.year, _calendarMonth.month, 1);
+
+    setState(() => _loadingCalendar = true);
+    try {
+      final monthEnd = DateTime(
+        _calendarMonth.year,
+        _calendarMonth.month + 1,
+        0,
+        23,
+        59,
+        59,
+        999,
+      );
+
+      final snapshot = await _availabilityService.getAvailabilityForRange(
+        rangeStart: monthStart,
+        rangeEnd: monthEnd,
+        tenantId: _tenantId,
+      );
+
+      final blocked = <DateTime>{};
+      if (!_isHourly) {
+        var cursor = monthStart;
+        while (!cursor.isAfter(monthEnd)) {
+          final dayStart = DateTime(cursor.year, cursor.month, cursor.day);
+          final dayEnd = DateTime(
+            cursor.year,
+            cursor.month,
+            cursor.day,
+            23,
+            59,
+            59,
+            999,
+          );
+          final available = _availabilityService.isCarAvailableForRange(
+            car: car,
+            start: dayStart,
+            end: dayEnd,
+            bookings: snapshot.bookings,
+            blocks: snapshot.blocks,
+          );
+          if (!available) blocked.add(dayStart);
+          cursor = cursor.add(const Duration(days: 1));
+        }
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _blockedFullDays
+          ..clear()
+          ..addAll(blocked);
+        _availabilitySnapshot = snapshot;
+        _loadingCalendar = false;
+      });
+
+      print('🔥 CALENDAR AVAILABILITY | car=${car.id} | blockedDays=${blocked.length}');
+    } catch (e, stackTrace) {
+      print('❌ CALENDAR AVAILABILITY ERROR: $e');
+      print(stackTrace);
+      if (mounted) setState(() => _loadingCalendar = false);
+    }
   }
 
   void _resetFromAvailability() {
@@ -266,144 +700,181 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     _packages = [];
     _selectedPackage = null;
     _pricingResult = null;
-    _step = 1;
+    _step = 2;
   }
 
   Future<void> _searchAvailability() async {
-    print('🔥 SEARCH AVAILABILITY CALLED | tenant=$_tenantId | pickup=$_pickupDateTime | return=$_returnDateTime');
+    print('🔥 SEARCH FULL FLEET | pickup=$_initialAvailabilityStart | return=$_initialAvailabilityEnd');
     FocusScope.of(context).unfocus();
 
-    final pickup = _pickupDateTime;
-    final returnTime = _returnDateTime;
-
-    if (!pickup.isBefore(returnTime)) {
-      _showError('Return date and time must be after pickup date and time.');
+    if (!_initialAvailabilityStart.isBefore(_initialAvailabilityEnd)) {
+      _showError('Return date must be after pickup date.');
       return;
     }
 
-    if (pickup.isBefore(DateTime.now())) {
-      _showError('Pickup time cannot be in the past.');
+    if (_initialAvailabilityStart.isBefore(
+      DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day),
+    )) {
+      _showError('Pickup date cannot be in the past.');
       return;
     }
 
     setState(() {
       _loading = true;
       _error = null;
-      _availableCars = [];
-      _selectedCar = null;
     });
 
     try {
-      // IMPORTANT: availability search starts with dates, not branch.
-      // We intentionally search the entire active fleet first.
-      final cars = await _carService.getCars(tenantId: _tenantId);
       final snapshot = await _availabilityService.getAvailabilityForRange(
-        rangeStart: pickup,
-        rangeEnd: returnTime,
+        rangeStart: _initialAvailabilityStart,
+        rangeEnd: _initialAvailabilityEnd,
         tenantId: _tenantId,
       );
 
-      final available = cars.where((car) {
+      final fleet = snapshot.cars.where(_isCarAssignedToTenant).toList();
+      final available = fleet.where((car) {
         return _availabilityService.isCarAvailableForRange(
           car: car,
-          start: pickup,
-          end: returnTime,
+          start: _initialAvailabilityStart,
+          end: _initialAvailabilityEnd,
           bookings: snapshot.bookings,
           blocks: snapshot.blocks,
         );
       }).toList();
 
+      available.sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
+
       if (!mounted) return;
       setState(() {
-        _availabilitySnapshot = snapshot;
+        _fleetCars = fleet;
         _availableCars = available;
+        _availabilitySnapshot = snapshot;
+        _selectedCar = null;
+        _selectedBranchId = null;
+        _pricingProfile = null;
+        _packages = [];
+        _selectedPackage = null;
+        _pricingResult = null;
         _loading = false;
-        _step = available.isEmpty ? 1 : 2;
+        _step = 2;
       });
 
-      if (available.isEmpty) {
-        _showError('No vehicles are available for the selected rental period.');
-      }
-    } catch (e) {
+      print('🔥 FULL FLEET AVAILABLE | total=${fleet.length} | available=${available.length}');
+    } catch (e, stackTrace) {
+      print('❌ FULL FLEET AVAILABILITY ERROR: $e');
+      print(stackTrace);
       if (!mounted) return;
-      setState(() {
-        _loading = false;
-        _error = 'Unable to check vehicle availability.';
-      });
+      setState(() => _loading = false);
       _showError('Unable to check vehicle availability.');
     }
   }
 
-  Future<void> _selectVehicle(Car car) async {
-    print('🔥 SELECT VEHICLE CALLED | car=${car.id} | name=${car.name} | pricingProfileId=${car.pricingProfileId}');
-    FocusScope.of(context).unfocus();
+  Future<void> _confirmVehicleCalendarAvailability() async {
+    final car = _selectedCar;
+    final type = _rentalType;
+    if (car == null) {
+      _showError('Please select a vehicle.');
+      return;
+    }
+    if (type == null) {
+      _showError('Please select a rental type.');
+      return;
+    }
+
+    final pickup = _pickupDateTime;
+    final returnTime = _returnDateTime;
+    if (!pickup.isBefore(returnTime)) {
+      _showError('Return date/time must be after pickup date/time.');
+      return;
+    }
+
+    if (_isHourly && pickup.isBefore(DateTime.now())) {
+      _showError('Pickup time cannot be in the past.');
+      return;
+    }
+
+    if (_isWeekend) {
+      var cursor = _dayOnly(_pickupDate);
+      final endDay = _dayOnly(_returnDate);
+      while (!cursor.isAfter(endDay)) {
+        if (cursor.weekday != DateTime.saturday && cursor.weekday != DateTime.sunday) {
+          _showError('Weekend rental can only cover Saturday/Sunday dates.');
+          return;
+        }
+        cursor = cursor.add(const Duration(days: 1));
+      }
+    }
+
     setState(() {
       _loading = true;
       _error = null;
     });
 
     try {
-      // SECOND, FRESH CHECK for the exact vehicle and exact rental range.
       final snapshot = await _availabilityService.getAvailabilityForRange(
-        rangeStart: _pickupDateTime,
-        rangeEnd: _returnDateTime,
+        rangeStart: pickup,
+        rangeEnd: returnTime,
         tenantId: _tenantId,
       );
-
       final freshCar = snapshot.cars.cast<Car?>().firstWhere(
-            (candidate) => candidate?.id == car.id,
-            orElse: () => null,
-          );
-
-      if (freshCar == null) {
-        throw Exception('Vehicle no longer exists.');
-      }
+        (candidate) => candidate?.id == car.id,
+        orElse: () => null,
+      );
+      if (freshCar == null) throw Exception('VEHICLE_UNAVAILABLE');
 
       final available = _availabilityService.isCarAvailableForRange(
         car: freshCar,
-        start: _pickupDateTime,
-        end: _returnDateTime,
+        start: pickup,
+        end: returnTime,
         bookings: snapshot.bookings,
         blocks: snapshot.blocks,
       );
-
-      if (!available) {
-        if (!mounted) return;
-        setState(() {
-          _loading = false;
-          _selectedCar = null;
-          _availabilitySnapshot = snapshot;
-          _availableCars = _availableCars
-              .where((item) => item.id != car.id)
-              .toList();
-        });
-        _showError(
-          '${car.name} is no longer available for the selected period.',
-        );
-        return;
-      }
+      if (!available) throw Exception('VEHICLE_UNAVAILABLE');
 
       if (!mounted) return;
       setState(() {
-        _availabilitySnapshot = snapshot;
         _selectedCar = freshCar;
+        _availabilitySnapshot = snapshot;
         _loading = false;
-        _step = 3;
+        _step = 5;
       });
-
       await _prepareBranchesForVehicle(freshCar);
-    } catch (e) {
+    } catch (e, stackTrace) {
+      print('❌ VEHICLE CALENDAR FINAL CHECK ERROR: $e');
+      print(stackTrace);
       if (!mounted) return;
-      setState(() {
-        _loading = false;
-        _error = 'Unable to verify this vehicle.';
-      });
-      _showError('Unable to verify this vehicle. Please try again.');
+      setState(() => _loading = false);
+      if (e.toString().contains('VEHICLE_UNAVAILABLE')) {
+        _showError('This vehicle is no longer available for the selected period.');
+      } else {
+        _showError('Unable to confirm vehicle availability.');
+      }
     }
   }
 
+  Future<void> _selectVehicle(Car car) async {
+    print('🔥 SELECT VEHICLE | car=${car.id} | name=${car.name}');
+    FocusScope.of(context).unfocus();
+
+    // This is the second stage: vehicle selection happens BEFORE rental type.
+    // The exact rental-type availability calendar is loaded only after type selection.
+    setState(() {
+      _selectedCar = car;
+      _availabilitySnapshot = null;
+      _blockedFullDays.clear();
+      _selectedBranchId = null;
+      _pricingProfile = null;
+      _packages = [];
+      _selectedPackage = null;
+      _pricingResult = null;
+      _step = 3;
+    });
+
+    await _prepareBranchesForVehicle(car);
+  }
+
   Future<void> _prepareBranchesForVehicle(Car car) async {
-    final valid = _branches.where((branch) {
+    final valid = _allBranches.where((branch) {
       final branchId = branch['id']?.toString() ?? '';
       return car.branchIds.contains(branchId);
     }).toList();
@@ -418,7 +889,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   }
 
   Future<void> _continueFromVehicle() async {
-    print('🔥 CONTINUE VEHICLE → BRANCH | car=${_selectedCar?.id} | branch=$_selectedBranchId');
+    print('🔥 CONTINUE BRANCH → CUSTOMER | car=${_selectedCar?.id} | branch=$_selectedBranchId');
     final car = _selectedCar;
     final branchId = _selectedBranchId;
 
@@ -463,7 +934,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       }
 
       if (!mounted) return;
-      setState(() => _step = 4);
+      setState(() => _step = 6);
     } catch (_) {
       _showError('Unable to verify the selected branch.');
     }
@@ -723,6 +1194,18 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       }
 
       final packages = profile.kmPackages;
+      final typePackages = packages.where((package) {
+        switch (_rentalType) {
+          case AdminRentalType.hourly:
+            return package.unlimitedKm || package.hourlyRate > 0;
+          case AdminRentalType.daily:
+            return package.unlimitedKm || package.dailyRate > 0;
+          case AdminRentalType.weekend:
+            return package.unlimitedKm || package.weekendRate > 0;
+          case null:
+            return true;
+        }
+      }).toList();
 
       if (profile.kmPricingMode == KmPricingMode.package &&
           packages.isEmpty) {
@@ -734,11 +1217,11 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       // Prefer a finite KM package as the initial selection.
       // Unlimited remains available in the list and can be selected manually.
       KmPricingPackage? selected;
-      if (packages.isNotEmpty) {
+      if (typePackages.isNotEmpty) {
         try {
-          selected = packages.firstWhere((package) => !package.unlimitedKm);
+          selected = typePackages.firstWhere((package) => !package.unlimitedKm);
         } catch (_) {
-          selected = packages.first;
+          selected = typePackages.first;
         }
       }
 
@@ -751,7 +1234,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
         _selectedPackage = selected;
         _pricingResult = null;
         _loading = false;
-        _step = 5;
+        _step = 7;
       });
     } catch (e, stackTrace) {
       print('❌❌❌ ADMIN PRICING ERROR ❌❌❌');
@@ -787,6 +1270,9 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
 
       // PricingEngine supports the current KmPricingPackage architecture.
       // Do not cast KmPricingPackage to the legacy RentalPackage model.
+      // IMPORTANT: use the real operational return time for pricing input.
+      // PricingEngine is responsible for minimum billing rules; availability
+      // must always use the customer's actual selected interval.
       final result = _pricingEngine.calculate(
         config: config,
         pricingProfileId: profile.id,
@@ -794,6 +1280,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
         returnDateTime: _returnDateTime,
         actualKm: 0,
         plannedKm: 0,
+        rentalType: _pricingRentalType!,
         selectedKmPackageId: selectedPackage.id,
         selectedKm: selectedPackage.unlimitedKm
             ? null
@@ -803,7 +1290,10 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       );
 
       if (!mounted) return;
-      setState(() => _pricingResult = result);
+      setState(() {
+        _pricingResult = result;
+        _syncPricingOverrides(result);
+      });
     } catch (e) {
       _showError('Unable to calculate pricing.');
     }
@@ -825,8 +1315,162 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     return package.monthlyRate;
   }
 
+  double _editableAmount(double? overrideValue, double fallback) =>
+      overrideValue ?? fallback;
+
+  double get _effectiveRentalPrice =>
+      _editableAmount(_adminRentalPrice, _pricingResult?.rentalPrice ?? 0);
+
+  double get _effectiveExtraKmCharge =>
+      _editableAmount(_adminExtraKmCharge, _pricingResult?.extraKmCharge ?? 0);
+
+  double get _effectiveExtraTimeCharge =>
+      _editableAmount(_adminExtraTimeCharge, _pricingResult?.extraTimeCharge ?? 0);
+
+  double get _effectiveAddOnTotal =>
+      _editableAmount(_adminAddOnTotal, _pricingResult?.addOnTotal ?? 0);
+
+  double get _effectiveProtectionTotal =>
+      _editableAmount(_adminProtectionTotal, _pricingResult?.protectionTotal ?? 0);
+
+  double get _effectiveDiscountAmount =>
+      _editableAmount(_adminDiscountAmount, _pricingResult?.discountAmount ?? 0);
+
+  double get _effectiveTaxAmount =>
+      _editableAmount(_adminTaxAmount, _pricingResult?.taxAmount ?? 0);
+
+  double get _calculatedAdminTotal =>
+      (_effectiveRentalPrice +
+              _effectiveExtraKmCharge +
+              _effectiveExtraTimeCharge +
+              _effectiveAddOnTotal +
+              _effectiveProtectionTotal -
+              _effectiveDiscountAmount +
+              _effectiveTaxAmount)
+          .clamp(0, double.infinity)
+          .toDouble();
+
+  double get _effectiveTripTotal =>
+      _adminTotalManuallyEdited
+          ? (_adminTotal ?? _calculatedAdminTotal)
+          : _calculatedAdminTotal;
+
+  bool get _isMonetaryDeposit =>
+      _depositMethod == 'cash' ||
+      _depositMethod == 'upi' ||
+      _depositMethod == 'bank_transfer';
+
+  double get _effectiveDepositAmount =>
+      _depositMethod == 'none' || !_isMonetaryDeposit ? 0 : _depositAmount;
+
+  double get _effectiveAmountPayable =>
+      _effectiveTripTotal + _effectiveDepositAmount;
+
+  void _syncPricingOverrides(PricingResult result) {
+    _adminRentalPrice = result.rentalPrice;
+    _adminExtraKmCharge = result.extraKmCharge;
+    // Daily/weekend rentals are date-based. Their return date already occupies
+    // the complete selected day, so the 23:59:59.999 availability boundary
+    // must never be interpreted as paid "extra hours".
+    _adminExtraTimeCharge =
+        (_rentalType == AdminRentalType.hourly) ? result.extraTimeCharge : 0.0;
+    _adminAddOnTotal = result.addOnTotal;
+    _adminProtectionTotal = result.protectionTotal;
+    _adminDiscountAmount = result.discountAmount;
+    _adminTaxAmount = result.taxAmount;
+    _adminTotal = result.total;
+    _adminTotalManuallyEdited = false;
+    if (_depositMethod == 'none' ||
+        _depositMethod == 'vehicle_asset' ||
+        _depositMethod == 'other_asset') {
+      _depositAmount = 0;
+    } else if (_depositAmount <= 0) {
+      _depositAmount = result.securityDeposit;
+    }
+  }
+
+  void _setEditablePricing(String field, double value) {
+    final double safe = value.isFinite && value >= 0 ? value : 0.0;
+    setState(() {
+      switch (field) {
+        case 'rental':
+          _adminRentalPrice = safe;
+          break;
+        case 'extraKm':
+          _adminExtraKmCharge = safe;
+          break;
+        case 'extraTime':
+          _adminExtraTimeCharge = safe;
+          break;
+        case 'addons':
+          _adminAddOnTotal = safe;
+          break;
+        case 'protection':
+          _adminProtectionTotal = safe;
+          break;
+        case 'discount':
+          _adminDiscountAmount = safe;
+          break;
+        case 'tax':
+          _adminTaxAmount = safe;
+          break;
+      }
+      if (!_adminTotalManuallyEdited) {
+        _adminTotal = _calculatedAdminTotal;
+      }
+    });
+  }
+
+  void _setAdminTotal(String value) {
+    final parsed = double.tryParse(value);
+    if (parsed == null) return;
+    setState(() {
+      _adminTotal = parsed.clamp(0, double.infinity).toDouble();
+      _adminTotalManuallyEdited = true;
+    });
+  }
+
+  Widget _editablePriceField({
+    required String label,
+    required double value,
+    required String field,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(label, style: GoogleFonts.manrope(
+              color: body, fontSize: 12, fontWeight: FontWeight.w700,
+            )),
+          ),
+          SizedBox(
+            width: 125,
+            child: TextFormField(
+              initialValue: value.toStringAsFixed(2),
+              textAlign: TextAlign.right,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              decoration: _inputDecoration('₹ Amount').copyWith(
+                contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+              ),
+              onChanged: (text) {
+                final parsed = double.tryParse(text);
+                if (parsed != null) _setEditablePricing(field, parsed);
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _selectPackage(KmPricingPackage package) {
-    print('🔥 KM PACKAGE SELECTED | id=${package.id} | name=${package.name} | includedKm=${package.includedKm} | unlimited=${package.unlimitedKm}');
+    final rate = _selectedPackageRate(package);
+    if (!package.unlimitedKm && rate <= 0) {
+      _showError('${package.name} is not available for $_rentalTypeLabel rental.');
+      return;
+    }
+    print('🔥 KM PACKAGE SELECTED | type=$_rentalTypeLabel | id=${package.id} | name=${package.name} | rate=$rate | includedKm=${package.includedKm} | unlimited=${package.unlimitedKm}');
     developer.log('KM PACKAGE SELECTED: id=${package.id}, name=${package.name}, includedKm=${package.includedKm}, unlimited=${package.unlimitedKm}', name: 'AdminNewBooking');
     setState(() {
       _selectedPackage = package;
@@ -884,7 +1528,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       setState(() {
         _availabilitySnapshot = snapshot;
         _loading = false;
-        _step = 7;
+        _step = 9;
         _paidAmount = 0;
       });
     } catch (e) {
@@ -899,7 +1543,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   }
 
   Future<void> _createBooking() async {
-    print('🔥 CREATE BOOKING CALLED | customer=${_selectedCustomer?.customerId} | car=${_selectedCar?.id} | total=${_pricingResult?.total}');
+    print('🔥 CREATE BOOKING CALLED | type=$_rentalTypeLabel | customer=${_selectedCustomer?.customerId} | car=${_selectedCar?.id} | pickup=$_pickupDateTime | return=$_returnDateTime | total=${_pricingResult?.total}');
     final customer = _selectedCustomer;
     final car = _selectedCar;
     final branch = _selectedBranch;
@@ -918,6 +1562,12 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
 
     if (result.pricingProfileId.isEmpty) {
       _showError('Pricing is invalid.');
+      return;
+    }
+
+    if ((_depositMethod == 'vehicle_asset' || _depositMethod == 'other_asset') &&
+        _depositAssetDetails.trim().isEmpty) {
+      _showError('Please enter the security asset details.');
       return;
     }
 
@@ -973,7 +1623,10 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       return;
     }
 
-    final total = result.total;
+    // Monetary deposits are collected separately from the trip total.
+    // Asset deposits never increase the payable total.
+    final depositAmount = _effectiveDepositAmount;
+    final total = _effectiveAmountPayable;
     if (_paidAmount < 0 || _paidAmount > total) {
       _showError('Paid amount must be between ₹0 and the total amount.');
       return;
@@ -985,20 +1638,23 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
 
     final pricingSnapshot = BookingPricingSnapshot(
       pricingProfileId: result.pricingProfileId,
+      rentalType: result.rentalType,
+      pricingVersion: result.pricingVersion,
+      specialPricingRuleId: result.specialPricingRuleId,
       kmPackageId: result.selectedKmPackageId,
       kmPackageName: result.selectedKmPackageName,
       includedKm: result.includedKm,
       unlimitedKm: result.unlimitedKm,
       extraKmRate: result.selectedKmPackageExtraKmRate ?? profile.extraKmRate,
-      baseAmount: result.rentalPrice,
-      extraKmAmount: result.extraKmCharge,
-      extraTimeAmount: result.extraTimeCharge,
-      addOnsAmount: result.addOnTotal,
-      protectionAmount: result.protectionTotal,
-      discountAmount: result.discountAmount,
-      taxAmount: result.taxAmount,
-      securityDeposit: result.securityDeposit,
-      totalAmount: result.total,
+      baseAmount: _effectiveRentalPrice,
+      extraKmAmount: _effectiveExtraKmCharge,
+      extraTimeAmount: _effectiveExtraTimeCharge,
+      addOnsAmount: _effectiveAddOnTotal,
+      protectionAmount: _effectiveProtectionTotal,
+      discountAmount: _effectiveDiscountAmount,
+      taxAmount: _effectiveTaxAmount,
+      securityDeposit: depositAmount,
+      totalAmount: _effectiveTripTotal,
     );
 
     final booking = Booking(
@@ -1020,15 +1676,15 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       unlimitedKm: result.unlimitedKm,
       extraKmRate: result.selectedKmPackageExtraKmRate ?? profile.extraKmRate,
       pricingProfileId: result.pricingProfileId,
-      baseAmount: result.rentalPrice,
-      extraKmAmount: result.extraKmCharge,
-      extraTimeAmount: result.extraTimeCharge,
-      addOnsAmount: result.addOnTotal,
-      protectionAmount: result.protectionTotal,
-      discountAmount: result.discountAmount,
-      taxAmount: result.taxAmount,
-      securityDeposit: result.securityDeposit,
-      totalAmount: result.total,
+      baseAmount: _effectiveRentalPrice,
+      extraKmAmount: _effectiveExtraKmCharge,
+      extraTimeAmount: _effectiveExtraTimeCharge,
+      addOnsAmount: _effectiveAddOnTotal,
+      protectionAmount: _effectiveProtectionTotal,
+      discountAmount: _effectiveDiscountAmount,
+      taxAmount: _effectiveTaxAmount,
+      securityDeposit: depositAmount,
+      totalAmount: _effectiveTripTotal,
       pricing: pricingSnapshot,
       paidAmount: _paidAmount,
       refundAmount: 0,
@@ -1037,7 +1693,13 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       customerName: customer.fullName,
       customerPhone: customer.phone,
       customerEmail: customer.email,
-      customerNote: _bookingNote,
+      customerNote: [
+        'Rental Type: $_rentalTypeLabel',
+        'Deposit Method: $_depositMethod',
+        if (depositAmount > 0) 'Deposit Amount: ${depositAmount.toStringAsFixed(2)}',
+        if (_depositAssetDetails.trim().isNotEmpty) 'Deposit Asset: ${_depositAssetDetails.trim()}',
+        if (_bookingNote.trim().isNotEmpty) 'Admin Note: ${_bookingNote.trim()}',
+      ].join('\n'),
       cancellationReason: '',
       rejectionReason: '',
       expiresAt: null,
@@ -1105,19 +1767,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       return;
     }
     setState(() {
-      if (_step == 7) {
-        _step = 6;
-      } else if (_step == 6) {
-        _step = 5;
-      } else if (_step == 5) {
-        _step = 4;
-      } else if (_step == 4) {
-        _step = 3;
-      } else if (_step == 3) {
-        _step = 2;
-      } else {
-        _step = 1;
-      }
+      _step -= 1;
     });
   }
 
@@ -1135,7 +1785,13 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
           icon: const Icon(Icons.arrow_back_ios_new_rounded, color: heading),
         ),
         title: Text(
-          _step == 5 ? 'Choose KM Package' : 'New Booking',
+          _step == 1 ? 'Rental Dates' :
+          (_step == 2 ? 'Available Vehicles' :
+          (_step == 3 ? 'Rental Type' :
+          (_step == 4 ? 'Vehicle Calendar' :
+          (_step == 7 ? 'Choose KM Package' :
+          (_step == 8 ? 'Pricing & Payment' :
+          (_step == 9 ? 'Final Review' : 'New Booking')))))),
           style: GoogleFonts.manrope(
             color: heading,
             fontSize: 20,
@@ -1149,12 +1805,12 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
             ListView(
               padding: const EdgeInsets.fromLTRB(18, 8, 18, 120),
               children: [
-                if (_step != 5) _buildProgress(),
-                if (_step != 5) const SizedBox(height: 18),
+                _buildProgress(),
+                const SizedBox(height: 18),
                 _buildStepContent(),
               ],
             ),
-            if (_step == 5 && !_loading && !_creatingBooking && _packages.isNotEmpty)
+            if (_step == 7 && !_loading && !_creatingBooking && _packages.isNotEmpty)
               Positioned(
                 left: 0,
                 right: 0,
@@ -1186,7 +1842,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
                           return;
                         }
                         _calculatePricing();
-                        setState(() => _step = 6);
+                        setState(() => _step = 8);
                       },
                     ),
                   ),
@@ -1237,7 +1893,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   }
 
   Widget _buildProgress() {
-    final labels = const ['Dates', 'Vehicle', 'Branch', 'Customer', 'Package', 'Pricing', 'Confirm'];
+    final labels = const ['Dates', 'Vehicles', 'Type', 'Vehicle Calendar', 'Branch', 'Customer', 'Package', 'Pricing', 'Confirm'];
     return Container(
       padding: const EdgeInsets.all(15),
       decoration: BoxDecoration(
@@ -1250,7 +1906,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
           Row(
             children: [
               Text(
-                'Booking ${_step}/7',
+                'Booking ${_step}/9',
                 style: GoogleFonts.manrope(
                   color: primary,
                   fontSize: 11,
@@ -1273,7 +1929,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
             borderRadius: BorderRadius.circular(10),
             child: LinearProgressIndicator(
               minHeight: 6,
-              value: _step / 7,
+              value: _step / 9,
               backgroundColor: softAccent,
               color: primary,
             ),
@@ -1286,59 +1942,930 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   Widget _buildStepContent() {
     switch (_step) {
       case 1:
-        return _buildDates();
+        return _buildInitialDates();
       case 2:
         return _buildVehicles();
       case 3:
-        return _buildBranch();
+        return _buildRentalType();
       case 4:
-        return _buildCustomer();
+        return _buildDates();
       case 5:
-        return _buildPackage();
+        return _buildBranch();
       case 6:
-        return _buildPricing();
+        return _buildCustomer();
       case 7:
+        return _buildPackage();
+      case 8:
+        return _buildPricing();
+      case 9:
         return _buildReview();
       default:
         return const SizedBox.shrink();
     }
   }
 
-  Widget _buildDates() {
+  Widget _buildInitialDates() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _heroCard(
-          icon: Icons.event_available_rounded,
-          title: 'Start with the rental period',
-          subtitle: 'Choose the exact pickup and return time. Vehicle availability will be searched across the complete period.',
+          icon: Icons.calendar_month_rounded,
+          title: 'Choose pickup & return dates',
+          subtitle: 'Start with the rental period. We will check the entire active fleet before you choose a vehicle.',
+        ),
+        const SizedBox(height: 14),
+        _sectionCard(
+          title: 'Rental period',
+          subtitle: 'Use the range calendar to select any pickup date and a later return date.',
+          child: Column(
+            children: [
+              Row(children: [
+                Expanded(child: _dateTile('Pickup date', _formatDate(_pickupDate), Icons.login_rounded, _selectPickupDate)),
+                const SizedBox(width: 10),
+                Expanded(child: _dateTile('Return date', _formatDate(_returnDate), Icons.logout_rounded, _selectReturnDate)),
+              ]),
+              const SizedBox(height: 12),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(13),
+                decoration: BoxDecoration(color: softAccent, borderRadius: BorderRadius.circular(16)),
+                child: Row(children: [
+                  const Icon(Icons.info_outline_rounded, color: primary, size: 20),
+                  const SizedBox(width: 9),
+                  Expanded(child: Text('Select a complete pickup → return range. Daily rentals can span multiple days; exact hourly availability is checked again after the rental type is selected.', style: GoogleFonts.manrope(color: heading, fontSize: 10.5, height: 1.4, fontWeight: FontWeight.w700))),
+                ]),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        _primaryButton('Check All Available Vehicles', Icons.directions_car_rounded, _searchAvailability),
+      ],
+    );
+  }
+
+
+  Widget _buildRentalType() {
+    final options = <Map<String, dynamic>>[
+      {
+        'type': AdminRentalType.hourly,
+        'title': 'Hourly',
+        'subtitle': 'Exact pickup & return time',
+        'icon': Icons.schedule_rounded,
+      },
+      {
+        'type': AdminRentalType.daily,
+        'title': 'Daily',
+        'subtitle': 'One or multiple calendar days',
+        'icon': Icons.calendar_month_rounded,
+      },
+      {
+        'type': AdminRentalType.weekend,
+        'title': 'Weekend',
+        'subtitle': 'Saturday / Sunday only',
+        'icon': Icons.weekend_rounded,
+      },
+    ];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _heroCard(
+          icon: Icons.directions_car_filled_rounded,
+          title: 'Create a new booking',
+          subtitle: 'Vehicle selected: ${_selectedCar?.name ?? 'Vehicle'}. Now choose how this booking should be billed, then confirm the vehicle-specific calendar.',
         ),
         const SizedBox(height: 16),
         _sectionCard(
-          title: 'Pickup',
-          subtitle: 'When the vehicle leaves the branch',
-          child: Row(
-            children: [
-              Expanded(child: _dateTile('Date', _formatDate(_pickupDate), Icons.calendar_today_rounded, _selectPickupDate)),
-              const SizedBox(width: 10),
-              Expanded(child: _dateTile('Time', _formatTime(_pickupTime), Icons.schedule_rounded, _selectPickupTime)),
-            ],
+          title: 'Rental type',
+          subtitle: 'Choose how this booking should be billed.',
+          child: Column(
+            children: options.map((option) {
+              final type = option['type'] as AdminRentalType;
+              final selected = _rentalType == type;
+              return GestureDetector(
+                onTap: () async {
+                  if (_selectedCar == null) {
+                    _showError('Please select a vehicle first.');
+                    return;
+                  }
+                  setState(() {
+                    _rentalType = type;
+                    _blockedFullDays.clear();
+                    _availabilitySnapshot = null;
+                    _selectedBranchId = null;
+                    _pricingProfile = null;
+                    _packages = [];
+                    _selectedPackage = null;
+                    _pricingResult = null;
+                    _calendarSelectionStart = null;
+                    _calendarSelectionEnd = null;
+                    _calendarMonth = DateTime(_pickupDate.year, _pickupDate.month, 1);
+                    _step = 4;
+                  });
+                  await _loadAvailabilityCalendar();
+                },
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 180),
+                  margin: const EdgeInsets.only(bottom: 10),
+                  padding: const EdgeInsets.all(15),
+                  decoration: BoxDecoration(
+                    color: selected ? softAccent : background,
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(
+                      color: selected ? primary : border,
+                      width: selected ? 1.5 : 1,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 46,
+                        height: 46,
+                        decoration: BoxDecoration(
+                          color: selected ? primary : softAccent,
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: Icon(
+                          option['icon'] as IconData,
+                          color: selected ? Colors.white : primary,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              option['title'] as String,
+                              style: GoogleFonts.manrope(
+                                color: heading,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              option['subtitle'] as String,
+                              style: GoogleFonts.manrope(
+                                color: body,
+                                fontSize: 10.5,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Icon(
+                        selected
+                            ? Icons.radio_button_checked_rounded
+                            : Icons.radio_button_off_rounded,
+                        color: selected ? primary : muted,
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            }).toList(),
           ),
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 16),
         _sectionCard(
-          title: 'Return',
-          subtitle: 'When the vehicle comes back',
-          child: Row(
+          title: 'Rental rules',
+          subtitle: 'The booking system keeps operational availability separate from minimum billing.',
+          child: Column(
             children: [
-              Expanded(child: _dateTile('Date', _formatDate(_returnDate), Icons.event_available_rounded, _selectReturnDate)),
-              const SizedBox(width: 10),
-              Expanded(child: _dateTile('Time', _formatTime(_returnTime), Icons.access_time_rounded, _selectReturnTime)),
+              _ruleRow(
+                Icons.timer_outlined,
+                'Hourly',
+                'Exact availability interval. Minimum billing is applied only to pricing.',
+              ),
+              _ruleRow(
+                Icons.date_range_rounded,
+                'Daily',
+                'Selected calendar dates are blocked through 11:59:59 PM on the return date.',
+              ),
+              _ruleRow(
+                Icons.weekend_rounded,
+                'Weekend',
+                'Only configured weekend days can be selected and blocked.',
+              ),
             ],
           ),
         ),
-        const SizedBox(height: 18),
-        _primaryButton('Search Vehicle Availability', Icons.search_rounded, _searchAvailability),
+      ],
+    );
+  }
+
+  Widget _ruleRow(IconData icon, String title, String subtitle) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: primary, size: 19),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: GoogleFonts.manrope(
+                    color: heading,
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  subtitle,
+                  style: GoogleFonts.manrope(
+                    color: body,
+                    fontSize: 10,
+                    height: 1.35,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildVehicleSelection() {
+    final activeCars = _fleetCars.where(_isCarAssignedToTenant).toList()
+      ..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _heroCard(
+          icon: Icons.directions_car_rounded,
+          title: 'Choose vehicle',
+          subtitle: 'Select the vehicle first. The availability calendar will then be loaded specifically for that vehicle.',
+        ),
+        const SizedBox(height: 14),
+        _summaryCard(
+          title: _rentalTypeLabel,
+          subtitle: '${activeCars.length} active vehicle${activeCars.length == 1 ? '' : 's'} in this tenant',
+          icon: Icons.tune_rounded,
+          trailing: '${activeCars.length}',
+        ),
+        const SizedBox(height: 14),
+        if (activeCars.isEmpty)
+          _emptyCard(
+            'No active vehicles',
+            'Add an active vehicle assigned to this tenant before creating a booking.',
+          )
+        else
+          ...activeCars.map((car) => _vehicleSelectionCard(car)),
+      ],
+    );
+  }
+
+  Widget _vehicleSelectionCard(Car car) {
+    final selected = _selectedCar?.id == car.id;
+    return GestureDetector(
+      onTap: () => _selectVehicle(car),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        margin: const EdgeInsets.only(bottom: 11),
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: selected ? softAccent : card,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: selected ? primary : border,
+            width: selected ? 1.5 : 1,
+          ),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x10000000),
+              blurRadius: 14,
+              offset: Offset(0, 6),
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            _carImage(car, 88, 70),
+            const SizedBox(width: 13),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    car.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: GoogleFonts.manrope(
+                      color: heading,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    car.registrationNumber.isEmpty
+                        ? '${car.type} • ${car.transmission}'
+                        : car.registrationNumber,
+                    style: GoogleFonts.manrope(
+                      color: body,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 5,
+                    runSpacing: 5,
+                    children: [
+                      _tag(Icons.people_outline_rounded, '${car.seats} seats'),
+                      _tag(Icons.local_gas_station_outlined, car.fuel),
+                      if (car.pricingProfileId.trim().isNotEmpty)
+                        _tag(Icons.payments_outlined, 'Pricing'),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            Icon(
+              selected
+                  ? Icons.radio_button_checked_rounded
+                  : Icons.chevron_right_rounded,
+              color: selected ? primary : muted,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+
+  // ============================================================
+  // PREMIUM MONTHLY AVAILABILITY CALENDAR
+  // ============================================================
+
+  bool _bookingIsVisibleForCalendar(AvailabilityBooking booking) {
+    final status = booking.status.toString().toLowerCase();
+    // Cancelled/rejected bookings do not block a rental day.
+    return !status.contains('cancel') && !status.contains('reject');
+  }
+
+  bool _bookingOverlapsDay(AvailabilityBooking booking, DateTime day) {
+    if (!_bookingIsVisibleForCalendar(booking)) return false;
+
+    final start = booking.pickupDateTime;
+    final end = booking.returnDateTime;
+    final dayStart = _dayOnly(day);
+    final dayEnd = DateTime(
+      day.year,
+      day.month,
+      day.day,
+      23,
+      59,
+      59,
+      999,
+    );
+
+    return start.isBefore(dayEnd) && end.isAfter(dayStart);
+  }
+
+  AvailabilityBooking? _bookingForDay(DateTime day) {
+    final snapshot = _availabilitySnapshot;
+    if (snapshot == null) return null;
+
+    for (final booking in snapshot.bookings) {
+      if (_bookingOverlapsDay(booking, day)) return booking;
+    }
+    return null;
+  }
+
+  bool _isDayBooked(DateTime day) => _bookingForDay(day) != null;
+
+  bool _isDayUnavailable(DateTime day) {
+    final normalized = _dayOnly(day);
+    return _blockedFullDays.contains(normalized);
+  }
+
+  Color _calendarDayBackground(DateTime day, bool selected) {
+    if (selected) return primary.withOpacity(.12);
+    if (_isDayBooked(day)) return const Color(0xFFFFE8E8);
+    if (_isDayUnavailable(day)) return const Color(0xFFFFF3E0);
+    return const Color(0xFFEAFBF6);
+  }
+
+  Color _calendarDayBorder(DateTime day, bool selected) {
+    if (selected) return primary;
+    if (_isDayBooked(day)) return const Color(0xFFE35D6A);
+    if (_isDayUnavailable(day)) return const Color(0xFFE7A23B);
+    return const Color(0xFFB8E8D9);
+  }
+
+  Color _calendarDayTextColor(DateTime day, bool selected) {
+    if (selected) return primary;
+    if (_isDayBooked(day)) return const Color(0xFFB42318);
+    if (_isDayUnavailable(day)) return const Color(0xFF9A6700);
+    return const Color(0xFF08745F);
+  }
+
+  String _calendarDayLabel(DateTime day) {
+    if (_isDayBooked(day)) return 'BOOKED';
+    if (_isDayUnavailable(day)) return 'BLOCKED';
+    return 'OPEN';
+  }
+
+  bool _calendarDayCanBeSelected(DateTime day) {
+    final normalized = _dayOnly(day);
+    final today = _dayOnly(DateTime.now());
+    if (normalized.isBefore(today)) return false;
+    if (_loadingCalendar || _availabilitySnapshot == null) return false;
+    if (_isDayBooked(normalized) || _isDayUnavailable(normalized)) return false;
+    if (_isWeekend &&
+        normalized.weekday != DateTime.saturday &&
+        normalized.weekday != DateTime.sunday) {
+      return false;
+    }
+    return true;
+  }
+
+  bool _calendarRangeHasUnavailableDay(DateTime start, DateTime end) {
+    var cursor = _dayOnly(start);
+    final last = _dayOnly(end);
+    while (!cursor.isAfter(last)) {
+      if (!_calendarDayCanBeSelected(cursor)) return true;
+      cursor = cursor.add(const Duration(days: 1));
+    }
+    return false;
+  }
+
+  void _handleCalendarDayTap(DateTime day) {
+    if (!_calendarDayCanBeSelected(day)) return;
+
+    final selected = _dayOnly(day);
+    final currentStart = _calendarSelectionStart;
+
+    // First tap = pickup.
+    if (currentStart == null || _calendarSelectionEnd != null) {
+      setState(() {
+        _calendarSelectionStart = selected;
+        _calendarSelectionEnd = null;
+      });
+      return;
+    }
+
+    // Second tap = return. If tapped before pickup, restart from this day.
+    if (selected.isBefore(currentStart)) {
+      setState(() {
+        _calendarSelectionStart = selected;
+        _calendarSelectionEnd = null;
+      });
+      return;
+    }
+
+    if (selected.isAtSameMomentAs(currentStart)) {
+      _showError('Please tap a later date for the return date.');
+      return;
+    }
+
+    if (_calendarRangeHasUnavailableDay(currentStart, selected)) {
+      _showError('That range contains a booked or blocked day. Choose another return date.');
+      return;
+    }
+
+    setState(() {
+      _calendarSelectionEnd = selected;
+      _pickupDate = currentStart;
+      _returnDate = selected;
+      _pricingResult = null;
+    });
+  }
+
+  void _clearCalendarRangeSelection() {
+    setState(() {
+      _calendarSelectionStart = null;
+      _calendarSelectionEnd = null;
+    });
+  }
+
+  Future<void> _changeCalendarMonth(int delta) async {
+    final today = _dayOnly(DateTime.now());
+    final minMonth = DateTime(today.year, today.month, 1);
+    final maxDate = today.add(const Duration(days: 730));
+    final maxMonth = DateTime(maxDate.year, maxDate.month, 1);
+
+    final next = DateTime(
+      _calendarMonth.year,
+      _calendarMonth.month + delta,
+      1,
+    );
+
+    if (next.isBefore(minMonth) || next.isAfter(maxMonth)) return;
+
+    setState(() {
+      _calendarMonth = next;
+      _blockedFullDays.clear();
+      _availabilitySnapshot = null;
+    });
+
+    await _loadAvailabilityCalendar();
+  }
+
+  Widget _premiumMonthlyAvailabilityCalendar() {
+    final month = _calendarMonth;
+    final firstDay = DateTime(month.year, month.month, 1);
+    final daysInMonth = DateTime(month.year, month.month + 1, 0).day;
+
+    // Monday = 0 ... Sunday = 6.
+    final leadingDays = firstDay.weekday - DateTime.monday;
+    final totalCells = ((leadingDays + daysInMonth + 6) ~/ 7) * 7;
+
+    final today = _dayOnly(DateTime.now());
+    final selectedStart = _calendarSelectionStart;
+    final selectedEnd = _calendarSelectionEnd ?? _calendarSelectionStart;
+
+    final monthTitle = MaterialLocalizations.of(context).formatMonthYear(month);
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(14, 14, 14, 16),
+      decoration: BoxDecoration(
+        color: card,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: border),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x0C000000),
+            blurRadius: 22,
+            offset: Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: softAccent,
+                  borderRadius: BorderRadius.circular(13),
+                ),
+                child: const Icon(
+                  Icons.calendar_month_rounded,
+                  color: primary,
+                  size: 21,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      monthTitle,
+                      style: GoogleFonts.manrope(
+                        color: heading,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      _loadingCalendar
+                          ? 'Refreshing vehicle availability…'
+                          : 'Monthly booking availability',
+                      style: GoogleFonts.manrope(
+                        color: muted,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              _calendarNavButton(
+                Icons.chevron_left_rounded,
+                () => _changeCalendarMonth(-1),
+              ),
+              const SizedBox(width: 6),
+              _calendarNavButton(
+                Icons.chevron_right_rounded,
+                () => _changeCalendarMonth(1),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+
+          // Legend.
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                _calendarLegend(
+                  color: const Color(0xFFEAFBF6),
+                  borderColor: const Color(0xFFB8E8D9),
+                  label: 'Available',
+                ),
+                const SizedBox(width: 10),
+                _calendarLegend(
+                  color: const Color(0xFFFFE8E8),
+                  borderColor: const Color(0xFFE35D6A),
+                  label: 'Booked',
+                ),
+                const SizedBox(width: 10),
+                _calendarLegend(
+                  color: const Color(0xFFFFF3E0),
+                  borderColor: const Color(0xFFE7A23B),
+                  label: 'Blocked',
+                ),
+                const SizedBox(width: 10),
+                _calendarLegend(
+                  color: primary.withOpacity(.12),
+                  borderColor: primary,
+                  label: 'Selected',
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 15),
+
+          Row(
+            children: const [
+              _CalendarWeekLabel('MON'),
+              _CalendarWeekLabel('TUE'),
+              _CalendarWeekLabel('WED'),
+              _CalendarWeekLabel('THU'),
+              _CalendarWeekLabel('FRI'),
+              _CalendarWeekLabel('SAT'),
+              _CalendarWeekLabel('SUN'),
+            ],
+          ),
+          const SizedBox(height: 7),
+
+          GridView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            itemCount: totalCells,
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 7,
+              crossAxisSpacing: 5,
+              mainAxisSpacing: 5,
+              childAspectRatio: .94,
+            ),
+            itemBuilder: (context, index) {
+              final dayNumber = index - leadingDays + 1;
+
+              if (dayNumber < 1 || dayNumber > daysInMonth) {
+                return const SizedBox.shrink();
+              }
+
+              final day = DateTime(month.year, month.month, dayNumber);
+              final normalized = _dayOnly(day);
+              final inSelectedRange = selectedStart != null &&
+                  selectedEnd != null &&
+                  !normalized.isBefore(selectedStart) &&
+                  !normalized.isAfter(selectedEnd);
+              final isToday = normalized == today;
+              final booking = _bookingForDay(day);
+              final booked = booking != null;
+              final blocked = _isDayUnavailable(day);
+              final isPast = normalized.isBefore(today);
+
+              return InkWell(
+                borderRadius: BorderRadius.circular(13),
+                onTap: _loadingCalendar || _availabilitySnapshot == null ||
+                        isPast || booked || blocked
+                    ? null
+                    : () => _handleCalendarDayTap(day),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 160),
+                  padding: const EdgeInsets.fromLTRB(4, 6, 4, 4),
+                  decoration: BoxDecoration(
+                    color: _calendarDayBackground(day, inSelectedRange),
+                    borderRadius: BorderRadius.circular(13),
+                    border: Border.all(
+                      color: _calendarDayBorder(day, inSelectedRange),
+                      width: isToday || inSelectedRange ? 1.5 : 1,
+                    ),
+                  ),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        '$dayNumber',
+                        style: GoogleFonts.manrope(
+                          color: _calendarDayTextColor(day, inSelectedRange),
+                          fontSize: 12,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Container(
+                        width: 6,
+                        height: 6,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: booked
+                              ? const Color(0xFFE35D6A)
+                              : blocked
+                                  ? const Color(0xFFE7A23B)
+                                  : const Color(0xFF159A7A),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+
+          if (_selectedCar != null) ...[
+            const SizedBox(height: 13),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: background,
+                borderRadius: BorderRadius.circular(15),
+                border: Border.all(color: border),
+              ),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.directions_car_rounded,
+                    color: primary,
+                    size: 18,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '${_selectedCar!.name} • ${_rentalTypeLabel}',
+                      style: GoogleFonts.manrope(
+                        color: heading,
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                  Text(
+                    '${_formatDate(_pickupDate)} → ${_formatDate(_returnDate)}',
+                    style: GoogleFonts.manrope(
+                      color: primary,
+                      fontSize: 9.5,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _calendarNavButton(IconData icon, VoidCallback onTap) {
+    return Material(
+      color: background,
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          width: 38,
+          height: 38,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: border),
+          ),
+          child: Icon(icon, color: heading, size: 21),
+        ),
+      ),
+    );
+  }
+
+  Widget _calendarLegend({
+    required Color color,
+    required Color borderColor,
+    required String label,
+  }) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 12,
+          height: 12,
+          decoration: BoxDecoration(
+            color: color,
+            borderRadius: BorderRadius.circular(4),
+            border: Border.all(color: borderColor),
+          ),
+        ),
+        const SizedBox(width: 5),
+        Text(
+          label,
+          style: GoogleFonts.manrope(
+            color: body,
+            fontSize: 9,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildDates() {
+    final durationText = _isHourly
+        ? '${_formatTime(_pickupTime)} → ${_formatTime(_returnTime)}'
+        : '${_formatDate(_pickupDate)} → ${_formatDate(_returnDate)}';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _heroCard(
+          icon: Icons.calendar_month_rounded,
+          title: 'Vehicle-specific availability calendar',
+          subtitle: _isHourly
+              ? 'Now that the vehicle and rental type are selected, choose the exact pickup and return time. The vehicle is checked again for the exact interval.'
+              : _isWeekend
+                  ? 'Weekend mode allows Saturday/Sunday dates only. Each selected day is blocked from 12:00 AM to 11:59 PM.'
+                  : 'Daily mode supports multiple calendar days and blocks every selected date from 12:00 AM to 11:59 PM.',
+        ),
+        const SizedBox(height: 14),
+        _sectionCard(
+          title: '$_rentalTypeLabel rental • ${_selectedCar?.name ?? 'Vehicle'}',
+          subtitle: _loadingCalendar ? 'Refreshing vehicle availability…' : 'Selected period: $durationText',
+          child: Column(
+            children: [
+              _premiumMonthlyAvailabilityCalendar(),
+              const SizedBox(height: 12),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 11),
+                decoration: BoxDecoration(
+                  color: softAccent,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: primary.withOpacity(.14)),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.touch_app_rounded, color: primary, size: 18),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        _calendarSelectionStart == null
+                            ? 'Tap an available day for pickup, then tap a later day for return. Both dates are selected on this calendar.'
+                            : _calendarSelectionEnd == null
+                                ? 'Pickup selected. Tap a later available day for return.'
+                                : 'Pickup and return selected directly on this calendar.',
+                        style: GoogleFonts.manrope(
+                          color: heading,
+                          fontSize: 10.5,
+                          height: 1.35,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              Row(children: [
+                Expanded(child: _dateTile('Pickup date', _formatDate(_pickupDate), Icons.login_rounded, _selectPickupDateOnly)),
+                const SizedBox(width: 10),
+                Expanded(child: _dateTile('Return date', _formatDate(_returnDate), Icons.logout_rounded, _selectReturnDateOnly)),
+              ]),
+              if (_isHourly) ...[
+                const SizedBox(height: 10),
+                Row(children: [
+                  Expanded(child: _dateTile('Pickup time', _formatTime(_pickupTime), Icons.schedule_rounded, _selectPickupTime)),
+                  const SizedBox(width: 10),
+                  Expanded(child: _dateTile('Return time', _formatTime(_returnTime), Icons.access_time_rounded, _selectReturnTime)),
+                ]),
+              ] else ...[
+                const SizedBox(height: 10),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(13),
+                  decoration: BoxDecoration(color: softAccent, borderRadius: BorderRadius.circular(16)),
+                  child: Row(children: [
+                    const Icon(Icons.schedule_rounded, color: primary, size: 20),
+                    const SizedBox(width: 9),
+                    Expanded(child: Text('Availability: ${_formatDate(_pickupDate)} 12:00 AM → ${_formatDate(_returnDate)} 11:59 PM', style: GoogleFonts.manrope(color: heading, fontSize: 11.5, fontWeight: FontWeight.w800))),
+                  ]),
+                ),
+              ],
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        _primaryButton('Confirm Vehicle Availability', Icons.verified_rounded, _confirmVehicleCalendarAvailability),
       ],
     );
   }
@@ -1525,6 +3052,32 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     );
   }
 
+  List<KmPricingPackage> get _packagesForRentalType {
+    switch (_rentalType) {
+      case AdminRentalType.hourly:
+        return _packages.where((p) => p.unlimitedKm || p.hourlyRate > 0).toList();
+      case AdminRentalType.daily:
+        return _packages.where((p) => p.unlimitedKm || p.dailyRate > 0).toList();
+      case AdminRentalType.weekend:
+        return _packages.where((p) => p.unlimitedKm || p.weekendRate > 0).toList();
+      case null:
+        return _packages;
+    }
+  }
+
+  double _selectedPackageRate(KmPricingPackage package) {
+    switch (_rentalType) {
+      case AdminRentalType.hourly:
+        return package.hourlyRate;
+      case AdminRentalType.daily:
+        return package.dailyRate;
+      case AdminRentalType.weekend:
+        return package.weekendRate;
+      case null:
+        return _packageDisplayRate(package);
+    }
+  }
+
   Widget _buildPackage() {
     print('🔥 BUILD KM PACKAGE SCREEN | packages=${_packages.length} | selected=${_selectedPackage?.id}');
     developer.log(
@@ -1539,7 +3092,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
           'Select your KM package',
           style: GoogleFonts.manrope(
             color: heading,
-            fontSize: 27,
+            fontSize: 23,
             height: 1.08,
             fontWeight: FontWeight.w900,
           ),
@@ -1555,13 +3108,13 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
           ),
         ),
         const SizedBox(height: 22),
-        if (_packages.isEmpty)
+        if (_packagesForRentalType.isEmpty)
           _emptyCard(
-            'No KM packages',
-            'Pricing will be calculated from the vehicle pricing profile.',
+            'No $_rentalTypeLabel KM packages',
+            'This vehicle does not currently have a package for the selected rental type.',
           )
         else
-          ..._packages.map(_packageCard),
+          ..._packagesForRentalType.map(_packageCard),
         const SizedBox(height: 100),
       ],
     );
@@ -1569,137 +3122,137 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
 
   Widget _packageCard(KmPricingPackage package) {
     final selected = _selectedPackage?.id == package.id;
+    final rate = _selectedPackageRate(package);
+    final kmText = package.unlimitedKm
+        ? 'Unlimited KM'
+        : '${package.includedKm ?? 0} KM included';
 
-    print(
-      '🔥 RENDER PACKAGE | id=${package.id} | name=${package.name} | '
-      'includedKm=${package.includedKm} | selected=$selected | '
-      'hourly=${package.hourlyRate} | daily=${package.dailyRate} | '
-      'weekend=${package.weekendRate} | extraKm=${package.extraKmRate}',
-    );
-
-    return GestureDetector(
-      onTap: () => _selectPackage(package),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        width: double.infinity,
-        margin: const EdgeInsets.only(bottom: 16),
-        padding: const EdgeInsets.fromLTRB(14, 14, 14, 15),
-        decoration: BoxDecoration(
-          color: card,
-          borderRadius: BorderRadius.circular(25),
-          border: Border.all(
-            color: selected ? primary : const Color(0xFFE4E8E7),
-            width: selected ? 1.8 : 1.1,
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(selected ? .06 : .035),
-              blurRadius: selected ? 14 : 10,
-              offset: const Offset(0, 4),
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () => _selectPackage(package),
+        borderRadius: BorderRadius.circular(18),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          width: double.infinity,
+          margin: const EdgeInsets.only(bottom: 9),
+          padding: const EdgeInsets.all(11),
+          decoration: BoxDecoration(
+            color: selected ? const Color(0xFFF4FFFD) : card,
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(
+              color: selected ? primary : border,
+              width: selected ? 1.5 : 1,
             ),
-          ],
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  width: 68,
-                  height: 68,
-                  decoration: BoxDecoration(
-                    color: selected ? primary : softAccent,
-                    borderRadius: BorderRadius.circular(19),
-                  ),
-                  child: Icon(
-                    Icons.speed_rounded,
-                    color: selected ? Colors.white : primary,
-                    size: 34,
-                  ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(selected ? .045 : .025),
+                blurRadius: selected ? 12 : 8,
+                offset: const Offset(0, 3),
+              ),
+            ],
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 46,
+                height: 46,
+                decoration: BoxDecoration(
+                  color: selected ? primary : softAccent,
+                  borderRadius: BorderRadius.circular(14),
                 ),
-                const SizedBox(width: 17),
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.only(top: 3),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                child: Icon(
+                  Icons.speed_rounded,
+                  color: selected ? Colors.white : primary,
+                  size: 24,
+                ),
+              ),
+              const SizedBox(width: 11),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      package.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.manrope(
+                        color: heading,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      kmText,
+                      style: GoogleFonts.manrope(
+                        color: primary,
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Row(
                       children: [
                         Text(
-                          package.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                          '${_rentalTypeLabel} ',
+                          style: GoogleFonts.manrope(
+                            color: muted,
+                            fontSize: 8.5,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        Text(
+                          _money(rate),
                           style: GoogleFonts.manrope(
                             color: heading,
-                            fontSize: 18,
+                            fontSize: 12.5,
                             fontWeight: FontWeight.w900,
                           ),
                         ),
-                        const SizedBox(height: 5),
+                        Container(
+                          margin: const EdgeInsets.symmetric(horizontal: 8),
+                          width: 1,
+                          height: 14,
+                          color: border,
+                        ),
                         Text(
                           package.unlimitedKm
-                              ? 'Unlimited KM'
-                              : '${package.includedKm ?? 0} KM included',
+                              ? 'Unlimited'
+                              : '${_money(package.extraKmRate)} / KM',
                           style: GoogleFonts.manrope(
-                            color: primary,
-                            fontSize: 13.5,
-                            fontWeight: FontWeight.w900,
+                            color: body,
+                            fontSize: 9,
+                            fontWeight: FontWeight.w700,
                           ),
                         ),
                       ],
                     ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Container(
+                width: 26,
+                height: 26,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: selected ? primary : Colors.transparent,
+                  border: Border.all(
+                    color: selected ? primary : const Color(0xFFD8E1DE),
+                    width: selected ? 0 : 1.5,
                   ),
                 ),
-                const SizedBox(width: 8),
-                Icon(
-                  selected
-                      ? Icons.radio_button_checked_rounded
-                      : Icons.radio_button_off_rounded,
-                  color: selected ? primary : const Color(0xFFDDE3E1),
-                  size: 34,
-                ),
-              ],
-            ),
-            const SizedBox(height: 20),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(vertical: 13),
-              decoration: BoxDecoration(
-                color: selected ? const Color(0xFFE8FFFC) : const Color(0xFFF6F8F7),
-                borderRadius: BorderRadius.circular(20),
+                child: selected
+                    ? const Icon(
+                        Icons.check_rounded,
+                        color: Colors.white,
+                        size: 16,
+                      )
+                    : null,
               ),
-              child: Row(
-                children: [
-                  _packageRateColumn('Hourly', package.hourlyRate, true),
-                  _packageRateDivider(),
-                  _packageRateColumn('Daily', package.dailyRate, false),
-                  _packageRateDivider(),
-                  _packageRateColumn('Weekend', package.weekendRate, false),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                Icon(
-                  Icons.tune_rounded,
-                  color: body,
-                  size: 19,
-                ),
-                const SizedBox(width: 7),
-                Text(
-                  package.unlimitedKm
-                      ? 'Unlimited KM included'
-                      : '₹${package.extraKmRate.toStringAsFixed(0)} / extra KM',
-                  style: GoogleFonts.manrope(
-                    color: body,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ],
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -1744,54 +3297,173 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _summaryCard(title: 'Pricing', subtitle: '${_selectedCar?.name ?? ''} • ${_selectedCustomer?.fullName ?? ''}', icon: Icons.receipt_long_rounded, trailing: result == null ? '—' : _money(result.total)),
+        _summaryCard(
+          title: 'Pricing & Payment',
+          subtitle: '${_selectedCar?.name ?? ''} • ${_selectedCustomer?.fullName ?? ''}',
+          icon: Icons.receipt_long_rounded,
+          trailing: result == null ? '—' : _money(_effectiveTripTotal),
+        ),
         const SizedBox(height: 14),
         if (result == null)
           _emptyCard('Pricing unavailable', 'Please return and select a valid package.')
         else ...[
-          _priceLine('Rental', result.rentalPrice),
-          _priceLine('Extra KM', result.extraKmCharge),
-          _priceLine('Extra Time', result.extraTimeCharge),
-          _priceLine('Add-ons', result.addOnTotal),
-          _priceLine('Protection', result.protectionTotal),
-          _priceLine('Discount', -result.discountAmount),
-          _priceLine('Tax', result.taxAmount),
-          const SizedBox(height: 5),
-          _priceLine('Security Deposit', result.securityDeposit),
-          const Divider(height: 24, color: border),
-          _priceLine('Total', result.total, strong: true),
-          const SizedBox(height: 16),
+          _sectionCard(
+            title: 'Admin pricing override',
+            subtitle: 'Edit this booking only. Daily/weekend rentals do not add extra-time charges from the calendar boundary.',
+            child: Column(
+              children: [
+                _editablePriceField(label: 'Rental', value: _effectiveRentalPrice, field: 'rental'),
+                _editablePriceField(label: 'Extra KM', value: _effectiveExtraKmCharge, field: 'extraKm'),
+                _editablePriceField(label: 'Extra Time', value: _effectiveExtraTimeCharge, field: 'extraTime'),
+                _editablePriceField(label: 'Add-ons', value: _effectiveAddOnTotal, field: 'addons'),
+                _editablePriceField(label: 'Protection', value: _effectiveProtectionTotal, field: 'protection'),
+                _editablePriceField(label: 'Discount', value: _effectiveDiscountAmount, field: 'discount'),
+                _editablePriceField(label: 'Tax', value: _effectiveTaxAmount, field: 'tax'),
+                const Divider(height: 22, color: border),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text('Trip Total', style: GoogleFonts.manrope(
+                        color: heading, fontSize: 14, fontWeight: FontWeight.w900,
+                      )),
+                    ),
+                    SizedBox(
+                      width: 145,
+                      child: TextFormField(
+                        initialValue: _effectiveTripTotal.toStringAsFixed(2),
+                        textAlign: TextAlign.right,
+                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                        decoration: _inputDecoration('₹ Total').copyWith(
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 11),
+                        ),
+                        onChanged: _setAdminTotal,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 7),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    _adminTotalManuallyEdited
+                        ? 'Manual total override is active.'
+                        : 'Total automatically follows the editable line items.',
+                    style: GoogleFonts.manrope(color: muted, fontSize: 10, fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+          _sectionCard(
+            title: 'Security deposit',
+            subtitle: 'Refundable security is tracked separately from the rental total. Asset security never increases the trip total.',
+            child: Column(
+              children: [
+                DropdownButtonFormField<String>(
+                  value: _depositMethod,
+                  decoration: _inputDecoration('Deposit type'),
+                  items: const [
+                    DropdownMenuItem(value: 'cash', child: Text('Cash')),
+                    DropdownMenuItem(value: 'upi', child: Text('UPI / Online')),
+                    DropdownMenuItem(value: 'bank_transfer', child: Text('Bank Transfer')),
+                    DropdownMenuItem(value: 'vehicle_asset', child: Text('Vehicle / Bike as Security')),
+                    DropdownMenuItem(value: 'other_asset', child: Text('Other Asset')),
+                    DropdownMenuItem(value: 'none', child: Text('No Deposit')),
+                  ],
+                  onChanged: (value) {
+                    final method = value ?? 'cash';
+                    setState(() {
+                      _depositMethod = method;
+                      if (method == 'none' || method == 'vehicle_asset' || method == 'other_asset') {
+                        _depositAmount = 0;
+                      } else if (_depositAmount <= 0) {
+                        _depositAmount = result.securityDeposit;
+                      }
+                    });
+                  },
+                ),
+                if (_isMonetaryDeposit) ...[
+                  const SizedBox(height: 10),
+                  TextFormField(
+                    initialValue: _depositAmount.toStringAsFixed(2),
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    decoration: _inputDecoration('Deposit amount (separate from trip total)'),
+                    onChanged: (value) => setState(() => _depositAmount = double.tryParse(value) ?? 0),
+                  ),
+                ],
+                if (_depositMethod == 'vehicle_asset' || _depositMethod == 'other_asset') ...[
+                  const SizedBox(height: 10),
+                  TextFormField(
+                    maxLines: 3,
+                    decoration: _inputDecoration(
+                      _depositMethod == 'vehicle_asset' ? 'Vehicle / bike security details *' : 'Asset security details *',
+                    ),
+                    onChanged: (value) => _depositAssetDetails = value,
+                  ),
+                  const SizedBox(height: 7),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'Asset security is recorded for reference only and adds ₹0 to the trip total.',
+                      style: GoogleFonts.manrope(color: primary, fontSize: 10, fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
           _sectionCard(
             title: 'Payment collection',
-            subtitle: 'Choose how the admin is collecting payment now.',
-            child: Column(children: [
-              DropdownButtonFormField<String>(
-                value: _paymentMethod,
-                decoration: _inputDecoration('Payment method'),
-                items: const [
-                  DropdownMenuItem(value: 'cash', child: Text('Cash')),
-                  DropdownMenuItem(value: 'upi', child: Text('UPI')),
-                  DropdownMenuItem(value: 'card', child: Text('Card')),
-                  DropdownMenuItem(value: 'online', child: Text('Online')),
-                  DropdownMenuItem(value: 'pending', child: Text('Pay later / Pending')),
-                ],
-                onChanged: (value) => setState(() => _paymentMethod = value ?? 'cash'),
-              ),
-              const SizedBox(height: 10),
-              TextFormField(
-                initialValue: _paidAmount == 0 ? '' : _paidAmount.toStringAsFixed(2),
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                decoration: _inputDecoration('Amount collected now'),
-                onChanged: (value) => _paidAmount = double.tryParse(value) ?? 0,
-              ),
-              const SizedBox(height: 10),
-              TextFormField(
-                initialValue: _bookingNote,
-                maxLines: 3,
-                decoration: _inputDecoration('Booking note (optional)'),
-                onChanged: (value) => _bookingNote = value,
-              ),
-            ]),
+            subtitle: 'Choose how much the admin is collecting now. Monetary deposit is added separately; asset deposit is ₹0.',
+            child: Column(
+              children: [
+                DropdownButtonFormField<String>(
+                  value: _paymentMethod,
+                  decoration: _inputDecoration('Payment method'),
+                  items: const [
+                    DropdownMenuItem(value: 'cash', child: Text('Cash')),
+                    DropdownMenuItem(value: 'upi', child: Text('UPI')),
+                    DropdownMenuItem(value: 'card', child: Text('Card')),
+                    DropdownMenuItem(value: 'online', child: Text('Online')),
+                    DropdownMenuItem(value: 'pending', child: Text('Pay later / Pending')),
+                  ],
+                  onChanged: (value) => setState(() => _paymentMethod = value ?? 'cash'),
+                ),
+                const SizedBox(height: 10),
+                TextFormField(
+                  initialValue: _paidAmount == 0 ? '' : _paidAmount.toStringAsFixed(2),
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: _inputDecoration('Amount collected now'),
+                  onChanged: (value) => _paidAmount = double.tryParse(value) ?? 0,
+                ),
+                const SizedBox(height: 10),
+                TextFormField(
+                  initialValue: _bookingNote,
+                  maxLines: 3,
+                  decoration: _inputDecoration('Booking note (optional)'),
+                  onChanged: (value) => _bookingNote = value,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+          Container(
+            padding: const EdgeInsets.all(17),
+            decoration: BoxDecoration(
+              color: softAccent,
+              borderRadius: BorderRadius.circular(19),
+              border: Border.all(color: primary.withOpacity(.16)),
+            ),
+            child: Column(
+              children: [
+                _priceLine('Trip Total', _effectiveTripTotal, strong: true),
+                _priceLine('Security Deposit', _effectiveDepositAmount),
+                const Divider(height: 18, color: border),
+                _priceLine('Amount Payable Now', _effectiveAmountPayable, strong: true),
+              ],
+            ),
           ),
           const SizedBox(height: 16),
           _primaryButton('Review Booking', Icons.preview_rounded, _continueToReview),
@@ -1810,15 +3482,17 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       children: [
         _heroCard(icon: Icons.fact_check_rounded, title: 'Final booking review', subtitle: 'Everything is checked once more before the booking is written to Firebase.'),
         const SizedBox(height: 14),
-        _reviewCard('Rental period', [
+        _reviewCard('Rental type & period', [
+          _rentalTypeLabel,
           '${_formatDateTime(_pickupDateTime)} → ${_formatDateTime(_returnDateTime)}',
           _durationText(result),
+          if (!_isHourly) 'Availability block ends at 11:59 PM on ${_formatDate(_returnDate)}',
         ]),
         _reviewCard('Vehicle', [car.name, car.registrationNumber.isEmpty ? '${car.type} • ${car.transmission}' : car.registrationNumber]),
         _reviewCard('Pickup branch', [branch['name']?.toString() ?? 'Branch', branch['address']?.toString() ?? '']),
         _reviewCard('Customer', [customer.fullName, customer.phone, customer.email]),
         _reviewCard('KM package', [result.selectedKmPackageName ?? 'Default pricing', result.unlimitedKm ? 'Unlimited KM' : '${result.includedKm ?? 0} KM included']),
-        _reviewCard('Payment', [_paymentMethod.toUpperCase(), 'Collected: ${_money(_paidAmount)}', 'Total: ${_money(result.total)}']),
+        _reviewCard('Payment', [_paymentMethod.toUpperCase(), 'Collected: ${_money(_paidAmount)}', 'Trip Total: ${_money(_effectiveTripTotal)}', 'Security Deposit: ${_money(_effectiveDepositAmount)}', 'Amount Payable: ${_money(_effectiveAmountPayable)}']),
         const SizedBox(height: 6),
         Container(
           padding: const EdgeInsets.all(18),
@@ -1829,7 +3503,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
             Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text('Amount payable', style: GoogleFonts.manrope(color: body, fontSize: 11, fontWeight: FontWeight.w700)),
               const SizedBox(height: 3),
-              Text(_money(result.total), style: GoogleFonts.manrope(color: heading, fontSize: 24, fontWeight: FontWeight.w900)),
+              Text(_money(_effectiveAmountPayable), style: GoogleFonts.manrope(color: heading, fontSize: 24, fontWeight: FontWeight.w900)),
             ])),
           ]),
         ),
@@ -1927,20 +3601,66 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   }
 
   Widget _dateTile(String label, String value, IconData icon, VoidCallback onTap) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.all(13),
-        decoration: BoxDecoration(color: background, borderRadius: BorderRadius.circular(15), border: Border.all(color: border)),
-        child: Row(children: [
-          Icon(icon, color: primary, size: 18),
-          const SizedBox(width: 8),
-          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(label, style: GoogleFonts.manrope(color: muted, fontSize: 9, fontWeight: FontWeight.w800)),
-            const SizedBox(height: 3),
-            Text(value, overflow: TextOverflow.ellipsis, style: GoogleFonts.manrope(color: heading, fontSize: 11.5, fontWeight: FontWeight.w900)),
-          ])),
-        ]),
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: Ink(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+          decoration: BoxDecoration(
+            color: card,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: border),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x05000000),
+                blurRadius: 10,
+                offset: Offset(0, 3),
+              ),
+            ],
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  color: softAccent,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(icon, color: primary, size: 16),
+              ),
+              const SizedBox(width: 9),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      label,
+                      style: GoogleFonts.manrope(
+                        color: muted,
+                        fontSize: 8.5,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      value,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.manrope(
+                        color: heading,
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(Icons.edit_calendar_rounded, color: muted, size: 14),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -2037,6 +3757,31 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     final minute = date.minute.toString().padLeft(2, '0');
     final period = date.hour >= 12 ? 'PM' : 'AM';
     return '${date.day.toString().padLeft(2, '0')}/${date.month.toString().padLeft(2, '0')}/${date.year} • $hour:$minute $period';
+  }
+}
+
+class _CalendarWeekLabel extends StatelessWidget {
+  static const Color muted = Color(0xFF94A09D);
+
+  final String label;
+
+  const _CalendarWeekLabel(this.label);
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: Center(
+        child: Text(
+          label,
+          style: GoogleFonts.manrope(
+            color: muted,
+            fontSize: 7.5,
+            fontWeight: FontWeight.w900,
+            letterSpacing: .6,
+          ),
+        ),
+      ),
+    );
   }
 }
 

@@ -155,6 +155,14 @@ class BookingPricingSnapshot {
   final double securityDeposit;
   final double totalAmount;
 
+  // New rental/pricing metadata. These are snapshots and therefore remain
+  // unchanged when the live pricing configuration changes.
+  final String? rentalType;
+  final int pricingVersion;
+  final String? specialPricingRuleId;
+  final String? currency;
+  final double? minimumBillingAmount;
+
   const BookingPricingSnapshot({
     required this.pricingProfileId,
     this.kmPackageId,
@@ -171,6 +179,11 @@ class BookingPricingSnapshot {
     required this.taxAmount,
     required this.securityDeposit,
     required this.totalAmount,
+    this.rentalType,
+    this.pricingVersion = 1,
+    this.specialPricingRuleId,
+    this.currency,
+    this.minimumBillingAmount,
   });
 
   factory BookingPricingSnapshot.fromMap(
@@ -193,6 +206,17 @@ class BookingPricingSnapshot {
       taxAmount: _toDouble(map['taxAmount']),
       securityDeposit: _toDouble(map['securityDeposit']),
       totalAmount: _toDouble(map['totalAmount']),
+      rentalType: map['rentalType']?.toString(),
+      pricingVersion: _toInt(map['pricingVersion']) < 1
+          ? 1
+          : _toInt(map['pricingVersion']),
+      specialPricingRuleId:
+          map['specialPricingRuleId']?.toString(),
+      currency: map['currency']?.toString(),
+      minimumBillingAmount:
+          map['minimumBillingAmount'] == null
+              ? null
+              : _toDouble(map['minimumBillingAmount']),
     );
   }
 
@@ -213,6 +237,11 @@ class BookingPricingSnapshot {
       'taxAmount': taxAmount,
       'securityDeposit': securityDeposit,
       'totalAmount': totalAmount,
+      'rentalType': rentalType,
+      'pricingVersion': pricingVersion,
+      'specialPricingRuleId': specialPricingRuleId,
+      'currency': currency,
+      'minimumBillingAmount': minimumBillingAmount,
     };
   }
 }
@@ -241,6 +270,19 @@ class Booking {
 
   final DateTime pickupDateTime;
   final DateTime returnDateTime;
+
+  /// Rental mode selected during booking.
+  ///
+  /// Stored as a string in the booking snapshot so this model remains
+  /// compatible with the pricing models while avoiding a hard dependency on
+  /// their enum implementation.
+  final String rentalType;
+
+  /// Pricing profile version used to calculate this booking.
+  final int pricingVersion;
+
+  /// Special-date pricing rule used, if any.
+  final String? specialPricingRuleId;
 
   final DateTime? actualPickupDateTime;
   final DateTime? actualReturnDateTime;
@@ -347,6 +389,9 @@ class Booking {
     required this.paymentStatus,
     required this.pickupDateTime,
     required this.returnDateTime,
+    this.rentalType = 'daily',
+    this.pricingVersion = 1,
+    this.specialPricingRuleId,
     this.actualPickupDateTime,
     this.actualReturnDateTime,
     required this.pickupBranchId,
@@ -415,6 +460,33 @@ class Booking {
 
   bool get isNoShow => status == BookingStatus.noShow;
 
+  bool get requiresPayment =>
+      paymentStatus == PaymentStatus.pending ||
+      paymentStatus == PaymentStatus.partiallyPaid;
+
+  bool get isPaymentComplete =>
+      paymentStatus == PaymentStatus.paid;
+
+  bool get canBeCancelled =>
+      !isFinished &&
+      status != BookingStatus.active &&
+      status != BookingStatus.returnPending;
+
+  bool get hasActualPickup =>
+      actualPickupDateTime != null;
+
+  bool get hasActualReturn =>
+      actualReturnDateTime != null;
+
+  bool get isRentalTypeHourly =>
+      rentalType == 'hourly';
+
+  bool get isRentalTypeDaily =>
+      rentalType == 'daily';
+
+  bool get isRentalTypeWeekend =>
+      rentalType == 'weekend';
+
   bool get isUpcoming =>
       status == BookingStatus.pending ||
       status == BookingStatus.confirmed ||
@@ -442,6 +514,31 @@ class Booking {
   bool get isExpired {
     if (expiresAt == null) return false;
     return DateTime.now().isAfter(expiresAt!);
+  }
+
+  // ============================================================
+  // BOOKING / PAYMENT HELPERS
+  // ============================================================
+
+  double get balanceAmount {
+    final balance = totalAmount - paidAmount + refundAmount;
+    return balance < 0 ? 0 : balance;
+  }
+
+  bool get hasBalance => balanceAmount > 0.009;
+
+  bool get hasRefund => refundAmount > 0.009;
+
+  /// The operational availability window.
+  ///
+  /// The availability service should still normalize daily/weekend rentals
+  /// to the selected full calendar days. This getter only exposes the stored
+  /// booking window.
+  DateTimeRangeValue get availabilityRange {
+    return DateTimeRangeValue(
+      start: pickupDateTime,
+      end: returnDateTime,
+    );
   }
 
   // ============================================================
@@ -482,6 +579,15 @@ class Booking {
       returnDateTime:
           _dateTimeFromValue(map['returnDateTime']) ??
           DateTime.now(),
+
+      rentalType:
+          _normalizeRentalType(map['rentalType']),
+
+      pricingVersion:
+          _positiveInt(map['pricingVersion'], 1),
+
+      specialPricingRuleId:
+          map['specialPricingRuleId']?.toString(),
 
       actualPickupDateTime:
           _dateTimeFromValue(
@@ -642,6 +748,11 @@ class Booking {
       'returnDateTime':
           Timestamp.fromDate(returnDateTime),
 
+      'rentalType': rentalType,
+      'pricingVersion': pricingVersion,
+      'specialPricingRuleId':
+          specialPricingRuleId,
+
       'actualPickupDateTime':
           actualPickupDateTime == null
               ? null
@@ -748,6 +859,9 @@ class Booking {
     PaymentStatus? paymentStatus,
     DateTime? pickupDateTime,
     DateTime? returnDateTime,
+    String? rentalType,
+    int? pricingVersion,
+    String? specialPricingRuleId,
     DateTime? actualPickupDateTime,
     DateTime? actualReturnDateTime,
     String? pickupBranchId,
@@ -813,6 +927,18 @@ class Booking {
       returnDateTime:
           returnDateTime ??
           this.returnDateTime,
+
+      rentalType:
+          rentalType ??
+          this.rentalType,
+
+      pricingVersion:
+          pricingVersion ??
+          this.pricingVersion,
+
+      specialPricingRuleId:
+          specialPricingRuleId ??
+          this.specialPricingRuleId,
 
       actualPickupDateTime:
           actualPickupDateTime ??
@@ -1128,5 +1254,56 @@ class Booking {
     return null;
   }
 
+  static int _positiveInt(
+    dynamic value,
+    int fallback,
+  ) {
+    final parsed = _toInt(value);
+    return parsed < 1 ? fallback : parsed;
+  }
 
+  static String _normalizeRentalType(
+    dynamic value,
+  ) {
+    final normalized =
+        value?.toString().trim().toLowerCase();
+
+    switch (normalized) {
+      case 'hourly':
+        return 'hourly';
+      case 'weekend':
+        return 'weekend';
+      case 'daily':
+        return 'daily';
+      default:
+        return 'daily';
+    }
+  }
 }
+
+/// Lightweight range value used by booking availability integrations without
+/// coupling this model to a UI/date-range package.
+class DateTimeRangeValue {
+  final DateTime start;
+  final DateTime end;
+
+  const DateTimeRangeValue({
+    required this.start,
+    required this.end,
+  });
+
+  bool get isValid =>
+      !end.isBefore(start);
+
+  Duration get duration =>
+      end.difference(start);
+
+  bool overlaps(
+    DateTime otherStart,
+    DateTime otherEnd,
+  ) {
+    return start.isBefore(otherEnd) &&
+        end.isAfter(otherStart);
+  }
+}
+

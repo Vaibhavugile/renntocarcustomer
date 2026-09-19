@@ -25,6 +25,13 @@ class BookingService {
   final AdminAvailabilityService _availabilityService =
       AdminAvailabilityService.instance;
 
+  BookingService._();
+
+  static final BookingService instance =
+      BookingService._();
+
+  factory BookingService() => instance;
+
   CollectionReference<Map<String, dynamic>> _bookings(
     String tenantId,
   ) =>
@@ -103,9 +110,15 @@ class BookingService {
   }) async {
     _validateDateRange(pickupDateTime, returnDateTime);
 
+    final normalized = _normalizeAvailabilityRange(
+      rentalType: null,
+      pickupDateTime: pickupDateTime,
+      returnDateTime: returnDateTime,
+    );
+
     final snapshot = await _availabilityService.getAvailabilityForRange(
-      rangeStart: pickupDateTime,
-      rangeEnd: returnDateTime,
+      rangeStart: normalized.start,
+      rangeEnd: normalized.end,
       tenantId: tenantId,
     );
 
@@ -128,10 +141,87 @@ class BookingService {
 
     return _availabilityService.isCarAvailableForRange(
       car: car,
-      start: pickupDateTime,
-      end: returnDateTime,
+      start: normalized.start,
+      end: normalized.end,
       bookings: bookings,
       blocks: snapshot.blocks,
+    );
+  }
+
+  /// Availability check that understands hourly/daily/weekend rental
+  /// semantics.
+  ///
+  /// Hourly uses the exact timestamps.
+  /// Daily/weekend occupy the complete selected calendar days and therefore
+  /// end at 23:59:59.999999 on the selected return date.
+  Future<bool> isCarAvailableForRental({
+    required String tenantId,
+    required String carId,
+    required String rentalType,
+    required DateTime pickupDateTime,
+    required DateTime returnDateTime,
+    String? excludeBookingId,
+  }) async {
+    _validateDateRange(
+      pickupDateTime,
+      returnDateTime,
+    );
+
+    final normalized = _normalizeAvailabilityRange(
+      rentalType: rentalType,
+      pickupDateTime: pickupDateTime,
+      returnDateTime: returnDateTime,
+    );
+
+    final snapshot =
+        await _availabilityService.getAvailabilityForRange(
+      rangeStart: normalized.start,
+      rangeEnd: normalized.end,
+      tenantId: tenantId,
+    );
+
+    Car? car;
+    for (final item in snapshot.cars) {
+      if (item.id == carId) {
+        car = item;
+        break;
+      }
+    }
+
+    if (car == null) {
+      return false;
+    }
+
+    final bookings = snapshot.bookings.where((booking) {
+      if (excludeBookingId == null) {
+        return true;
+      }
+      return booking.id != excludeBookingId;
+    }).toList();
+
+    return _availabilityService.isCarAvailableForRange(
+      car: car,
+      start: normalized.start,
+      end: normalized.end,
+      bookings: bookings,
+      blocks: snapshot.blocks,
+    );
+  }
+
+  /// Rechecks a booking using the rental type stored on the booking.
+  Future<bool> isBookingStillAvailable({
+    required String tenantId,
+    required Booking booking,
+  }) {
+    _validateTenant(booking, tenantId);
+
+    return isCarAvailableForRental(
+      tenantId: tenantId,
+      carId: booking.carId,
+      rentalType: booking.rentalType,
+      pickupDateTime: booking.pickupDateTime,
+      returnDateTime: booking.returnDateTime,
+      excludeBookingId: booking.bookingId,
     );
   }
 
@@ -162,6 +252,8 @@ class BookingService {
       booking.pickupDateTime,
       booking.returnDateTime,
     );
+
+    _validateRentalMetadata(booking);
 
     if (booking.carId.trim().isEmpty) {
       throw Exception('Car is required.');
@@ -209,9 +301,10 @@ class BookingService {
     );
 
     // Final authoritative availability check immediately before write.
-    final available = await isCarAvailable(
+    final available = await isCarAvailableForRental(
       tenantId: tenantId,
       carId: enriched.carId,
+      rentalType: enriched.rentalType,
       pickupDateTime: enriched.pickupDateTime,
       returnDateTime: enriched.returnDateTime,
     );
@@ -258,6 +351,75 @@ class BookingService {
     return Booking.fromMap(
       saved.id,
       saved.data()!,
+    );
+  }
+
+  void _validateRentalMetadata(
+    Booking booking,
+  ) {
+    final rentalType =
+        booking.rentalType.trim().toLowerCase();
+
+    const allowed = {
+      'hourly',
+      'daily',
+      'weekend',
+    };
+
+    if (!allowed.contains(rentalType)) {
+      throw Exception(
+        'Invalid rental type. Use hourly, daily or weekend.',
+      );
+    }
+
+    if (booking.pricingVersion < 1) {
+      throw Exception(
+        'Invalid pricing version.',
+      );
+    }
+
+    if (booking.pricingProfileId.trim().isEmpty) {
+      throw Exception(
+        'Pricing profile is required.',
+      );
+    }
+  }
+
+  _AvailabilityRange _normalizeAvailabilityRange({
+    required String? rentalType,
+    required DateTime pickupDateTime,
+    required DateTime returnDateTime,
+  }) {
+    final type =
+        rentalType?.trim().toLowerCase();
+
+    if (type == 'daily' ||
+        type == 'weekend') {
+      final start = DateTime(
+        pickupDateTime.year,
+        pickupDateTime.month,
+        pickupDateTime.day,
+      );
+
+      final end = DateTime(
+        returnDateTime.year,
+        returnDateTime.month,
+        returnDateTime.day,
+        23,
+        59,
+        59,
+        999,
+      );
+
+      return _AvailabilityRange(
+        start: start,
+        end: end,
+      );
+    }
+
+    return _AvailabilityRange(
+      start: pickupDateTime,
+      end: returnDateTime,
     );
   }
 
@@ -309,6 +471,8 @@ class BookingService {
       booking.pickupDateTime,
       booking.returnDateTime,
     );
+
+    _validateRentalMetadata(booking);
 
     if (booking.carId.trim().isEmpty) {
       throw Exception('Car is required.');
@@ -384,9 +548,10 @@ class BookingService {
     );
 
     // Final authoritative availability check immediately before write.
-    final available = await isCarAvailable(
+    final available = await isCarAvailableForRental(
       tenantId: tenantId,
       carId: enriched.carId,
+      rentalType: enriched.rentalType,
       pickupDateTime: enriched.pickupDateTime,
       returnDateTime: enriched.returnDateTime,
     );
@@ -516,6 +681,81 @@ class BookingService {
     );
 
     return bookings;
+  }
+
+  Future<List<Booking>> getBookingsForAdminDateRange({
+    required String tenantId,
+    required DateTime start,
+    required DateTime end,
+    String? carId,
+    BookingStatus? status,
+  }) async {
+    await _requireTenantAdmin(
+      tenantId: tenantId,
+    );
+
+    if (!start.isBefore(end)) {
+      throw Exception(
+        'End date must be after start date.',
+      );
+    }
+
+    Query<Map<String, dynamic>> query =
+        _bookings(tenantId)
+            .where(
+              'pickupDateTime',
+              isLessThan: Timestamp.fromDate(end),
+            );
+
+    if (carId != null &&
+        carId.trim().isNotEmpty) {
+      query = query.where(
+        'carId',
+        isEqualTo: carId.trim(),
+      );
+    }
+
+    final snapshot = await query.get();
+
+    final result = snapshot.docs
+        .map(
+          (doc) => Booking.fromMap(
+            doc.id,
+            doc.data(),
+          ),
+        )
+        .where(
+          (booking) =>
+              booking.tenantId == tenantId &&
+              booking.returnDateTime.isAfter(start) &&
+              booking.pickupDateTime.isBefore(end) &&
+              (status == null ||
+                  booking.status == status),
+        )
+        .toList();
+
+    result.sort(
+      (a, b) =>
+          a.pickupDateTime.compareTo(
+        b.pickupDateTime,
+      ),
+    );
+
+    return result;
+  }
+
+  Future<List<Booking>> getBookingsForCarForRange({
+    required String tenantId,
+    required String carId,
+    required DateTime start,
+    required DateTime end,
+  }) {
+    return getBookingsForAdminDateRange(
+      tenantId: tenantId,
+      start: start,
+      end: end,
+      carId: carId,
+    );
   }
 
   Future<void> updateBookingStatusForAdmin({
@@ -922,6 +1162,27 @@ class BookingService {
               booking.pickupDateTime.isBefore(end),
         )
         .toList();
+  }
+
+  Future<bool> hasCustomerBookingOverlap({
+    required String tenantId,
+    required DateTime start,
+    required DateTime end,
+    String? excludeBookingId,
+  }) async {
+    _validateDateRange(start, end);
+
+    final bookings = await getCustomerBookings(
+      tenantId: tenantId,
+    );
+
+    return bookings.any(
+      (booking) =>
+          booking.isBlockingAvailability &&
+          booking.bookingId != excludeBookingId &&
+          booking.pickupDateTime.isBefore(end) &&
+          booking.returnDateTime.isAfter(start),
+    );
   }
 
   // ============================================================
@@ -1341,4 +1602,15 @@ class BookingService {
         ) ??
         0;
   }
+
+}
+
+class _AvailabilityRange {
+  final DateTime start;
+  final DateTime end;
+
+  const _AvailabilityRange({
+    required this.start,
+    required this.end,
+  });
 }

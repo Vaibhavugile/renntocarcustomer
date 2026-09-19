@@ -76,6 +76,45 @@ class _AdminAddPricingProfileScreenState
   final TextEditingController _depositController =
       TextEditingController();
 
+  final TextEditingController _minimumAssetValueController =
+      TextEditingController();
+
+  final TextEditingController _hourlyMinimumHoursController =
+      TextEditingController(text: '1');
+
+  final TextEditingController _dailyMinimumDaysController =
+      TextEditingController(text: '1');
+
+  final TextEditingController _weekendMinimumDaysController =
+      TextEditingController(text: '2');
+
+  final TextEditingController _weekendMaximumDaysController =
+      TextEditingController(text: '2');
+
+  final TextEditingController _specialRuleNameController =
+      TextEditingController();
+
+  final TextEditingController _specialRuleStartController =
+      TextEditingController();
+
+  final TextEditingController _specialRuleEndController =
+      TextEditingController();
+
+  final TextEditingController _specialHourlyController =
+      TextEditingController();
+
+  final TextEditingController _specialDailyController =
+      TextEditingController();
+
+  final TextEditingController _specialWeekendController =
+      TextEditingController();
+
+  final TextEditingController _specialExtraKmController =
+      TextEditingController();
+
+  final TextEditingController _specialMinimumHoursController =
+      TextEditingController(text: '1');
+
   final TextEditingController _kmOptionsController =
       TextEditingController();
 
@@ -90,6 +129,24 @@ class _AdminAddPricingProfileScreenState
   bool _isActive = true;
   bool _isLoadingCars = true;
   bool _isSaving = false;
+
+  bool _hourlyEnabled = true;
+  bool _dailyEnabled = true;
+  bool _weekendEnabled = true;
+  bool _requireHourlyTime = true;
+  bool _requireDailyTime = false;
+  bool _requireWeekendTime = false;
+
+  bool _depositRequired = true;
+  DepositType _depositType = DepositType.cash;
+
+  bool _specialRuleEnabled = false;
+  bool _specialHourlyEnabled = false;
+  bool _specialDailyEnabled = true;
+  bool _specialWeekendEnabled = true;
+
+  DateTime? _specialStartDate;
+  DateTime? _specialEndDate;
 
   final List<_PackageDraft> _packages = [];
 
@@ -118,6 +175,19 @@ class _AdminAddPricingProfileScreenState
     _extraDayController.dispose();
     _lateReturnController.dispose();
     _depositController.dispose();
+    _minimumAssetValueController.dispose();
+    _hourlyMinimumHoursController.dispose();
+    _dailyMinimumDaysController.dispose();
+    _weekendMinimumDaysController.dispose();
+    _weekendMaximumDaysController.dispose();
+    _specialRuleNameController.dispose();
+    _specialRuleStartController.dispose();
+    _specialRuleEndController.dispose();
+    _specialHourlyController.dispose();
+    _specialDailyController.dispose();
+    _specialWeekendController.dispose();
+    _specialExtraKmController.dispose();
+    _specialMinimumHoursController.dispose();
     _kmOptionsController.dispose();
 
     for (final package in _packages) {
@@ -236,8 +306,52 @@ class _AdminAddPricingProfileScreenState
         lateReturnRate:
             _number(_lateReturnController),
 
-        securityDeposit:
-            _number(_depositController),
+        hourlyPricing: RentalTypePricing(
+          enabled: _hourlyEnabled,
+          minimumBillingHours: _positiveInt(_hourlyMinimumHoursController, 1),
+          minimumBillingDays: 1,
+          minimumWeekendDays: 2,
+          maximumWeekendDays: 2,
+          allowedWeekdays: const [1, 2, 3, 4, 5, 6, 7],
+          requireTimeSelection: _requireHourlyTime,
+          rate: _number(_hourlyController),
+        ),
+
+        dailyPricing: RentalTypePricing(
+          enabled: _dailyEnabled,
+          minimumBillingHours: 1,
+          minimumBillingDays: _positiveInt(_dailyMinimumDaysController, 1),
+          minimumWeekendDays: 2,
+          maximumWeekendDays: 2,
+          allowedWeekdays: const [1, 2, 3, 4, 5, 6, 7],
+          requireTimeSelection: _requireDailyTime,
+          rate: _number(_dailyController),
+        ),
+
+        weekendPricing: RentalTypePricing(
+          enabled: _weekendEnabled,
+          minimumBillingHours: 1,
+          minimumBillingDays: 1,
+          minimumWeekendDays:
+              _positiveInt(_weekendMinimumDaysController, 2),
+          maximumWeekendDays:
+              _positiveInt(_weekendMaximumDaysController, 2),
+          allowedWeekdays: const [6, 7],
+          requireTimeSelection: _requireWeekendTime,
+          rate: _number(_weekendController),
+        ),
+
+        specialPricingRules: _buildSpecialRules(),
+
+        pricingVersion: 1,
+
+        depositConfig: DepositConfig(
+          required: _depositRequired,
+          defaultAmount: _number(_depositController),
+          allowedTypes: [_depositType],
+          minimumAssetValue:
+              _number(_minimumAssetValueController),
+        ),
 
         isActive: _isActive,
       );
@@ -310,7 +424,83 @@ class _AdminAddPricingProfileScreenState
       extraKmRate: _number(
         draft.extraKmController,
       ),
+      isActive: draft.isActive,
+      supportedRentalTypes: draft.supportedRentalTypes,
+      minimumBillingHours:
+          _positiveInt(draft.minimumHoursController, 1),
+      minimumBillingDays:
+          _positiveInt(draft.minimumDaysController, 1),
+      minimumWeekendDays:
+          _positiveInt(draft.minimumWeekendDaysController, 2),
+      maximumWeekendDays:
+          _positiveInt(draft.maximumWeekendDaysController, 2),
     );
+  }
+
+  List<SpecialPricingRule> _buildSpecialRules() {
+    if (!_specialRuleEnabled ||
+        _specialStartDate == null ||
+        _specialEndDate == null) {
+      return const [];
+    }
+
+    return [
+      SpecialPricingRule(
+        id: 'special_${DateTime.now().microsecondsSinceEpoch}',
+        name: _specialRuleNameController.text.trim().isEmpty
+            ? 'Special Pricing'
+            : _specialRuleNameController.text.trim(),
+        startDate: _specialStartDate!,
+        endDate: _specialEndDate!,
+        enabled: true,
+        hourlyEnabled: _specialHourlyEnabled,
+        dailyEnabled: _specialDailyEnabled,
+        weekendEnabled: _specialWeekendEnabled,
+        hourlyRate: _number(_specialHourlyController),
+        dailyRate: _number(_specialDailyController),
+        weekendRate: _number(_specialWeekendController),
+        extraKmRate: _number(_specialExtraKmController),
+        minimumBillingHours:
+            _positiveInt(_specialMinimumHoursController, 1),
+      ),
+    ];
+  }
+
+  Future<void> _pickSpecialDate({required bool start}) async {
+    final initial = start
+        ? (_specialStartDate ?? DateTime.now())
+        : (_specialEndDate ?? _specialStartDate ?? DateTime.now());
+
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: DateTime(2020),
+      lastDate: DateTime(2100),
+    );
+
+    if (picked == null || !mounted) return;
+
+    setState(() {
+      if (start) {
+        _specialStartDate = picked;
+        if (_specialEndDate != null &&
+            _specialEndDate!.isBefore(picked)) {
+          _specialEndDate = picked;
+        }
+      } else {
+        _specialEndDate = picked;
+      }
+
+      _specialRuleStartController.text = _formatDate(_specialStartDate);
+      _specialRuleEndController.text = _formatDate(_specialEndDate);
+    });
+  }
+
+  String _formatDate(DateTime? date) {
+    if (date == null) return '';
+    return '${date.day.toString().padLeft(2, '0')}/'
+        '${date.month.toString().padLeft(2, '0')}/'
+        '${date.year}';
   }
 
   List<int> _parseKmOptions() {
@@ -343,6 +533,14 @@ class _AdminAddPricingProfileScreenState
           controller.text.trim(),
         ) ??
         0;
+  }
+
+  int _positiveInt(
+    TextEditingController controller,
+    int fallback,
+  ) {
+    final value = int.tryParse(controller.text.trim());
+    return value == null || value < 1 ? fallback : value;
   }
 
   String _money(double value) {
@@ -488,18 +686,29 @@ class _AdminAddPricingProfileScreenState
             ),
             const SizedBox(height: 16),
             _section(
+              title: 'Rental Types',
+              subtitle:
+                  'Control which rental modes customers can book and their minimum billing rules.',
+              icon: Icons.calendar_month_outlined,
+              child: _rentalTypeSettings(),
+            ),
+            const SizedBox(height: 16),
+            _section(
+              title: 'Special Date Pricing',
+              subtitle:
+                  'Optional date-range pricing for holidays, festivals and peak periods.',
+              icon: Icons.event_available_outlined,
+              child: _specialPricingFields(),
+            ),
+            const SizedBox(height: 16),
+            _section(
               title: 'Security Deposit',
+
               subtitle:
                   'Amount held against the rental.',
               icon:
                   Icons.account_balance_wallet_outlined,
-              child: _field(
-                controller: _depositController,
-                label: 'Security deposit',
-                hint: '5000',
-                keyboardType:
-                    TextInputType.number,
-              ),
+              child: _depositFields(),
             ),
             const SizedBox(height: 16),
             _section(
@@ -1017,10 +1226,143 @@ class _AdminAddPricingProfileScreenState
                   TextInputType.number,
             ),
           const SizedBox(height: 10),
+          _packageRentalTypes(package),
+          const SizedBox(height: 10),
           _packageRates(package),
         ],
       ),
     );
+  }
+
+  Widget _packageRentalTypes(_PackageDraft package) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Align(
+          alignment: Alignment.centerLeft,
+          child: Text(
+            'Supported rental types',
+            style: TextStyle(
+              fontFamily: 'Manrope',
+              fontSize: 12.5,
+              fontWeight: FontWeight.w800,
+              color: heading,
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: KmPackageRentalType.values.map((type) {
+            final selected =
+                package.supportedRentalTypes.contains(type);
+            return FilterChip(
+              selected: selected,
+              label: Text(
+                _packageRentalTypeLabel(type),
+                style: const TextStyle(
+                  fontFamily: 'Manrope',
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              selectedColor: softAccent,
+              checkmarkColor: primary,
+              onSelected: (value) {
+                setState(() {
+                  final values =
+                      List<KmPackageRentalType>.from(
+                    package.supportedRentalTypes,
+                  );
+                  if (value) {
+                    if (!values.contains(type)) values.add(type);
+                  } else {
+                    values.remove(type);
+                  }
+                  package.supportedRentalTypes = values;
+                });
+              },
+            );
+          }).toList(),
+        ),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            Expanded(
+              child: _field(
+                controller: package.minimumHoursController,
+                label: 'Min hours',
+                hint: '1',
+                keyboardType: TextInputType.number,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _field(
+                controller: package.minimumDaysController,
+                label: 'Min days',
+                hint: '1',
+                keyboardType: TextInputType.number,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            Expanded(
+              child: _field(
+                controller: package.minimumWeekendDaysController,
+                label: 'Weekend min',
+                hint: '2',
+                keyboardType: TextInputType.number,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _field(
+                controller: package.maximumWeekendDaysController,
+                label: 'Weekend max',
+                hint: '2',
+                keyboardType: TextInputType.number,
+              ),
+            ),
+          ],
+        ),
+        SwitchListTile.adaptive(
+          contentPadding: EdgeInsets.zero,
+          activeColor: primary,
+          title: const Text(
+            'Package active',
+            style: TextStyle(
+              fontFamily: 'Manrope',
+              fontSize: 12.5,
+              fontWeight: FontWeight.w700,
+              color: heading,
+            ),
+          ),
+          value: package.isActive,
+          onChanged: (value) =>
+              setState(() => package.isActive = value),
+        ),
+      ],
+    );
+  }
+
+  String _packageRentalTypeLabel(KmPackageRentalType type) {
+    switch (type) {
+      case KmPackageRentalType.hourly:
+        return 'Hourly';
+      case KmPackageRentalType.daily:
+        return 'Daily';
+      case KmPackageRentalType.weekend:
+        return 'Weekend';
+      case KmPackageRentalType.weekly:
+        return 'Weekly';
+      case KmPackageRentalType.monthly:
+        return 'Monthly';
+    }
   }
 
   Widget _packageRates(
@@ -1099,6 +1441,415 @@ class _AdminAddPricingProfileScreenState
         ),
       ],
     );
+  }
+
+  Widget _rentalTypeSettings() {
+    return Column(
+      children: [
+        _rentalTypeTile(
+          title: 'Hourly rental',
+          subtitle: 'Exact pickup and return time. Availability uses exact timestamps.',
+          value: _hourlyEnabled,
+          onChanged: (value) => setState(() => _hourlyEnabled = value),
+        ),
+        if (_hourlyEnabled)
+          _field(
+            controller: _hourlyMinimumHoursController,
+            label: 'Minimum billable hours',
+            hint: '1',
+            keyboardType: TextInputType.number,
+          ),
+        if (_hourlyEnabled)
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            activeColor: primary,
+            title: const Text(
+              'Require time selection',
+              style: TextStyle(
+                fontFamily: 'Manrope',
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: heading,
+              ),
+            ),
+            value: _requireHourlyTime,
+            onChanged: (value) =>
+                setState(() => _requireHourlyTime = value),
+          ),
+        const Divider(height: 20, color: border),
+        _rentalTypeTile(
+          title: 'Daily rental',
+          subtitle: 'Selected calendar days are blocked until 11:59 PM on the return date.',
+          value: _dailyEnabled,
+          onChanged: (value) => setState(() => _dailyEnabled = value),
+        ),
+        if (_dailyEnabled)
+          _field(
+            controller: _dailyMinimumDaysController,
+            label: 'Minimum billable days',
+            hint: '1',
+            keyboardType: TextInputType.number,
+          ),
+        if (_dailyEnabled)
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            activeColor: primary,
+            title: const Text(
+              'Require time selection',
+              style: TextStyle(
+                fontFamily: 'Manrope',
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: heading,
+              ),
+            ),
+            value: _requireDailyTime,
+            onChanged: (value) =>
+                setState(() => _requireDailyTime = value),
+          ),
+        const Divider(height: 20, color: border),
+        _rentalTypeTile(
+          title: 'Weekend rental',
+          subtitle: 'Weekend dates are treated as full-day availability blocks.',
+          value: _weekendEnabled,
+          onChanged: (value) => setState(() => _weekendEnabled = value),
+        ),
+        if (_weekendEnabled) ...[
+          Row(
+            children: [
+              Expanded(
+                child: _field(
+                  controller: _weekendMinimumDaysController,
+                  label: 'Minimum days',
+                  hint: '2',
+                  keyboardType: TextInputType.number,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _field(
+                  controller: _weekendMaximumDaysController,
+                  label: 'Maximum days',
+                  hint: '2',
+                  keyboardType: TextInputType.number,
+                ),
+              ),
+            ],
+          ),
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            activeColor: primary,
+            title: const Text(
+              'Require time selection',
+              style: TextStyle(
+                fontFamily: 'Manrope',
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: heading,
+              ),
+            ),
+            value: _requireWeekendTime,
+            onChanged: (value) =>
+                setState(() => _requireWeekendTime = value),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _rentalTypeTile({
+    required String title,
+    required String subtitle,
+    required bool value,
+    required ValueChanged<bool> onChanged,
+  }) {
+    return SwitchListTile.adaptive(
+      contentPadding: EdgeInsets.zero,
+      activeColor: primary,
+      title: Text(
+        title,
+        style: const TextStyle(
+          fontFamily: 'Manrope',
+          fontSize: 13.5,
+          fontWeight: FontWeight.w800,
+          color: heading,
+        ),
+      ),
+      subtitle: Text(
+        subtitle,
+        style: const TextStyle(
+          fontFamily: 'Manrope',
+          fontSize: 11.5,
+          height: 1.35,
+          color: body,
+        ),
+      ),
+      value: value,
+      onChanged: onChanged,
+    );
+  }
+
+  Widget _specialPricingFields() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SwitchListTile.adaptive(
+          contentPadding: EdgeInsets.zero,
+          activeColor: primary,
+          title: const Text(
+            'Enable special pricing',
+            style: TextStyle(
+              fontFamily: 'Manrope',
+              fontSize: 13.5,
+              fontWeight: FontWeight.w800,
+              color: heading,
+            ),
+          ),
+          subtitle: const Text(
+            'Apply this rule to bookings whose selected dates overlap the range.',
+            style: TextStyle(
+              fontFamily: 'Manrope',
+              fontSize: 11.5,
+              color: body,
+            ),
+          ),
+          value: _specialRuleEnabled,
+          onChanged: (value) =>
+              setState(() => _specialRuleEnabled = value),
+        ),
+        if (_specialRuleEnabled) ...[
+          const SizedBox(height: 8),
+          _field(
+            controller: _specialRuleNameController,
+            label: 'Rule name',
+            hint: 'Diwali / Peak Season',
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: _datePickerField(
+                  controller: _specialRuleStartController,
+                  label: 'Start date',
+                  onTap: () => _pickSpecialDate(start: true),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _datePickerField(
+                  controller: _specialRuleEndController,
+                  label: 'End date',
+                  onTap: () => _pickSpecialDate(start: false),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: _field(
+                  controller: _specialHourlyController,
+                  label: 'Special hourly',
+                  hint: '599',
+                  keyboardType: TextInputType.number,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _field(
+                  controller: _specialDailyController,
+                  label: 'Special daily',
+                  hint: '2999',
+                  keyboardType: TextInputType.number,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: _field(
+                  controller: _specialWeekendController,
+                  label: 'Special weekend',
+                  hint: '3499',
+                  keyboardType: TextInputType.number,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _field(
+                  controller: _specialExtraKmController,
+                  label: 'Special extra KM',
+                  hint: '20',
+                  keyboardType: TextInputType.number,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          _field(
+            controller: _specialMinimumHoursController,
+            label: 'Minimum hourly billing',
+            hint: '1',
+            keyboardType: TextInputType.number,
+          ),
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            activeColor: primary,
+            title: const Text(
+              'Hourly special rate',
+              style: TextStyle(
+                fontFamily: 'Manrope',
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: heading,
+              ),
+            ),
+            value: _specialHourlyEnabled,
+            onChanged: (value) =>
+                setState(() => _specialHourlyEnabled = value),
+          ),
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            activeColor: primary,
+            title: const Text(
+              'Daily special rate',
+              style: TextStyle(
+                fontFamily: 'Manrope',
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: heading,
+              ),
+            ),
+            value: _specialDailyEnabled,
+            onChanged: (value) =>
+                setState(() => _specialDailyEnabled = value),
+          ),
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            activeColor: primary,
+            title: const Text(
+              'Weekend special rate',
+              style: TextStyle(
+                fontFamily: 'Manrope',
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: heading,
+              ),
+            ),
+            value: _specialWeekendEnabled,
+            onChanged: (value) =>
+                setState(() => _specialWeekendEnabled = value),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _datePickerField({
+    required TextEditingController controller,
+    required String label,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AbsorbPointer(
+        child: _field(
+          controller: controller,
+          label: label,
+          hint: 'DD/MM/YYYY',
+        ),
+      ),
+    );
+  }
+
+  Widget _depositFields() {
+    return Column(
+      children: [
+        SwitchListTile.adaptive(
+          contentPadding: EdgeInsets.zero,
+          activeColor: primary,
+          title: const Text(
+            'Security deposit required',
+            style: TextStyle(
+              fontFamily: 'Manrope',
+              fontSize: 13.5,
+              fontWeight: FontWeight.w800,
+              color: heading,
+            ),
+          ),
+          value: _depositRequired,
+          onChanged: (value) =>
+              setState(() => _depositRequired = value),
+        ),
+        _field(
+          controller: _depositController,
+          label: 'Default deposit amount',
+          hint: '5000',
+          keyboardType: TextInputType.number,
+        ),
+        const SizedBox(height: 12),
+        DropdownButtonFormField<DepositType>(
+          initialValue: _depositType,
+          decoration: _decoration(
+            'Default deposit type',
+            'Select deposit type',
+          ),
+          items: DepositType.values
+              .where((type) => type != DepositType.none)
+              .map(
+                (type) => DropdownMenuItem(
+                  value: type,
+                  child: Text(
+                    _depositTypeLabel(type),
+                    style: const TextStyle(
+                      fontFamily: 'Manrope',
+                      fontSize: 13,
+                      color: heading,
+                    ),
+                  ),
+                ),
+              )
+              .toList(),
+          onChanged: (value) {
+            if (value != null) {
+              setState(() => _depositType = value);
+            }
+          },
+        ),
+        if (_depositType == DepositType.vehicleAsset ||
+            _depositType == DepositType.otherAsset) ...[
+          const SizedBox(height: 12),
+          _field(
+            controller: _minimumAssetValueController,
+            label: 'Minimum asset value',
+            hint: '50000',
+            keyboardType: TextInputType.number,
+            helper:
+                'Used when an asset is accepted as the deposit.',
+          ),
+        ],
+      ],
+    );
+  }
+
+  String _depositTypeLabel(DepositType type) {
+    switch (type) {
+      case DepositType.none:
+        return 'None';
+      case DepositType.cash:
+        return 'Cash';
+      case DepositType.online:
+        return 'Online';
+      case DepositType.bankTransfer:
+        return 'Bank transfer';
+      case DepositType.vehicleAsset:
+        return 'Vehicle asset';
+      case DepositType.otherAsset:
+        return 'Other asset';
+    }
   }
 
   Widget _extraCharges() {
@@ -1375,7 +2126,28 @@ class _PackageDraft {
   final TextEditingController extraKmController =
       TextEditingController();
 
+  final TextEditingController minimumHoursController =
+      TextEditingController(text: '1');
+
+  final TextEditingController minimumDaysController =
+      TextEditingController(text: '1');
+
+  final TextEditingController minimumWeekendDaysController =
+      TextEditingController(text: '2');
+
+  final TextEditingController maximumWeekendDaysController =
+      TextEditingController(text: '2');
+
   bool unlimited = false;
+  bool isActive = true;
+
+  List<KmPackageRentalType> supportedRentalTypes = const [
+    KmPackageRentalType.hourly,
+    KmPackageRentalType.daily,
+    KmPackageRentalType.weekend,
+    KmPackageRentalType.weekly,
+    KmPackageRentalType.monthly,
+  ];
 
   void dispose() {
     idController.dispose();
@@ -1387,5 +2159,9 @@ class _PackageDraft {
     weeklyController.dispose();
     monthlyController.dispose();
     extraKmController.dispose();
+    minimumHoursController.dispose();
+    minimumDaysController.dispose();
+    minimumWeekendDaysController.dispose();
+    maximumWeekendDaysController.dispose();
   }
 }

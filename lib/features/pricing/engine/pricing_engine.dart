@@ -42,6 +42,13 @@ class PricingEngine {
     required DateTime pickupDateTime,
     required DateTime returnDateTime,
 
+    /// Rental mode selected by the customer/admin.
+    ///
+    /// Hourly  = exact pickup/return timestamps.
+    /// Daily   = date-based rental; availability is handled separately.
+    /// Weekend = weekend-only date-based rental.
+    RentalType rentalType = RentalType.daily,
+
     /// Actual KM driven.
     ///
     /// Normally 0 during booking.
@@ -107,6 +114,31 @@ class PricingEngine {
     }
 
     // -------------------------------------------------------------------------
+    // RENTAL TYPE / SPECIAL DATE VALIDATION
+    // -------------------------------------------------------------------------
+
+    if (!profile.isRentalTypeEnabled(rentalType)) {
+      return PricingResult.empty();
+    }
+
+    final specialRule = profile.specialRuleForRange(
+      pickupDateTime,
+      returnDateTime,
+    );
+
+    if (specialRule != null &&
+        !specialRule.isEnabledFor(rentalType)) {
+      return PricingResult.empty();
+    }
+
+    if (rentalType == RentalType.weekend &&
+        !profile.weekendPricing.allowedWeekdays.every(
+          (weekday) => weekday >= DateTime.monday && weekday <= DateTime.sunday,
+        )) {
+      return PricingResult.empty();
+    }
+
+    // -------------------------------------------------------------------------
     // VALIDATE DATES
     // -------------------------------------------------------------------------
 
@@ -123,7 +155,13 @@ class PricingEngine {
       returnDateTime,
     );
 
-    final rentalDays = duration.billableDays;
+    final rentalDays = rentalType == RentalType.hourly
+        ? 1
+        : _calculateRentalDaysForType(
+            pickupDateTime,
+            returnDateTime,
+            rentalType,
+          );
 
     // -------------------------------------------------------------------------
     // KM USED FOR BOOKING CALCULATION
@@ -151,6 +189,8 @@ class PricingEngine {
             returnDateTime,
             rentalDays,
             kmForCalculation,
+            rentalType: rentalType,
+            specialRule: specialRule,
             selectedKmPackage: selectedKmPackage,
             unlimitedKm: unlimitedKm,
           );
@@ -190,6 +230,7 @@ class PricingEngine {
       config,
       extraKm,
       selectedPackage,
+      specialRule: specialRule,
       selectedKmPackage: selectedKmPackage,
       unlimitedKm: unlimitedKm,
     );
@@ -270,8 +311,9 @@ class PricingEngine {
     // 12. SECURITY DEPOSIT
     // -------------------------------------------------------------------------
 
-    final securityDeposit = includeSecurityDeposit
-        ? profile.securityDeposit
+    final securityDeposit = includeSecurityDeposit &&
+            profile.depositConfig.required
+        ? profile.depositConfig.defaultAmount
         : 0;
 
     // -------------------------------------------------------------------------
@@ -293,6 +335,9 @@ class PricingEngine {
 
     return PricingResult(
       pricingProfileId: profile.id,
+      rentalType: rentalType.value,
+      pricingVersion: profile.pricingVersion,
+      specialPricingRuleId: specialRule?.id,
 
       rentalPrice: rentalPrice,
 
@@ -399,6 +444,8 @@ class PricingEngine {
     DateTime returnTime,
     int rentalDays,
     int km, {
+    RentalType rentalType = RentalType.daily,
+    SpecialPricingRule? specialRule,
     KmPricingPackage? selectedKmPackage,
     bool unlimitedKm = false,
   }) {
@@ -426,6 +473,8 @@ class PricingEngine {
         pickup,
         returnTime,
         rentalDays,
+        rentalType: rentalType,
+        specialRule: specialRule,
       );
     }
 
@@ -453,6 +502,8 @@ class PricingEngine {
           pickup,
           returnTime,
           rentalDays,
+          rentalType: rentalType,
+          specialRule: specialRule,
         );
 
         // Legacy unlimited surcharge remains supported.
@@ -475,8 +526,10 @@ class PricingEngine {
     KmPricingPackage package,
     DateTime pickup,
     DateTime returnTime,
-    int rentalDays,
-  ) {
+    int rentalDays, {
+    RentalType rentalType = RentalType.daily,
+    SpecialPricingRule? specialRule,
+  }) {
     final totalMinutes =
         returnTime.difference(pickup).inMinutes;
 
@@ -538,28 +591,43 @@ class PricingEngine {
     }
 
     // -------------------------------------------------------------------------
-    // DAILY / WEEKEND
+    // RENTAL TYPE
     // -------------------------------------------------------------------------
 
-    if (rentalDays >= 1) {
-      return _calculatePackageDailyWeekendPrice(
-        package,
-        pickup,
-        rentalDays,
-      );
+    switch (rentalType) {
+      case RentalType.hourly:
+        final configuredMinimum =
+            specialRule?.minimumBillingHours ??
+            0;
+        final profileMinimum =
+            configuredMinimum > 0
+                ? configuredMinimum
+                : 1;
+        final hours = totalHours.ceil() < profileMinimum
+            ? profileMinimum
+            : totalHours.ceil();
+
+        final rate = specialRule?.hourlyRate ??
+            package.hourlyRate;
+
+        return rate > 0 ? hours * rate : 0;
+
+      case RentalType.daily:
+        return _calculatePackageDailyPrice(
+          package,
+          pickup,
+          rentalDays,
+          specialRule: specialRule,
+        );
+
+      case RentalType.weekend:
+        final rate = specialRule?.weekendRate ??
+            package.weekendRate;
+
+        if (rate <= 0) return 0;
+
+        return rentalDays * rate;
     }
-
-    // -------------------------------------------------------------------------
-    // HOURLY
-    // -------------------------------------------------------------------------
-
-    if (package.hourlyRate > 0) {
-      final hours = totalHours.ceil();
-
-      return hours * package.hourlyRate;
-    }
-
-    return package.dailyRate;
   }
 
   // ===========================================================================
@@ -593,6 +661,30 @@ class PricingEngine {
     return total;
   }
 
+  double _calculatePackageDailyPrice(
+    KmPricingPackage package,
+    DateTime start,
+    int days, {
+    SpecialPricingRule? specialRule,
+  }) {
+    if (days <= 0) return 0;
+
+    double total = 0;
+
+    for (int i = 0; i < days; i++) {
+      final date = start.add(Duration(days: i));
+
+      final specialRate = specialRule?.dailyRate;
+      if (specialRate != null && specialRate > 0) {
+        total += specialRate;
+      } else {
+        total += package.dailyRate;
+      }
+    }
+
+    return total;
+  }
+
   // ===========================================================================
   // LEGACY TIME BASED PRICE
   // ===========================================================================
@@ -601,8 +693,10 @@ class PricingEngine {
     PricingProfile profile,
     DateTime pickup,
     DateTime returnTime,
-    int rentalDays,
-  ) {
+    int rentalDays, {
+    RentalType rentalType = RentalType.daily,
+    SpecialPricingRule? specialRule,
+  }) {
     final totalMinutes =
         returnTime.difference(pickup).inMinutes;
 
@@ -664,28 +758,53 @@ class PricingEngine {
     }
 
     // -------------------------------------------------------------------------
-    // DAILY / WEEKEND
+    // RENTAL TYPE
     // -------------------------------------------------------------------------
 
-    if (rentalDays >= 1) {
-      return _calculateDailyWeekendPrice(
-        profile,
-        pickup,
-        rentalDays,
-      );
+    switch (rentalType) {
+      case RentalType.hourly:
+        final minimum = specialRule?.minimumBillingHours ??
+            profile.hourlyPricing.minimumBillingHours;
+        final minimumHours = minimum > 0 ? minimum : 1;
+        final hours = totalHours.ceil() < minimumHours
+            ? minimumHours
+            : totalHours.ceil();
+
+        final rate = specialRule?.hourlyRate ??
+            profile.hourlyPricing.rate;
+
+        return rate > 0
+            ? hours * rate
+            : profile.hourlyRate * hours;
+
+      case RentalType.daily:
+        final specialDailyRate = specialRule?.dailyRate;
+        if (specialDailyRate != null && specialDailyRate > 0) {
+          return specialDailyRate * rentalDays;
+        }
+        return profile.dailyPricing.rate > 0
+            ? profile.dailyPricing.rate * rentalDays
+            : _calculateDailyWeekendPrice(
+                profile,
+                pickup,
+                rentalDays,
+              );
+
+      case RentalType.weekend:
+        final specialWeekendRate = specialRule?.weekendRate;
+        final weekendRate = specialWeekendRate != null &&
+                specialWeekendRate > 0
+            ? specialWeekendRate
+            : profile.weekendPricing.rate;
+
+        return weekendRate > 0
+            ? weekendRate * rentalDays
+            : _calculateDailyWeekendPrice(
+                profile,
+                pickup,
+                rentalDays,
+              );
     }
-
-    // -------------------------------------------------------------------------
-    // HOURLY
-    // -------------------------------------------------------------------------
-
-    if (profile.hourlyRate > 0) {
-      final hours = totalHours.ceil();
-
-      return hours * profile.hourlyRate;
-    }
-
-    return profile.dailyRate;
   }
 
   // ===========================================================================
@@ -874,11 +993,19 @@ class PricingEngine {
     PricingConfig config,
     int extraKm,
     RentalPackage? selectedPackage, {
+    SpecialPricingRule? specialRule,
     KmPricingPackage? selectedKmPackage,
     bool unlimitedKm = false,
   }) {
     if (extraKm <= 0) {
       return 0;
+    }
+
+    // Special-date extra-KM rate overrides the normal profile/package rate.
+    if (specialRule?.extraKmRate != null &&
+        specialRule!.extraKmRate > 0 &&
+        !unlimitedKm) {
+      return extraKm * specialRule.extraKmRate;
     }
 
     // -------------------------------------------------------------------------
@@ -1399,6 +1526,15 @@ class PricingResult {
   /// Pricing profile used for this calculation.
   final String pricingProfileId;
 
+  /// Hourly / daily / weekend.
+  final String rentalType;
+
+  /// Immutable pricing configuration version used for this calculation.
+  final int pricingVersion;
+
+  /// Special pricing rule used, if any.
+  final String? specialPricingRuleId;
+
   final double rentalPrice;
 
   final int includedKm;
@@ -1452,6 +1588,9 @@ class PricingResult {
 
   const PricingResult({
     required this.pricingProfileId,
+    required this.rentalType,
+    required this.pricingVersion,
+    required this.specialPricingRuleId,
 
     required this.rentalPrice,
 
@@ -1502,6 +1641,9 @@ class PricingResult {
   factory PricingResult.empty() {
     return const PricingResult(
       pricingProfileId: '',
+      rentalType: RentalType.daily.value,
+      pricingVersion: 0,
+      specialPricingRuleId: null,
 
       rentalPrice: 0,
 

@@ -11,6 +11,23 @@ import '../models/protection_plan.dart';
 import '../models/rental_package.dart';
 import '../models/tax_rule.dart';
 
+/// Firebase data-access layer for tenant pricing.
+///
+/// Firestore structure:
+///
+/// tenants/{tenantId}/pricing/{pricingDocumentId}
+/// tenants/{tenantId}/pricingProfiles/{pricingProfileId}
+///
+/// PricingService only loads/caches configuration. It does not calculate
+/// booking totals; PricingEngine remains responsible for calculation.
+///
+/// Important:
+/// - Tenant IDs are always supplied by the caller.
+/// - No Firebase branding/color values are used here.
+/// - No dummy pricing is created.
+/// - Vehicle pricing profiles are kept separate from tenant-level pricing.
+/// - PricingProfile contains rental types, special-date rules, KM packages,
+///   deposit configuration and pricingVersion.
 class PricingService {
   PricingService._();
 
@@ -23,34 +40,54 @@ class PricingService {
 
   String? _cachedTenantId;
 
+  // Individual profiles are also cached so a vehicle can be loaded without
+  // requiring the complete tenant pricing document.
+  final Map<String, PricingProfile> _profileCache =
+      <String, PricingProfile>{};
+
+  // ===========================================================================
+  // FIREBASE REFERENCES
+  // ===========================================================================
+
+  CollectionReference<Map<String, dynamic>>
+      _tenantPricingCollection(
+    String tenantId,
+  ) {
+    return _firestore
+        .collection('tenants')
+        .doc(tenantId)
+        .collection('pricing');
+  }
+
+  CollectionReference<Map<String, dynamic>>
+      _pricingProfilesCollection(
+    String tenantId,
+  ) {
+    return _firestore
+        .collection('tenants')
+        .doc(tenantId)
+        .collection('pricingProfiles');
+  }
+
   // ===========================================================================
   // LOAD TENANT PRICING
   // ===========================================================================
-  //
-  // Firebase structure:
-  //
-  // tenants/{tenantId}/pricing/pricing_rentocar
-  //
-  // This document contains:
-  // - KM slabs
-  // - rental packages
-  // - extra charges
-  // - add-ons
-  // - protection plans
-  // - discounts
-  // - taxes
-  // - cancellation rules
-  //
-  // Vehicle-specific pricing is stored separately under:
-  //
-  // tenants/{tenantId}/pricingProfiles/{pricingProfileId}
-  //
-  // ===========================================================================
 
+  /// Loads the complete pricing configuration for a tenant.
+  ///
+  /// Default Firebase document:
+  ///
+  /// tenants/{tenantId}/pricing/pricing_rentocar
+  ///
+  /// You can pass another [pricingDocumentId] for another tenant.
   Future<PricingConfig> loadPricing({
     required String tenantId,
+    String pricingDocumentId = 'pricing_rentocar',
+    bool forceRefresh = false,
   }) async {
     final normalizedTenantId = tenantId.trim();
+    final normalizedDocumentId =
+        pricingDocumentId.trim();
 
     if (normalizedTenantId.isEmpty) {
       throw ArgumentError(
@@ -58,11 +95,18 @@ class PricingService {
       );
     }
 
+    if (normalizedDocumentId.isEmpty) {
+      throw ArgumentError(
+        'pricingDocumentId cannot be empty.',
+      );
+    }
+
     // -------------------------------------------------------------------------
     // RETURN CACHE ONLY FOR THE SAME TENANT
     // -------------------------------------------------------------------------
 
-    if (_cachedPricing != null &&
+    if (!forceRefresh &&
+        _cachedPricing != null &&
         _cachedTenantId == normalizedTenantId) {
       return _cachedPricing!;
     }
@@ -72,21 +116,20 @@ class PricingService {
       // LOAD TENANT-LEVEL PRICING
       // -----------------------------------------------------------------------
 
-      final pricingSnapshot = await _firestore
-          .collection('tenants')
-          .doc(normalizedTenantId)
-          .collection('pricing')
-          .doc('pricing_rentocar')
-          .get();
+      final pricingSnapshot =
+          await _tenantPricingCollection(
+        normalizedTenantId,
+      ).doc(normalizedDocumentId).get();
 
       if (!pricingSnapshot.exists) {
         throw Exception(
           'Pricing configuration not found for tenant '
-          '"$normalizedTenantId".',
+          '"$normalizedTenantId" at pricing/$normalizedDocumentId.',
         );
       }
 
-      final pricingData = pricingSnapshot.data();
+      final pricingData =
+          pricingSnapshot.data();
 
       if (pricingData == null) {
         throw Exception(
@@ -98,42 +141,40 @@ class PricingService {
       // -----------------------------------------------------------------------
       // LOAD VEHICLE PRICING PROFILES
       // -----------------------------------------------------------------------
-      //
-      // Vehicle pricing profiles are stored separately from the tenant-level
-      // pricing configuration.
-      //
-      // We load them here so PricingConfig can contain the complete pricing
-      // configuration expected by PricingEngine.
-      // -----------------------------------------------------------------------
 
-      final profilesSnapshot = await _firestore
-          .collection('tenants')
-          .doc(normalizedTenantId)
-          .collection('pricingProfiles')
-          .get();
+      final profilesSnapshot =
+          await _pricingProfilesCollection(
+        normalizedTenantId,
+      ).get();
 
-      final profiles = <PricingProfile>[];
+      final profiles =
+          <PricingProfile>[];
 
       for (final doc in profilesSnapshot.docs) {
         final data = doc.data();
 
         try {
-          final profile = PricingProfile.fromMap(
+          final profile =
+              PricingProfile.fromMap(
             doc.id,
             data,
           );
 
           profiles.add(profile);
+
+          _profileCache[
+            _profileCacheKey(
+              normalizedTenantId,
+              doc.id,
+            )
+          ] = profile;
         } catch (e) {
           throw Exception(
-            'Invalid pricing profile "${doc.id}": $e',
+            'Invalid pricing profile "${doc.id}" '
+            'for tenant "$normalizedTenantId": $e',
           );
         }
       }
-
-      // -----------------------------------------------------------------------
-      // VALIDATE THAT VEHICLE PRICING PROFILES WERE LOADED
-      // -----------------------------------------------------------------------
 
       if (profiles.isEmpty) {
         throw Exception(
@@ -145,36 +186,9 @@ class PricingService {
       // -----------------------------------------------------------------------
       // BUILD COMPLETE PRICING CONFIG
       // -----------------------------------------------------------------------
-      //
-      // IMPORTANT:
-      //
-      // PricingProfile.fromMap() receives the Firestore document ID.
-      //
-      // PricingProfile.toMap() contains the pricing values but the ID is not
-      // serialized by the model.
-      //
-      // Therefore we MUST explicitly put the profile ID back into the map
-      // before PricingConfig.fromMap() reconstructs the profiles.
-      //
-      // Without this:
-      //
-      // pricing_creta
-      // pricing_seltos
-      // pricing_city
-      // pricing_fortuner
-      //
-      // would become:
-      //
-      // pricing_profile_0
-      // pricing_profile_1
-      // pricing_profile_2
-      // pricing_profile_3
-      //
-      // and PricingEngine would not be able to find the profile referenced
-      // by Car.pricingProfileId.
-      // -----------------------------------------------------------------------
 
-      final pricing = PricingConfig.fromMap(
+      final pricing =
+          PricingConfig.fromMap(
         pricingSnapshot.id,
         {
           ...pricingData,
@@ -194,12 +208,14 @@ class PricingService {
       // -----------------------------------------------------------------------
 
       _cachedPricing = pricing;
-      _cachedTenantId = normalizedTenantId;
+      _cachedTenantId =
+          normalizedTenantId;
 
       return pricing;
     } on FirebaseException catch (e) {
       throw Exception(
-        'Unable to load pricing: '
+        'Unable to load pricing for tenant '
+        '"$normalizedTenantId": '
         '${e.message ?? e.code}',
       );
     } catch (e) {
@@ -208,30 +224,46 @@ class PricingService {
       }
 
       throw Exception(
-        'Unable to load pricing.',
+        'Unable to load pricing for tenant '
+        '"$normalizedTenantId".',
       );
     }
   }
 
   // ===========================================================================
-  // LOAD VEHICLE PRICING PROFILE
-  // ===========================================================================
-  //
-  // Directly loads:
-  //
-  // tenants/{tenantId}/pricingProfiles/{pricingProfileId}
-  //
-  // This is useful when CarDetailsScreen only needs the pricing profile for
-  // one particular vehicle.
-  //
+  // REFRESH TENANT PRICING
   // ===========================================================================
 
+  Future<PricingConfig> refreshPricing({
+    required String tenantId,
+    String pricingDocumentId = 'pricing_rentocar',
+  }) {
+    return loadPricing(
+      tenantId: tenantId,
+      pricingDocumentId: pricingDocumentId,
+      forceRefresh: true,
+    );
+  }
+
+  // ===========================================================================
+  // LOAD VEHICLE PRICING PROFILE
+  // ===========================================================================
+
+  /// Directly loads:
+  ///
+  /// tenants/{tenantId}/pricingProfiles/{pricingProfileId}
+  ///
+  /// Useful when only one selected vehicle needs its current pricing.
   Future<PricingProfile?> loadPricingProfile({
     required String tenantId,
     required String pricingProfileId,
+    bool forceRefresh = false,
   }) async {
-    final normalizedTenantId = tenantId.trim();
-    final normalizedProfileId = pricingProfileId.trim();
+    final normalizedTenantId =
+        tenantId.trim();
+
+    final normalizedProfileId =
+        pricingProfileId.trim();
 
     if (normalizedTenantId.isEmpty) {
       throw ArgumentError(
@@ -245,13 +277,21 @@ class PricingService {
       );
     }
 
+    final cacheKey = _profileCacheKey(
+      normalizedTenantId,
+      normalizedProfileId,
+    );
+
+    if (!forceRefresh &&
+        _profileCache.containsKey(cacheKey)) {
+      return _profileCache[cacheKey];
+    }
+
     try {
-      final doc = await _firestore
-          .collection('tenants')
-          .doc(normalizedTenantId)
-          .collection('pricingProfiles')
-          .doc(normalizedProfileId)
-          .get();
+      final doc =
+          await _pricingProfilesCollection(
+        normalizedTenantId,
+      ).doc(normalizedProfileId).get();
 
       if (!doc.exists) {
         return null;
@@ -263,18 +303,105 @@ class PricingService {
         return null;
       }
 
-      return PricingProfile.fromMap(
+      final profile =
+          PricingProfile.fromMap(
         doc.id,
         data,
       );
+
+      _profileCache[cacheKey] =
+          profile;
+
+      // Keep the complete tenant cache coherent when the profile belongs to
+      // the currently cached tenant. Rebuilding the whole PricingConfig here
+      // is intentionally avoided because PricingConfig may contain immutable
+      // collections or additional tenant-level state.
+      return profile;
     } on FirebaseException catch (e) {
       throw Exception(
-        'Unable to load vehicle pricing: '
+        'Unable to load vehicle pricing for '
+        '"$normalizedProfileId": '
         '${e.message ?? e.code}',
       );
     } catch (e) {
+      if (e is Exception) {
+        rethrow;
+      }
+
       throw Exception(
-        'Unable to load vehicle pricing.',
+        'Unable to load vehicle pricing for '
+        '"$normalizedProfileId".',
+      );
+    }
+  }
+
+  // ===========================================================================
+  // LOAD ALL PRICING PROFILES
+  // ===========================================================================
+
+  Future<List<PricingProfile>> loadPricingProfiles({
+    required String tenantId,
+    bool forceRefresh = false,
+  }) async {
+    final normalizedTenantId =
+        tenantId.trim();
+
+    if (normalizedTenantId.isEmpty) {
+      throw ArgumentError(
+        'tenantId cannot be empty.',
+      );
+    }
+
+    if (!forceRefresh) {
+      final cached =
+          _profileCache.entries
+              .where(
+                (entry) =>
+                    entry.key.startsWith(
+                  '$normalizedTenantId::',
+                ),
+              )
+              .map(
+                (entry) => entry.value,
+              )
+              .toList();
+
+      if (cached.isNotEmpty) {
+        return cached;
+      }
+    }
+
+    try {
+      final snapshot =
+          await _pricingProfilesCollection(
+        normalizedTenantId,
+      ).get();
+
+      final profiles =
+          <PricingProfile>[];
+
+      for (final doc in snapshot.docs) {
+        final profile =
+            PricingProfile.fromMap(
+          doc.id,
+          doc.data(),
+        );
+
+        profiles.add(profile);
+
+        _profileCache[
+          _profileCacheKey(
+            normalizedTenantId,
+            doc.id,
+          )
+        ] = profile;
+      }
+
+      return profiles;
+    } on FirebaseException catch (e) {
+      throw Exception(
+        'Unable to load pricing profiles: '
+        '${e.message ?? e.code}',
       );
     }
   }
@@ -310,11 +437,8 @@ class PricingService {
   PricingProfile? getPricingForCar(
     String pricingProfileId,
   ) {
-    final pricing = _cachedPricing;
-
-    if (pricing == null) {
-      return null;
-    }
+    final pricing =
+        _cachedPricing;
 
     final normalizedProfileId =
         pricingProfileId.trim();
@@ -323,29 +447,46 @@ class PricingService {
       return null;
     }
 
-    return pricing.getProfile(
-      normalizedProfileId,
-    );
+    if (pricing != null) {
+      final profile =
+          pricing.getProfile(
+        normalizedProfileId,
+      );
+
+      if (profile != null) {
+        return profile;
+      }
+    }
+
+    if (_cachedTenantId != null) {
+      return _profileCache[
+        _profileCacheKey(
+          _cachedTenantId!,
+          normalizedProfileId,
+        )
+      ];
+    }
+
+    return null;
   }
 
   // ===========================================================================
   // GET PRICING FOR CAR - FIREBASE FIRST
   // ===========================================================================
-  //
-  // If the profile is already part of the loaded tenant pricing configuration,
-  // return it from memory.
-  //
-  // Otherwise fetch it directly from Firebase.
-  //
-  // There is NO dummy fallback.
-  //
-  // ===========================================================================
 
+  /// Returns the selected vehicle's pricing.
+  ///
+  /// Cache is checked first. If it is not present, Firebase is queried.
+  ///
+  /// There is no dummy fallback.
   Future<PricingProfile?> getPricingForCarFromFirebase({
     required String tenantId,
     required String pricingProfileId,
+    bool forceRefresh = false,
   }) async {
-    final normalizedTenantId = tenantId.trim();
+    final normalizedTenantId =
+        tenantId.trim();
+
     final normalizedProfileId =
         pricingProfileId.trim();
 
@@ -361,13 +502,12 @@ class PricingService {
       );
     }
 
-    // -------------------------------------------------------------------------
-    // CHECK CACHE
-    // -------------------------------------------------------------------------
-
-    if (_cachedPricing != null &&
-        _cachedTenantId == normalizedTenantId) {
-      final cachedProfile = getPricingForCar(
+    if (!forceRefresh &&
+        _cachedPricing != null &&
+        _cachedTenantId ==
+            normalizedTenantId) {
+      final cachedProfile =
+          getPricingForCar(
         normalizedProfileId,
       );
 
@@ -376,14 +516,112 @@ class PricingService {
       }
     }
 
-    // -------------------------------------------------------------------------
-    // FETCH DIRECTLY FROM FIREBASE
-    // -------------------------------------------------------------------------
-
     return loadPricingProfile(
       tenantId: normalizedTenantId,
-      pricingProfileId: normalizedProfileId,
+      pricingProfileId:
+          normalizedProfileId,
+      forceRefresh: forceRefresh,
     );
+  }
+
+  // ===========================================================================
+  // RENTAL TYPE / SPECIAL DATE HELPERS
+  // ===========================================================================
+
+  /// Returns the currently cached profile and allows the UI to ask which
+  /// rental types are available for a selected range.
+  ///
+  /// The actual rules are owned by PricingProfile.
+  List<RentalType> availableRentalTypesForRange(
+    PricingProfile profile, {
+    required DateTime start,
+    required DateTime end,
+  }) {
+    if (end.isBefore(start)) {
+      return const [];
+    }
+
+    return profile.availableRentalTypesForRange(
+      start,
+      end,
+    );
+  }
+
+  bool isRentalTypeEnabled(
+    PricingProfile profile,
+    RentalType type,
+  ) {
+    return profile.isRentalTypeEnabled(
+      type,
+    );
+  }
+
+  SpecialPricingRule? specialRuleForRange(
+    PricingProfile profile, {
+    required DateTime start,
+    required DateTime end,
+  }) {
+    if (end.isBefore(start)) {
+      return null;
+    }
+
+    return profile.specialRuleForRange(
+      start,
+      end,
+    );
+  }
+
+  // ===========================================================================
+  // PROFILE CACHE
+  // ===========================================================================
+
+  void cachePricingProfile({
+    required String tenantId,
+    required PricingProfile profile,
+  }) {
+    final normalizedTenantId =
+        tenantId.trim();
+
+    if (normalizedTenantId.isEmpty) {
+      throw ArgumentError(
+        'tenantId cannot be empty.',
+      );
+    }
+
+    _profileCache[
+      _profileCacheKey(
+        normalizedTenantId,
+        profile.id,
+      )
+    ] = profile;
+  }
+
+  void clearProfileCache({
+    String? tenantId,
+  }) {
+    final normalizedTenantId =
+        tenantId?.trim();
+
+    if (normalizedTenantId == null ||
+        normalizedTenantId.isEmpty) {
+      _profileCache.clear();
+      return;
+    }
+
+    final prefix =
+        '$normalizedTenantId::';
+
+    _profileCache.removeWhere(
+      (key, value) =>
+          key.startsWith(prefix),
+    );
+  }
+
+  String _profileCacheKey(
+    String tenantId,
+    String pricingProfileId,
+  ) {
+    return '${tenantId.trim()}::${pricingProfileId.trim()}';
   }
 
   // ===========================================================================
@@ -393,24 +631,45 @@ class PricingService {
   void clearCache() {
     _cachedPricing = null;
     _cachedTenantId = null;
+    _profileCache.clear();
   }
 
   // ===========================================================================
   // SET PRICING
   // ===========================================================================
-  //
-  // Kept for compatibility with existing PricingManager code.
-  //
-  // This does NOT load dummy data.
-  // It only allows already-fetched Firebase pricing to be placed in memory.
-  //
-  // ===========================================================================
 
+  /// Compatibility method.
+  ///
+  /// This only places already-loaded Firebase pricing in memory.
+  /// It never creates dummy pricing.
   void setPricing(
     PricingConfig pricing, {
     String? tenantId,
   }) {
-    _cachedPricing = pricing;
-    _cachedTenantId = tenantId?.trim();
+    _cachedPricing =
+        pricing;
+
+    _cachedTenantId =
+        tenantId?.trim();
+
+    if (_cachedTenantId != null) {
+      try {
+        final profiles =
+            pricing.profiles;
+
+        for (final profile
+            in profiles) {
+          _profileCache[
+            _profileCacheKey(
+              _cachedTenantId!,
+              profile.id,
+            )
+          ] = profile;
+        }
+      } catch (_) {
+        // Keep compatibility with PricingConfig implementations that expose
+        // profiles differently. The main pricing cache is still valid.
+      }
+    }
   }
 }

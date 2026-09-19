@@ -143,6 +143,10 @@ class _AdminPricingProfilesScreenState
       final vehicleName =
           _vehicleNames[profile.vehicleId] ?? '';
 
+      final rentalTypes = _enabledRentalTypes(profile)
+          .map(_rentalTypeLabel)
+          .join(' ');
+
       return profile.name
               .toLowerCase()
               .contains(query) ||
@@ -154,7 +158,10 @@ class _AdminPricingProfilesScreenState
               .contains(query) ||
           profile.currency
               .toLowerCase()
-              .contains(query);
+              .contains(query) ||
+          rentalTypes.toLowerCase().contains(query) ||
+          'v${profile.pricingVersion}'.contains(query) ||
+          _specialRulesLabel(profile).toLowerCase().contains(query);
     }).toList();
 
     if (!mounted) return;
@@ -456,6 +463,84 @@ class _AdminPricingProfilesScreenState
     }
   }
 
+
+  String _rentalTypeLabel(RentalType type) {
+    switch (type) {
+      case RentalType.hourly:
+        return 'Hourly';
+      case RentalType.daily:
+        return 'Daily';
+      case RentalType.weekend:
+        return 'Weekend';
+    }
+  }
+
+  IconData _rentalTypeIcon(RentalType type) {
+    switch (type) {
+      case RentalType.hourly:
+        return Icons.schedule_outlined;
+      case RentalType.daily:
+        return Icons.today_outlined;
+      case RentalType.weekend:
+        return Icons.weekend_outlined;
+    }
+  }
+
+  List<RentalType> _enabledRentalTypes(PricingProfile profile) {
+    final types = <RentalType>[];
+    for (final type in RentalType.values) {
+      if (profile.isRentalTypeEnabled(type)) {
+        types.add(type);
+      }
+    }
+    return types;
+  }
+
+  String _pricingVersionLabel(PricingProfile profile) {
+    return 'v${profile.pricingVersion}';
+  }
+
+  String _specialRulesLabel(PricingProfile profile) {
+    final count = profile.specialPricingRules
+        .where((rule) => rule.enabled)
+        .length;
+    return '$count special rule${count == 1 ? '' : 's'}';
+  }
+
+  String _depositSummary(PricingProfile profile) {
+    final config = profile.depositConfig;
+    if (!config.required) return 'No deposit';
+    return 'Deposit ${_formatMoney(config.defaultAmount)}';
+  }
+
+  Future<void> _deletePricingProfile(PricingProfile profile) async {
+    final confirmed = await _showConfirmationDialog(
+      title: 'Delete pricing profile?',
+      message:
+          'This will permanently delete this pricing profile. Existing bookings keep their stored pricing snapshots.',
+      confirmLabel: 'Delete',
+    );
+
+    if (!confirmed || !mounted) return;
+
+    try {
+      await _pricingService.deletePricingProfile(
+        tenantId: tenantId,
+        pricingProfileId: profile.id,
+      );
+
+      if (!mounted) return;
+      _showSnackBar('Pricing profile deleted.');
+      await _loadData(refresh: true);
+    } catch (e) {
+      if (!mounted) return;
+      _showSnackBar(
+        e.toString().replaceFirst('Exception: ', ''),
+        isError: true,
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -638,7 +723,7 @@ class _AdminPricingProfilesScreenState
             icon: Icons.price_change_outlined,
           ),
         ),
-        const SizedBox(width: 12),
+        const SizedBox(width: 8),
         Expanded(
           child: _statCard(
             label: 'Active',
@@ -646,12 +731,27 @@ class _AdminPricingProfilesScreenState
             icon: Icons.check_circle_outline,
           ),
         ),
-        const SizedBox(width: 12),
+        const SizedBox(width: 8),
         Expanded(
           child: _statCard(
             label: 'Inactive',
             value: _inactiveCount.toString(),
             icon: Icons.pause_circle_outline,
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: _statCard(
+            label: 'Special',
+            value: _profiles.fold<int>(
+              0,
+              (sum, profile) =>
+                  sum +
+                  profile.specialPricingRules
+                      .where((rule) => rule.enabled)
+                      .length,
+            ).toString(),
+            icon: Icons.event_available_outlined,
           ),
         ),
       ],
@@ -938,12 +1038,35 @@ class _AdminPricingProfilesScreenState
                 ),
               if (profile.kmPackages.isNotEmpty)
                 _infoChip(
-                  icon:
-                      Icons.inventory_2_outlined,
-                  text:
-                      '${profile.kmPackages.length} packages',
+                  icon: Icons.inventory_2_outlined,
+                  text: '${profile.kmPackages.length} packages',
                 ),
+              _infoChip(
+                icon: Icons.layers_outlined,
+                text: _pricingVersionLabel(profile),
+              ),
+              _infoChip(
+                icon: Icons.event_available_outlined,
+                text: _specialRulesLabel(profile),
+              ),
+              _infoChip(
+                icon: Icons.account_balance_wallet_outlined,
+                text: _depositSummary(profile),
+              ),
             ],
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 7,
+            runSpacing: 7,
+            children: _enabledRentalTypes(profile)
+                .map(
+                  (type) => _rentalTypeChip(
+                    type,
+                    profile.rentalPricingFor(type),
+                  ),
+                )
+                .toList(),
           ),
           const SizedBox(height: 17),
           const Divider(
@@ -955,86 +1078,69 @@ class _AdminPricingProfilesScreenState
             children: [
               Expanded(
                 child: OutlinedButton.icon(
-                  onPressed: () =>
-                      _editPricingProfile(
-                    profile,
-                  ),
-                  icon: const Icon(
-                    Icons.edit_outlined,
-                    size: 17,
-                  ),
-                  label: const Text(
-                    'Edit',
-                  ),
-                  style:
-                      OutlinedButton.styleFrom(
+                  onPressed: () => _editPricingProfile(profile),
+                  icon: const Icon(Icons.edit_outlined, size: 17),
+                  label: const Text('Edit'),
+                  style: OutlinedButton.styleFrom(
                     foregroundColor: heading,
-                    side: const BorderSide(
-                      color: border,
+                    side: const BorderSide(color: border),
+                    minimumSize: const Size.fromHeight(44),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
                     ),
-                    minimumSize:
-                        const Size.fromHeight(
-                      44,
-                    ),
-                    shape:
-                        RoundedRectangleBorder(
-                      borderRadius:
-                          BorderRadius.circular(
-                        12,
-                      ),
-                    ),
-                    textStyle:
-                        const TextStyle(
+                    textStyle: const TextStyle(
                       fontFamily: 'Manrope',
                       fontWeight: FontWeight.w700,
                     ),
                   ),
                 ),
               ),
-              const SizedBox(width: 10),
+              const SizedBox(width: 8),
               Expanded(
                 child: ElevatedButton.icon(
-                  onPressed: () =>
-                      _toggleProfile(
-                    profile,
-                  ),
+                  onPressed: () => _toggleProfile(profile),
                   icon: Icon(
                     profile.isActive
                         ? Icons.pause_outlined
-                        : Icons
-                            .check_rounded,
+                        : Icons.check_rounded,
                     size: 17,
                   ),
                   label: Text(
-                    profile.isActive
-                        ? 'Deactivate'
-                        : 'Activate',
+                    profile.isActive ? 'Deactivate' : 'Activate',
                   ),
-                  style:
-                      ElevatedButton.styleFrom(
+                  style: ElevatedButton.styleFrom(
                     backgroundColor:
-                        profile.isActive
-                            ? heading
-                            : primary,
-                    foregroundColor:
-                        Colors.white,
+                        profile.isActive ? heading : primary,
+                    foregroundColor: Colors.white,
                     elevation: 0,
-                    minimumSize:
-                        const Size.fromHeight(
-                      44,
+                    minimumSize: const Size.fromHeight(44),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
                     ),
-                    shape:
-                        RoundedRectangleBorder(
-                      borderRadius:
-                          BorderRadius.circular(
-                        12,
-                      ),
-                    ),
-                    textStyle:
-                        const TextStyle(
+                    textStyle: const TextStyle(
                       fontFamily: 'Manrope',
                       fontWeight: FontWeight.w700,
                     ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              SizedBox(
+                width: 46,
+                height: 44,
+                child: OutlinedButton(
+                  onPressed: () => _deletePricingProfile(profile),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.red.shade700,
+                    side: BorderSide(color: Colors.red.shade100),
+                    padding: EdgeInsets.zero,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  child: const Icon(
+                    Icons.delete_outline_rounded,
+                    size: 19,
                   ),
                 ),
               ),
@@ -1137,6 +1243,44 @@ class _AdminPricingProfilesScreenState
               color: isActive
                   ? primary
                   : body,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _rentalTypeChip(
+    RentalType type,
+    RentalTypePricing pricing,
+  ) {
+    final enabled = pricing.enabled;
+    final rate = pricing.rate;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+      decoration: BoxDecoration(
+        color: enabled ? softAccent : background,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: enabled ? accent.withValues(alpha: 0.22) : border,
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            _rentalTypeIcon(type),
+            size: 13,
+            color: enabled ? primary : muted,
+          ),
+          const SizedBox(width: 5),
+          Text(
+            '${_rentalTypeLabel(type)} ${rate > 0 ? _formatMoney(rate) : 'Configured'}',
+            style: TextStyle(
+              fontFamily: 'Manrope',
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+              color: enabled ? primary : body,
             ),
           ),
         ],
