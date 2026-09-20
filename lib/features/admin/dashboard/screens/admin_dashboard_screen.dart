@@ -8,6 +8,7 @@ import '../../branches/screens/admin_branches_screen.dart';
 import '../../availability/screens/admin_availability_screen.dart';
 import '../../customers/screens/admin_customers_screen.dart';
 import '../../availability/screens/admin_new_booking_screen.dart';
+import '../../pricing/screens/admin_pricing_profiles_screen.dart';
 
 class AdminDashboardScreen extends StatefulWidget {
   const AdminDashboardScreen({super.key});
@@ -41,6 +42,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   int _activeBookings = 0;
   int _pendingBookings = 0;
   int _completedBookings = 0;
+  int _pricingProfiles = 0;
   int _pendingPayments = 0;
   double _revenue = 0;
   List<Map<String, dynamic>> _recentBookings = [];
@@ -90,11 +92,13 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
         _collection('cars').get(),
         _collection('customers').get(),
         _collection('bookings').get(),
+        _collection('pricingProfiles').get(),
       ]);
 
       final carDocs = results[0].docs;
       final customerDocs = results[1].docs;
       final bookingDocs = results[2].docs;
+      final pricingProfileDocs = results[3].docs;
 
       final activeCars = carDocs.where((d) {
         final m = d.data();
@@ -183,6 +187,9 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
         _pendingBookings = pendingBookings;
         _completedBookings = completedBookings;
         _pendingPayments = pendingPayments;
+        _pricingProfiles = pricingProfileDocs
+            .where((d) => d.data()['isActive'] != false)
+            .length;
         _revenue = revenue;
         _recentBookings = parsed.take(6).toList();
         _loading = false;
@@ -454,6 +461,15 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                 icon: Icons.payments_rounded,
               ),
             ),
+            SizedBox(
+              width: width,
+              child: _StatCard(
+                title: 'Pricing Profiles',
+                value: '$_pricingProfiles',
+                subtitle: 'Active pricing setups',
+                icon: Icons.price_change_rounded,
+              ),
+            ),
           ],
         );
       },
@@ -541,6 +557,22 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                 builder: (_) => const AdminCarsScreen(),
               ),
             );
+          },
+        ),
+        const SizedBox(height: 10),
+        _QuickActionCard(
+          icon: Icons.price_change_rounded,
+          title: 'Pricing Profiles',
+          subtitle: 'Create, edit and assign hourly/daily pricing packages',
+          onTap: () {
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => const AdminPricingProfilesScreen(),
+              ),
+            ).then((_) {
+              if (mounted) _loadDashboard(refresh: true);
+            });
           },
         ),
         const SizedBox(height: 10),
@@ -971,7 +1003,17 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                   _drawerItem(
                     icon: Icons.price_change_rounded,
                     title: 'Pricing Profiles',
-                    onTap: () => _showComingSoon('Pricing Profiles'),
+                    onTap: () {
+                      Navigator.pop(context);
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const AdminPricingProfilesScreen(),
+                        ),
+                      ).then((_) {
+                        if (mounted) _loadDashboard(refresh: true);
+                      });
+                    },
                   ),
                   _drawerItem(
                     icon: Icons.speed_rounded,

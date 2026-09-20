@@ -1,82 +1,15 @@
 import 'km_pricing_package.dart';
 
-
-
-// ============================================================================
-// SAFE CONVERSION HELPERS
-// ============================================================================
-
-bool _safeBool(dynamic value, {bool fallback = false}) {
-  if (value is bool) return value;
-  if (value is num) return value != 0;
-  final normalized = value?.toString().trim().toLowerCase();
-  if (normalized == 'true' || normalized == 'yes' || normalized == '1') return true;
-  if (normalized == 'false' || normalized == 'no' || normalized == '0') return false;
-  return fallback;
-}
-
-int _safeInt(dynamic value) {
-  if (value is num) return value.toInt();
-  return int.tryParse(value?.toString() ?? '') ?? 0;
-}
-
-int _positiveInt(dynamic value, {required int fallback}) {
-  final parsed = _safeInt(value);
-  return parsed > 0 ? parsed : fallback;
-}
-
-double _safeDouble(dynamic value, {double fallback = 0}) {
-  if (value is num) return value.toDouble();
-  return double.tryParse(value?.toString() ?? '') ?? fallback;
-}
-
-DateTime _safeDate(dynamic value, {DateTime? fallback}) {
-  if (value is DateTime) return value;
-  try {
-    final dynamic dynamicValue = value;
-    final result = dynamicValue.toDate();
-    if (result is DateTime) return result;
-  } catch (_) {}
-  final parsed = DateTime.tryParse(value?.toString() ?? '');
-  return parsed ?? fallback ?? DateTime(2000, 1, 1);
-}
-
-bool _nestedEnabled(dynamic value) {
-  if (value is Map) return _safeBool(value['enabled']);
-  return false;
-}
-
-double _nestedRate(dynamic value) {
-  if (value is Map) return _safeDouble(value['rate']);
-  return 0;
-}
-
-// ============================================================================
-// RENTAL TYPE
-// ============================================================================
-
-/// The commercial billing mode selected for a booking.
+/// Rental modes supported by the car-rental business.
 ///
-/// Availability and billing are intentionally separate concerns:
-/// - hourly uses the exact pickup/return timestamps.
-/// - daily blocks the complete selected dates.
-/// - weekend blocks the complete selected weekend dates.
-/// - special-date rules can enable/disable any of the above.
+/// Only:
+///   1. hourly
+///   2. daily
 enum RentalType {
   hourly,
-  daily,
-  weekend;
+  daily;
 
-  String get value {
-    switch (this) {
-      case RentalType.hourly:
-        return 'hourly';
-      case RentalType.daily:
-        return 'daily';
-      case RentalType.weekend:
-        return 'weekend';
-    }
-  }
+  String get value => name;
 
   String get label {
     switch (this) {
@@ -84,8 +17,6 @@ enum RentalType {
         return 'Hourly';
       case RentalType.daily:
         return 'Daily';
-      case RentalType.weekend:
-        return 'Weekend';
     }
   }
 
@@ -95,278 +26,162 @@ enum RentalType {
         return RentalType.hourly;
       case 'daily':
         return RentalType.daily;
-      case 'weekend':
-        return RentalType.weekend;
       default:
         return null;
     }
   }
 }
 
-// ============================================================================
-// RENTAL TYPE PRICING
-// ============================================================================
-
-/// Configurable availability/billing rules for one rental type.
+/// A simple date-range pricing override.
 ///
-/// These settings are stored in the pricing profile so the app does not
-/// hard-code things such as "minimum 5 hours".
-class RentalTypePricing {
-  final bool enabled;
-
-  /// Used only by hourly billing. Example: 5.
-  final int minimumBillingHours;
-
-  /// Used by daily billing. Example: 1.
-  final int minimumBillingDays;
-
-  /// Used by weekend billing when the business wants a minimum/maximum range.
-  final int minimumWeekendDays;
-  final int maximumWeekendDays;
-
-  /// Weekend dates that are eligible for this rental type.
-  /// Defaults to Saturday + Sunday.
-  final List<int> allowedWeekdays;
-
-  /// Whether time selection is required by the UI.
-  final bool requireTimeSelection;
-
-  /// Optional base rate fallback. Package-specific rates take priority.
-  final double rate;
-
-  const RentalTypePricing({
-    this.enabled = false,
-    this.minimumBillingHours = 1,
-    this.minimumBillingDays = 1,
-    this.minimumWeekendDays = 2,
-    this.maximumWeekendDays = 2,
-    this.allowedWeekdays = const [6, 7],
-    this.requireTimeSelection = false,
-    this.rate = 0,
-  });
-
-  factory RentalTypePricing.fromMap(
-    dynamic value, {
-    bool defaultEnabled = false,
-    double defaultRate = 0,
-    bool defaultRequireTimeSelection = false,
-  }) {
-    final map = value is Map
-        ? Map<String, dynamic>.from(value)
-        : <String, dynamic>{};
-
-    final rawWeekdays = map['allowedWeekdays'];
-    final weekdays = rawWeekdays is Iterable
-        ? rawWeekdays
-            .map((e) => _safeInt(e))
-            .where((e) => e >= 1 && e <= 7)
-            .toList()
-        : const <int>[6, 7];
-
-    return RentalTypePricing(
-      enabled: map.containsKey('enabled')
-          ? _safeBool(map['enabled'])
-          : defaultEnabled,
-      minimumBillingHours: _positiveInt(
-        map['minimumBillingHours'],
-        fallback: 1,
-      ),
-      minimumBillingDays: _positiveInt(
-        map['minimumBillingDays'],
-        fallback: 1,
-      ),
-      minimumWeekendDays: _positiveInt(
-        map['minimumWeekendDays'],
-        fallback: 2,
-      ),
-      maximumWeekendDays: _positiveInt(
-        map['maximumWeekendDays'],
-        fallback: 2,
-      ),
-      allowedWeekdays:
-          weekdays.isEmpty ? const [6, 7] : List.unmodifiable(weekdays),
-      requireTimeSelection: map.containsKey('requireTimeSelection')
-          ? _safeBool(map['requireTimeSelection'])
-          : defaultRequireTimeSelection,
-      rate: _safeDouble(
-        map['rate'],
-        fallback: defaultRate,
-      ),
-    );
-  }
-
-  Map<String, dynamic> toMap() {
-    return {
-      'enabled': enabled,
-      'minimumBillingHours': minimumBillingHours,
-      'minimumBillingDays': minimumBillingDays,
-      'minimumWeekendDays': minimumWeekendDays,
-      'maximumWeekendDays': maximumWeekendDays,
-      'allowedWeekdays': allowedWeekdays,
-      'requireTimeSelection': requireTimeSelection,
-      'rate': rate,
-    };
-  }
-
-  RentalTypePricing copyWith({
-    bool? enabled,
-    int? minimumBillingHours,
-    int? minimumBillingDays,
-    int? minimumWeekendDays,
-    int? maximumWeekendDays,
-    List<int>? allowedWeekdays,
-    bool? requireTimeSelection,
-    double? rate,
-  }) {
-    return RentalTypePricing(
-      enabled: enabled ?? this.enabled,
-      minimumBillingHours:
-          minimumBillingHours ?? this.minimumBillingHours,
-      minimumBillingDays:
-          minimumBillingDays ?? this.minimumBillingDays,
-      minimumWeekendDays:
-          minimumWeekendDays ?? this.minimumWeekendDays,
-      maximumWeekendDays:
-          maximumWeekendDays ?? this.maximumWeekendDays,
-      allowedWeekdays:
-          allowedWeekdays ?? this.allowedWeekdays,
-      requireTimeSelection:
-          requireTimeSelection ?? this.requireTimeSelection,
-      rate: rate ?? this.rate,
-    );
-  }
-}
-
-// ============================================================================
-// SPECIAL PRICING RULE
-// ============================================================================
-
-/// Date-range override for holidays, festivals, events, peak periods, etc.
+/// Example:
+///   Diwali: 2026-10-18 -> 2026-10-25
+///   daily package pkg_150 -> 2999
+///   daily package pkg_250 -> 3299
 ///
-/// A special rule has higher priority than normal/weekend pricing when it
-/// applies to a selected booking date.
-class SpecialPricingRule {
+/// Package IDs are used instead of duplicating complete package definitions.
+class SpecialRate {
   final String id;
   final String name;
   final DateTime startDate;
   final DateTime endDate;
+  final bool isActive;
 
-  final bool enabled;
+  final Map<String, double> hourlyPrices;
+  final Map<String, double> dailyPrices;
 
-  final bool hourlyEnabled;
-  final bool dailyEnabled;
-  final bool weekendEnabled;
+  /// If set, this replaces the package extra-KM rate for the matching date.
+  final double? extraKmRate;
 
-  final double hourlyRate;
-  final double dailyRate;
-  final double weekendRate;
-  final double extraKmRate;
-
-  final int minimumBillingHours;
-
-  const SpecialPricingRule({
+  const SpecialRate({
     required this.id,
     required this.name,
     required this.startDate,
     required this.endDate,
-    this.enabled = true,
-    this.hourlyEnabled = false,
-    this.dailyEnabled = true,
-    this.weekendEnabled = true,
-    this.hourlyRate = 0,
-    this.dailyRate = 0,
-    this.weekendRate = 0,
-    this.extraKmRate = 0,
-    this.minimumBillingHours = 1,
+    this.isActive = true,
+    this.hourlyPrices = const {},
+    this.dailyPrices = const {},
+    this.extraKmRate,
   });
 
   bool containsDate(DateTime date) {
-    final day = DateTime(date.year, date.month, date.day);
-    final start = DateTime(startDate.year, startDate.month, startDate.day);
-    final endExclusive =
-        DateTime(endDate.year, endDate.month, endDate.day).add(
+    if (!isActive) return false;
+
+    final day = DateTime(
+      date.year,
+      date.month,
+      date.day,
+    );
+
+    final start = DateTime(
+      startDate.year,
+      startDate.month,
+      startDate.day,
+    );
+
+    final endExclusive = DateTime(
+      endDate.year,
+      endDate.month,
+      endDate.day,
+    ).add(
       const Duration(days: 1),
     );
 
-    return enabled &&
-        !day.isBefore(start) &&
+    return !day.isBefore(start) &&
         day.isBefore(endExclusive);
   }
 
-  bool appliesToRange(DateTime start, DateTime end) {
-    if (!enabled) return false;
+  bool appliesToRange(
+    DateTime start,
+    DateTime end,
+  ) {
+    if (!isActive || end.isBefore(start)) {
+      return false;
+    }
 
-    var cursor = DateTime(start.year, start.month, start.day);
-    final last = DateTime(end.year, end.month, end.day);
+    var cursor = DateTime(
+      start.year,
+      start.month,
+      start.day,
+    );
+
+    final last = DateTime(
+      end.year,
+      end.month,
+      end.day,
+    );
 
     while (!cursor.isAfter(last)) {
-      if (containsDate(cursor)) return true;
-      cursor = cursor.add(const Duration(days: 1));
+      if (containsDate(cursor)) {
+        return true;
+      }
+
+      cursor = cursor.add(
+        const Duration(days: 1),
+      );
     }
 
     return false;
   }
 
-  bool isEnabledFor(RentalType type) {
-    switch (type) {
-      case RentalType.hourly:
-        return hourlyEnabled;
-      case RentalType.daily:
-        return dailyEnabled;
-      case RentalType.weekend:
-        return weekendEnabled;
+  double? priceFor({
+    required RentalType rentalType,
+    required String packageId,
+  }) {
+    final prices =
+        rentalType == RentalType.hourly
+            ? hourlyPrices
+            : dailyPrices;
+
+    final price = prices[packageId];
+
+    if (price == null ||
+        !price.isFinite ||
+        price < 0) {
+      return null;
     }
+
+    return price;
   }
 
-  double rateFor(RentalType type) {
-    switch (type) {
-      case RentalType.hourly:
-        return hourlyRate;
-      case RentalType.daily:
-        return dailyRate;
-      case RentalType.weekend:
-        return weekendRate;
-    }
-  }
-
-  factory SpecialPricingRule.fromMap(
+  factory SpecialRate.fromMap(
     String id,
     Map<String, dynamic> map,
   ) {
-    return SpecialPricingRule(
+    final start =
+        _safeDate(map['startDate']);
+
+    final end =
+        _safeDate(
+      map['endDate'],
+      fallback: start,
+    );
+
+    return SpecialRate(
       id: id,
-      name: map['name']?.toString() ?? id,
-      startDate: _safeDate(map['startDate']),
-      endDate: _safeDate(
-        map['endDate'],
-        fallback: _safeDate(map['startDate']),
-      ),
-      enabled: _safeBool(map['enabled'], fallback: true),
-      hourlyEnabled: _safeBool(
-        map['hourlyEnabled'] ?? _nestedEnabled(map['hourly']),
-      ),
-      dailyEnabled: _safeBool(
-        map['dailyEnabled'] ?? _nestedEnabled(map['daily']),
+      name:
+          map['name']?.toString() ?? id,
+      startDate: start,
+      endDate: end,
+      isActive: _safeBool(
+        map['isActive'] ??
+            map['enabled'],
         fallback: true,
       ),
-      weekendEnabled: _safeBool(
-        map['weekendEnabled'] ?? _nestedEnabled(map['weekend']),
-        fallback: true,
+      hourlyPrices: _toDoubleMap(
+        map['hourlyPrices'] ??
+            map['hourly'],
       ),
-      hourlyRate: _safeDouble(
-        map['hourlyRate'] ?? _nestedRate(map['hourly']),
+      dailyPrices: _toDoubleMap(
+        map['dailyPrices'] ??
+            map['daily'],
       ),
-      dailyRate: _safeDouble(
-        map['dailyRate'] ?? _nestedRate(map['daily']),
-      ),
-      weekendRate: _safeDouble(
-        map['weekendRate'] ?? _nestedRate(map['weekend']),
-      ),
-      extraKmRate: _safeDouble(map['extraKmRate']),
-      minimumBillingHours: _positiveInt(
-        map['minimumBillingHours'],
-        fallback: 1,
-      ),
+      extraKmRate:
+          map['extraKmRate'] == null
+              ? null
+              : _safeDouble(
+                  map['extraKmRate'],
+                ),
     );
   }
 
@@ -376,23 +191,51 @@ class SpecialPricingRule {
       'name': name,
       'startDate': startDate,
       'endDate': endDate,
-      'enabled': enabled,
-      'hourlyEnabled': hourlyEnabled,
-      'dailyEnabled': dailyEnabled,
-      'weekendEnabled': weekendEnabled,
-      'hourlyRate': hourlyRate,
-      'dailyRate': dailyRate,
-      'weekendRate': weekendRate,
-      'extraKmRate': extraKmRate,
-      'minimumBillingHours': minimumBillingHours,
+      'isActive': isActive,
+      'hourlyPrices': hourlyPrices,
+      'dailyPrices': dailyPrices,
+      if (extraKmRate != null)
+        'extraKmRate': extraKmRate,
     };
+  }
+
+  SpecialRate copyWith({
+    String? id,
+    String? name,
+    DateTime? startDate,
+    DateTime? endDate,
+    bool? isActive,
+    Map<String, double>? hourlyPrices,
+    Map<String, double>? dailyPrices,
+    double? extraKmRate,
+    bool clearExtraKmRate = false,
+  }) {
+    return SpecialRate(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      startDate:
+          startDate ?? this.startDate,
+      endDate:
+          endDate ?? this.endDate,
+      isActive:
+          isActive ?? this.isActive,
+      hourlyPrices:
+          hourlyPrices ?? this.hourlyPrices,
+      dailyPrices:
+          dailyPrices ?? this.dailyPrices,
+      extraKmRate:
+          clearExtraKmRate
+              ? null
+              : (extraKmRate ??
+                  this.extraKmRate),
+    );
   }
 }
 
-// ============================================================================
-// DEPOSIT CONFIGURATION
-// ============================================================================
-
+/// Security deposit is completely separate from rental/trip pricing.
+///
+/// Monetary deposits increase amount payable but never tripTotal.
+/// Asset deposits are recorded as security and add no money to payable.
 enum DepositType {
   none,
   cash,
@@ -418,18 +261,72 @@ enum DepositType {
     }
   }
 
-  static DepositType fromString(dynamic value) {
-    switch (value?.toString()) {
+  String get label {
+    switch (this) {
+      case DepositType.none:
+        return 'No Deposit';
+      case DepositType.cash:
+        return 'Cash';
+      case DepositType.online:
+        return 'Online';
+      case DepositType.bankTransfer:
+        return 'Bank Transfer';
+      case DepositType.vehicleAsset:
+        return 'Customer Bike';
+      case DepositType.otherAsset:
+        return 'Other Asset';
+    }
+  }
+
+  bool get isAsset {
+    return this == DepositType.vehicleAsset ||
+        this == DepositType.otherAsset;
+  }
+
+  bool get isMonetary {
+    switch (this) {
+      case DepositType.cash:
+      case DepositType.online:
+      case DepositType.bankTransfer:
+        return true;
+      case DepositType.none:
+      case DepositType.vehicleAsset:
+      case DepositType.otherAsset:
+        return false;
+    }
+  }
+
+  static DepositType fromString(
+    dynamic value,
+  ) {
+    switch (
+        value
+            ?.toString()
+            .trim()
+            .toLowerCase()) {
       case 'cash':
         return DepositType.cash;
+
       case 'online':
+      case 'upi':
         return DepositType.online;
-      case 'bankTransfer':
+
+      case 'banktransfer':
+      case 'bank_transfer':
+      case 'bank transfer':
         return DepositType.bankTransfer;
-      case 'vehicleAsset':
+
+      case 'vehicleasset':
+      case 'vehicle_asset':
+      case 'customerbike':
+      case 'customer_bike':
+      case 'bike':
         return DepositType.vehicleAsset;
-      case 'otherAsset':
+
+      case 'otherasset':
+      case 'other_asset':
         return DepositType.otherAsset;
+
       case 'none':
       default:
         return DepositType.none;
@@ -437,1064 +334,751 @@ enum DepositType {
   }
 }
 
-/// Defines what security a rental business accepts.
+/// Pricing-level default security-deposit configuration.
 ///
-/// Asset deposits are intentionally not converted into cash. The estimated
-/// asset value is informational/security value, while monetary deposits are
-/// actual collected money.
+/// Booking-level details such as bike registration, photos, or asset
+/// inspection belong to the booking/inspection records, not this profile.
 class DepositConfig {
-  final bool required;
-  final double defaultAmount;
-  final List<DepositType> allowedTypes;
+  final DepositType type;
+  final double amount;
+  final String paymentMethod;
+  final String assetDescription;
   final double minimumAssetValue;
 
   const DepositConfig({
-    this.required = false,
-    this.defaultAmount = 0,
-    this.allowedTypes = const [DepositType.cash, DepositType.online],
+    this.type = DepositType.none,
+    this.amount = 0,
+    this.paymentMethod = '',
+    this.assetDescription = '',
     this.minimumAssetValue = 0,
   });
 
-  factory DepositConfig.fromMap(dynamic value) {
+  bool get required =>
+      type != DepositType.none;
+
+  bool get isMonetary =>
+      type.isMonetary;
+
+  double get monetaryAmount {
+    if (!isMonetary) return 0;
+
+    if (!amount.isFinite ||
+        amount < 0) {
+      return 0;
+    }
+
+    return amount;
+  }
+
+  factory DepositConfig.fromMap(
+    dynamic value,
+  ) {
     final map = value is Map
-        ? Map<String, dynamic>.from(value)
+        ? Map<String, dynamic>.from(
+            value,
+          )
         : <String, dynamic>{};
 
-    final rawTypes = map['allowedTypes'];
-    final types = rawTypes is Iterable
-        ? rawTypes
-            .map(DepositType.fromString)
-            .toSet()
-            .toList()
-        : <DepositType>[
-            DepositType.cash,
-            DepositType.online,
-            DepositType.bankTransfer,
-            DepositType.vehicleAsset,
-            DepositType.otherAsset,
-          ];
+    final legacyAmount =
+        _safeDouble(
+      map['amount'] ??
+          map['defaultAmount'] ??
+          map['securityDeposit'],
+    );
+
+    var type = DepositType.fromString(
+      map['type'] ??
+          map['depositType'],
+    );
+
+    // Migration support for old profiles
+    // containing only a positive securityDeposit.
+    if (type == DepositType.none &&
+        legacyAmount > 0) {
+      type = DepositType.cash;
+    }
 
     return DepositConfig(
-      required: _safeBool(map['required']),
-      defaultAmount: _safeDouble(
-        map['defaultAmount'] ?? map['amount'],
+      type: type,
+      amount: legacyAmount,
+      paymentMethod:
+          map['paymentMethod']
+              ?.toString() ??
+          '',
+      assetDescription:
+          map['assetDescription']
+              ?.toString() ??
+          map['description']
+              ?.toString() ??
+          '',
+      minimumAssetValue:
+          _safeDouble(
+        map['minimumAssetValue'],
       ),
-      allowedTypes:
-          types.isEmpty ? const [DepositType.cash] : List.unmodifiable(types),
-      minimumAssetValue: _safeDouble(map['minimumAssetValue']),
     );
   }
 
   Map<String, dynamic> toMap() {
     return {
-      'required': required,
-      'defaultAmount': defaultAmount,
-      'allowedTypes': allowedTypes.map((e) => e.value).toList(),
-      'minimumAssetValue': minimumAssetValue,
+      'type': type.value,
+      'amount':
+          isMonetary
+              ? monetaryAmount
+              : 0,
+      'paymentMethod':
+          paymentMethod,
+      'assetDescription':
+          assetDescription,
+      'minimumAssetValue':
+          minimumAssetValue,
     };
+  }
+
+  DepositConfig copyWith({
+    DepositType? type,
+    double? amount,
+    String? paymentMethod,
+    String? assetDescription,
+    double? minimumAssetValue,
+  }) {
+    return DepositConfig(
+      type: type ?? this.type,
+      amount:
+          amount ?? this.amount,
+      paymentMethod:
+          paymentMethod ??
+              this.paymentMethod,
+      assetDescription:
+          assetDescription ??
+              this.assetDescription,
+      minimumAssetValue:
+          minimumAssetValue ??
+              this.minimumAssetValue,
+    );
   }
 }
 
+/// Simplified pricing profile.
+///
+/// One pricing profile can be shared by multiple cars.
+///
+/// Example:
+///   Premium SUV
+///     -> Creta
+///     -> Seltos
+///     -> XUV700
+///
+/// A profile contains only:
+///   - hourly packages
+///   - daily packages
+///   - special date rates
+///   - security deposit
 class PricingProfile {
-  // ===========================================================================
-  // IDENTITY
-  // ===========================================================================
-
-  /// Firestore pricing profile document ID.
   final String id;
-
-  /// Tenant that owns this pricing profile.
   final String tenantId;
 
-  /// Vehicle this pricing profile belongs to.
+  /// Kept for compatibility with vehicle-linked pricing.
   ///
-  /// Example:
-  /// car_001
+  /// For shared pricing groups this can be empty.
   final String vehicleId;
 
-  /// Human-readable pricing profile name.
-  ///
-  /// Example:
-  /// Hyundai Creta Pricing
-  final String name;
+  /// Shared pricing-group identifier.
+  final String pricingGroupId;
 
-  /// Currency used by this pricing profile.
-  ///
-  /// Example:
-  /// INR
+  final String name;
   final String currency;
 
-  // ===========================================================================
-  // BASIC PRICING
-  // ===========================================================================
-  //
-  // These fields are retained for backwards compatibility.
-  //
-  // When kmPricingMode == package:
-  // the selected KmPricingPackage rates should be used instead.
-  //
+  final List<KmPricingPackage>
+      hourlyPackages;
 
-  final double hourlyRate;
+  final List<KmPricingPackage>
+      dailyPackages;
 
-  final double dailyRate;
+  final List<SpecialRate>
+      specialRates;
 
-  final double weekendRate;
-
-  final double weeklyRate;
-
-  final double monthlyRate;
-
-  // ===========================================================================
-  // KM SETTINGS
-  // ===========================================================================
-  //
-  // Previous KM pricing system is retained.
-  //
-
-  final KmPricingMode kmPricingMode;
-
-  /// Previous included KM per rental day.
-  final int includedKmPerDay;
-
-  /// Previous selectable KM options.
-  ///
-  /// Example:
-  /// [150, 250, 500, 750, 1000]
-  final List<int> kmOptions;
-
-  /// Previous direct per-KM pricing.
-  final double perKmRate;
-
-  /// Previous generic extra KM rate.
-  ///
-  /// For package mode, the package's own extraKmRate
-  /// takes priority.
-  final double extraKmRate;
-
-  // ===========================================================================
-  // KM PACKAGE SYSTEM
-  // ===========================================================================
-  //
-  // Every package can have its own:
-  //
-  // - Included KM
-  // - Hourly rate
-  // - Daily rate
-  // - Weekend rate
-  // - Weekly rate
-  // - Monthly rate
-  // - Extra KM rate
-  //
-  // Example:
-  //
-  // 150 KM package
-  // 250 KM package
-  // 500 KM package
-  // 750 KM package
-  // 1000 KM package
-  // 1500 KM package
-  // Unlimited package
-  //
-
-  final List<KmPricingPackage> kmPackages;
-
-  // ===========================================================================
-  // UNLIMITED KM
-  // ===========================================================================
-  //
-  // Previous unlimited system is retained.
-  //
-  // For the package system, unlimited can also be represented
-  // using a KmPricingPackage with unlimitedKm == true.
-  //
-
-  final bool unlimitedKmEnabled;
-
-  final double unlimitedKmSurcharge;
-
-  // ===========================================================================
-  // TIME SETTINGS
-  // ===========================================================================
-
-  /// Grace period before late/extension charges begin.
-  final int gracePeriodMinutes;
-
-  /// Charge for an additional rental hour.
-  final double extraHourRate;
-
-  /// Charge for an additional rental day.
-  final double extraDayRate;
-
-  /// Charge applied for late return.
-  final double lateReturnRate;
-
-  // ===========================================================================
-  // DEPOSIT
-  // ===========================================================================
-
-
-  // ===========================================================================
-  // RENTAL TYPE PRICING
-  // ===========================================================================
-
-  /// Current configurable rules for Hourly / Daily / Weekend booking.
-  final RentalTypePricing hourlyPricing;
-  final RentalTypePricing dailyPricing;
-  final RentalTypePricing weekendPricing;
-
-  /// Date-range overrides such as festivals, holidays and peak periods.
-  final List<SpecialPricingRule> specialPricingRules;
-
-  /// Incremented whenever pricing is changed. A booking must store the
-  /// resulting pricing snapshot/version so future changes cannot alter it.
-  final int pricingVersion;
-
-  // ===========================================================================
-  // DEPOSIT
-  // ===========================================================================
-
-  /// Security deposit configuration. Monetary deposits and physical assets
-  /// are represented separately.
-  final DepositConfig depositConfig;
-
-  // ===========================================================================
-  // STATUS
-  // ===========================================================================
+  final DepositConfig
+      securityDeposit;
 
   final bool isActive;
 
-  // ===========================================================================
-  // CONSTRUCTOR
-  // ===========================================================================
-
   const PricingProfile({
     required this.id,
-
-    // Identity
     required this.tenantId,
-    required this.vehicleId,
+    this.vehicleId = '',
+    this.pricingGroupId = '',
     required this.name,
-    required this.currency,
-
-    // Basic pricing
-    required this.hourlyRate,
-    required this.dailyRate,
-    required this.weekendRate,
-    required this.weeklyRate,
-    required this.monthlyRate,
-
-    // Previous KM system
-    required this.kmPricingMode,
-    required this.includedKmPerDay,
-    required this.kmOptions,
-    required this.perKmRate,
-    required this.extraKmRate,
-
-    // Package system
-    required this.kmPackages,
-
-    // Unlimited
-    required this.unlimitedKmEnabled,
-    required this.unlimitedKmSurcharge,
-
-    // Time
-    required this.gracePeriodMinutes,
-    required this.extraHourRate,
-    required this.extraDayRate,
-    required this.lateReturnRate,
-
-    // Rental type pricing
-    required this.hourlyPricing,
-    required this.dailyPricing,
-    required this.weekendPricing,
-    required this.specialPricingRules,
-    required this.pricingVersion,
-
-    // Deposit
-    required this.depositConfig,
-
-    // Status
-    required this.isActive,
+    this.currency = 'INR',
+    this.hourlyPackages =
+        const [],
+    this.dailyPackages =
+        const [],
+    this.specialRates =
+        const [],
+    this.securityDeposit =
+        const DepositConfig(),
+    this.isActive = true,
   });
 
-  // ===========================================================================
-  // PACKAGE HELPERS
-  // ===========================================================================
+  /// Compatibility getter for older UI code.
+  List<KmPricingPackage>
+      get kmPackages =>
+          dailyPackages;
 
-  /// Find package by ID.
-  KmPricingPackage? getPackage(String packageId) {
-    try {
-      return kmPackages.firstWhere(
-        (package) => package.id == packageId,
-      );
-    } catch (_) {
-      return null;
-    }
-  }
+  double get securityDepositAmount =>
+      securityDeposit.monetaryAmount;
 
-  /// Find package by included KM.
-  KmPricingPackage? getPackageByKm(int km) {
-    try {
-      return kmPackages.firstWhere(
+  bool get hourlyEnabled =>
+      hourlyPackages.any(
         (package) =>
-            !package.unlimitedKm &&
-            package.includedKm == km,
+            package.isActive &&
+            package.supportsHourly,
       );
-    } catch (_) {
-      return null;
-    }
-  }
 
-  /// Get unlimited package.
-  KmPricingPackage? getUnlimitedPackage() {
-    try {
-      return kmPackages.firstWhere(
-        (package) => package.unlimitedKm,
+  bool get dailyEnabled =>
+      dailyPackages.any(
+        (package) =>
+            package.isActive &&
+            package.supportsDaily,
       );
-    } catch (_) {
-      return null;
-    }
-  }
 
-  /// Backwards-compatible monetary deposit amount.
-  ///
-  /// New code should use depositConfig.defaultAmount and depositConfig.allowedTypes.
-  double get securityDeposit => depositConfig.defaultAmount;
-
-  /// Returns the normal pricing configuration for a rental type.
-  RentalTypePricing rentalPricingFor(RentalType type) {
+  List<KmPricingPackage> packagesFor(
+    RentalType type,
+  ) {
     switch (type) {
       case RentalType.hourly:
-        return hourlyPricing;
+        return hourlyPackages;
       case RentalType.daily:
-        return dailyPricing;
-      case RentalType.weekend:
-        return weekendPricing;
+        return dailyPackages;
     }
   }
 
-  /// Whether a rental type is currently available without considering
-  /// date-range special overrides.
-  bool isRentalTypeEnabled(RentalType type) {
-    return rentalPricingFor(type).enabled;
-  }
+  KmPricingPackage? getPackage(
+    String packageId, {
+    RentalType? rentalType,
+  }) {
+    final normalizedId =
+        packageId.trim();
 
-  /// Returns the first special rule that applies to the selected range.
-  ///
-  /// Rules are evaluated in stored order. The pricing admin should keep more
-  /// specific/high-priority rules before broad peak-period rules.
-  SpecialPricingRule? specialRuleForRange(
-    DateTime start,
-    DateTime end,
-  ) {
-    for (final rule in specialPricingRules) {
-      if (rule.appliesToRange(start, end)) return rule;
+    if (normalizedId.isEmpty) {
+      return null;
     }
+
+    final source =
+        rentalType == null
+            ? <KmPricingPackage>[
+                ...hourlyPackages,
+                ...dailyPackages,
+              ]
+            : packagesFor(
+                rentalType,
+              );
+
+    for (final package
+        in source) {
+      if (package.id ==
+          normalizedId) {
+        return package;
+      }
+    }
+
     return null;
   }
 
-  /// Returns the rental types allowed for a date range after applying special
-  /// pricing overrides.
-  List<RentalType> availableRentalTypesForRange(
+  KmPricingPackage? getPackageByKm(
+    int km, {
+    RentalType? rentalType,
+  }) {
+    if (km < 0) return null;
+
+    final source =
+        rentalType == null
+            ? <KmPricingPackage>[
+                ...hourlyPackages,
+                ...dailyPackages,
+              ]
+            : packagesFor(
+                rentalType,
+              );
+
+    for (final package
+        in source) {
+      if (package.isActive &&
+          !package.unlimitedKm &&
+          package.includedKm ==
+              km) {
+        return package;
+      }
+    }
+
+    return null;
+  }
+
+  KmPricingPackage?
+      getUnlimitedPackage({
+    RentalType? rentalType,
+  }) {
+    final source =
+        rentalType == null
+            ? <KmPricingPackage>[
+                ...hourlyPackages,
+                ...dailyPackages,
+              ]
+            : packagesFor(
+                rentalType,
+              );
+
+    for (final package
+        in source) {
+      if (package.isActive &&
+          package.unlimitedKm) {
+        return package;
+      }
+    }
+
+    return null;
+  }
+
+  SpecialRate? specialRateForDate(
+    DateTime date,
+  ) {
+    for (final rate
+        in specialRates) {
+      if (rate.containsDate(date)) {
+        return rate;
+      }
+    }
+
+    return null;
+  }
+
+  SpecialRate? specialRateForRange(
     DateTime start,
     DateTime end,
   ) {
-    final result = <RentalType>[];
-
-    for (final type in RentalType.values) {
-      if (!isRentalTypeEnabled(type)) continue;
-
-      final rule = specialRuleForRange(start, end);
-      if (rule != null && !rule.isEnabledFor(type)) continue;
-
-      result.add(type);
+    if (end.isBefore(start)) {
+      return null;
     }
 
-    return result;
-  }
-
-  /// Returns the applicable base rate. Package-specific rates should be
-  /// applied by PricingEngine after this profile-level fallback.
-  double baseRateFor(
-    RentalType type, {
-    DateTime? start,
-    DateTime? end,
-  }) {
-    if (start != null && end != null) {
-      final rule = specialRuleForRange(start, end);
-      if (rule != null && rule.isEnabledFor(type)) {
-        final specialRate = rule.rateFor(type);
-        if (specialRate > 0) return specialRate;
+    for (final rate
+        in specialRates) {
+      if (rate.appliesToRange(
+        start,
+        end,
+      )) {
+        return rate;
       }
     }
 
-    final config = rentalPricingFor(type);
-    if (config.rate > 0) return config.rate;
-
-    switch (type) {
-      case RentalType.hourly:
-        return hourlyRate;
-      case RentalType.daily:
-        return dailyRate;
-      case RentalType.weekend:
-        return weekendRate;
-    }
+    return null;
   }
 
-  /// Extra KM rate after applying a special date override.
+  double priceFor({
+    required RentalType rentalType,
+    required KmPricingPackage package,
+    required DateTime date,
+  }) {
+    final special =
+        specialRateForDate(date);
+
+    final override =
+        special?.priceFor(
+      rentalType: rentalType,
+      packageId: package.id,
+    );
+
+    if (override != null &&
+        override.isFinite &&
+        override >= 0) {
+      return override;
+    }
+
+    return normalPriceFor(
+      rentalType: rentalType,
+      package: package,
+    );
+  }
+
+  double normalPriceFor({
+    required RentalType rentalType,
+    required KmPricingPackage package,
+  }) {
+    return package.rateFor(
+      rentalType.value,
+    );
+  }
+
   double extraKmRateFor({
-    DateTime? start,
-    DateTime? end,
+    required KmPricingPackage package,
+    DateTime? date,
   }) {
-    if (start != null && end != null) {
-      final rule = specialRuleForRange(start, end);
-      if (rule != null && rule.extraKmRate > 0) {
-        return rule.extraKmRate;
+    if (date != null) {
+      final special =
+          specialRateForDate(date);
+
+      final override =
+          special?.extraKmRate;
+
+      if (override != null &&
+          override.isFinite &&
+          override >= 0) {
+        return override;
       }
     }
-    return extraKmRate;
+
+    return package.safeExtraKmRate;
   }
 
-  // ===========================================================================
-  // FIREBASE → MODEL
-  // ===========================================================================
+  bool isRentalTypeEnabled(
+    RentalType type,
+  ) {
+    return packagesFor(type).any(
+      (package) =>
+          package.isActive &&
+          package.supportsRentalType(
+            type.value,
+          ),
+    );
+  }
+
+  List<RentalType>
+      availableRentalTypesForRange(
+    DateTime start,
+    DateTime end,
+  ) {
+    if (end.isBefore(start)) {
+      return const [];
+    }
+
+    final result =
+        <RentalType>[];
+
+    if (isRentalTypeEnabled(
+      RentalType.hourly,
+    )) {
+      result.add(
+        RentalType.hourly,
+      );
+    }
+
+    if (isRentalTypeEnabled(
+      RentalType.daily,
+    )) {
+      result.add(
+        RentalType.daily,
+      );
+    }
+
+    return List.unmodifiable(
+      result,
+    );
+  }
 
   factory PricingProfile.fromMap(
     String id,
     Map<String, dynamic> map,
   ) {
+    final hourly =
+        _toPackageList(
+      map['hourlyPackages'],
+    );
+
+    final daily =
+        _toPackageList(
+      map['dailyPackages'],
+    );
+
+    // Migration support for the old combined package list.
+    final legacy =
+        _toPackageList(
+      map['kmPackages'] ??
+          map['packages'],
+    );
+
+    final resolvedHourly =
+        hourly.isNotEmpty
+            ? hourly
+            : legacy;
+
+    final resolvedDaily =
+        daily.isNotEmpty
+            ? daily
+            : legacy;
+
     return PricingProfile(
       id: id,
-
-      // -----------------------------------------------------------------------
-      // IDENTITY
-      // -----------------------------------------------------------------------
-
       tenantId:
-          map['tenantId']?.toString() ?? '',
-
+          map['tenantId']
+              ?.toString() ??
+          '',
       vehicleId:
-          map['vehicleId']?.toString() ?? '',
-
+          map['vehicleId']
+              ?.toString() ??
+          '',
+      pricingGroupId:
+          map['pricingGroupId']
+              ?.toString() ??
+          map['pricingGroup']
+              ?.toString() ??
+          '',
       name:
-          map['name']?.toString() ?? '',
-
+          map['name']?.toString() ??
+          id,
       currency:
-          map['currency']?.toString() ?? 'INR',
-
-      // -----------------------------------------------------------------------
-      // BASIC PRICING
-      // -----------------------------------------------------------------------
-
-      hourlyRate: _toDouble(
-        map['hourlyRate'],
+          map['currency']
+              ?.toString() ??
+          'INR',
+      hourlyPackages:
+          List.unmodifiable(
+        resolvedHourly,
       ),
-
-      dailyRate: _toDouble(
-        map['dailyRate'],
+      dailyPackages:
+          List.unmodifiable(
+        resolvedDaily,
       ),
-
-      weekendRate: _toDouble(
-        map['weekendRate'],
-      ),
-
-      weeklyRate: _toDouble(
-        map['weeklyRate'],
-      ),
-
-      monthlyRate: _toDouble(
-        map['monthlyRate'],
-      ),
-
-      // -----------------------------------------------------------------------
-      // KM SETTINGS
-      // -----------------------------------------------------------------------
-
-      kmPricingMode: KmPricingMode.fromString(
-        map['kmPricingMode'],
-      ),
-
-      includedKmPerDay: _toInt(
-        map['includedKmPerDay'],
-      ),
-
-      kmOptions: _toIntList(
-        map['kmOptions'],
-      ),
-
-      perKmRate: _toDouble(
-        map['perKmRate'],
-      ),
-
-      extraKmRate: _toDouble(
-        map['extraKmRate'],
-      ),
-
-      // -----------------------------------------------------------------------
-      // KM PACKAGES
-      // -----------------------------------------------------------------------
-
-      kmPackages: _toPackageList(
-        map['kmPackages'],
-      ),
-
-      // -----------------------------------------------------------------------
-      // UNLIMITED KM
-      // -----------------------------------------------------------------------
-
-      unlimitedKmEnabled:
-          map['unlimitedKmEnabled'] ?? false,
-
-      unlimitedKmSurcharge: _toDouble(
-        map['unlimitedKmSurcharge'],
-      ),
-
-      // -----------------------------------------------------------------------
-      // TIME SETTINGS
-      // -----------------------------------------------------------------------
-
-      gracePeriodMinutes: _toInt(
-        map['gracePeriodMinutes'],
-      ),
-
-      extraHourRate: _toDouble(
-        map['extraHourRate'],
-      ),
-
-      extraDayRate: _toDouble(
-        map['extraDayRate'],
-      ),
-
-      lateReturnRate: _toDouble(
-        map['lateReturnRate'],
-      ),
-
-      // -----------------------------------------------------------------------
-      // RENTAL TYPE PRICING
-      // -----------------------------------------------------------------------
-
-      hourlyPricing: RentalTypePricing.fromMap(
-        (map['hourlyPricing'] ?? _rentalTypeMap(map, 'hourly')),
-        defaultEnabled: _legacyRentalTypeEnabled(
-          map,
-          RentalType.hourly,
+      specialRates:
+          List.unmodifiable(
+        _toSpecialRateList(
+          map['specialRates'] ??
+              map['specialPricingRules'] ??
+              map['specialDates'],
         ),
-        defaultRate: _toDouble(map['hourlyRate']),
-        defaultRequireTimeSelection: true,
       ),
-
-      dailyPricing: RentalTypePricing.fromMap(
-        (map['dailyPricing'] ?? _rentalTypeMap(map, 'daily')),
-        defaultEnabled: _legacyRentalTypeEnabled(
-          map,
-          RentalType.daily,
-        ),
-        defaultRate: _toDouble(map['dailyRate']),
-      ),
-
-      weekendPricing: RentalTypePricing.fromMap(
-        (map['weekendPricing'] ?? _rentalTypeMap(map, 'weekend')),
-        defaultEnabled: _legacyRentalTypeEnabled(
-          map,
-          RentalType.weekend,
-        ),
-        defaultRate: _toDouble(map['weekendRate']),
-      ),
-
-      specialPricingRules: _toSpecialRuleList(
-        map['specialPricingRules'] ?? map['specialDates'],
-      ),
-
-      pricingVersion: _toInt(map['pricingVersion']),
-
-      // -----------------------------------------------------------------------
-      // DEPOSIT
-      // -----------------------------------------------------------------------
-
-      depositConfig: DepositConfig.fromMap(
-        map['depositConfig'] ??
-            {
-              'required': _toDouble(map['securityDeposit']) > 0,
-              'defaultAmount': map['securityDeposit'],
-              'allowedTypes': ['cash', 'online'],
+      securityDeposit:
+          DepositConfig.fromMap(
+        map['securityDeposit'] ??
+            map[
+              'securityDepositConfig'
+            ] ??
+            map['depositConfig'] ??
+            <String, dynamic>{
+              'type':
+                  map['depositType'],
+              'amount':
+                  map['securityDeposit'],
             },
       ),
-
-      // -----------------------------------------------------------------------
-      // STATUS
-      // -----------------------------------------------------------------------
-
-      isActive:
-          map['isActive'] ?? false,
+      isActive: _safeBool(
+        map['isActive'],
+        fallback: true,
+      ),
     );
   }
 
-  // ===========================================================================
-  // MODEL → FIREBASE
-  // ===========================================================================
-
   Map<String, dynamic> toMap() {
     return {
-      // -----------------------------------------------------------------------
-      // IDENTITY
-      // -----------------------------------------------------------------------
-
       'tenantId': tenantId,
-
       'vehicleId': vehicleId,
-
+      'pricingGroupId':
+          pricingGroupId,
       'name': name,
-
       'currency': currency,
-
-      // -----------------------------------------------------------------------
-      // BASIC PRICING
-      // -----------------------------------------------------------------------
-
-      'hourlyRate': hourlyRate,
-
-      'dailyRate': dailyRate,
-
-      'weekendRate': weekendRate,
-
-      'weeklyRate': weeklyRate,
-
-      'monthlyRate': monthlyRate,
-
-      // -----------------------------------------------------------------------
-      // KM SETTINGS
-      // -----------------------------------------------------------------------
-
-      'kmPricingMode': kmPricingMode.value,
-
-      'includedKmPerDay': includedKmPerDay,
-
-      'kmOptions': kmOptions,
-
-      'perKmRate': perKmRate,
-
-      'extraKmRate': extraKmRate,
-
-      // -----------------------------------------------------------------------
-      // KM PACKAGES
-      // -----------------------------------------------------------------------
-
-      'kmPackages': kmPackages
-          .map(
-            (package) => package.toMap(),
-          )
-          .toList(),
-
-      // -----------------------------------------------------------------------
-      // UNLIMITED KM
-      // -----------------------------------------------------------------------
-
-      'unlimitedKmEnabled':
-          unlimitedKmEnabled,
-
-      'unlimitedKmSurcharge':
-          unlimitedKmSurcharge,
-
-      // -----------------------------------------------------------------------
-      // TIME SETTINGS
-      // -----------------------------------------------------------------------
-
-      'gracePeriodMinutes':
-          gracePeriodMinutes,
-
-      'extraHourRate':
-          extraHourRate,
-
-      'extraDayRate':
-          extraDayRate,
-
-      'lateReturnRate':
-          lateReturnRate,
-
-      // -----------------------------------------------------------------------
-      // RENTAL TYPE PRICING
-      // -----------------------------------------------------------------------
-
-      'hourlyPricing': hourlyPricing.toMap(),
-      'dailyPricing': dailyPricing.toMap(),
-      'weekendPricing': weekendPricing.toMap(),
-
-      'specialPricingRules': specialPricingRules
-          .map((rule) => rule.toMap())
-          .toList(),
-
-      'pricingVersion': pricingVersion,
-
-      // -----------------------------------------------------------------------
-      // DEPOSIT
-      // -----------------------------------------------------------------------
-
-      'depositConfig': depositConfig.toMap(),
-
-      // Backwards compatibility for existing admin/customer code.
-      'securityDeposit': depositConfig.defaultAmount,
-
-      // -----------------------------------------------------------------------
-      // STATUS
-      // -----------------------------------------------------------------------
-
-      'isActive':
-          isActive,
+      'hourlyPackages':
+          hourlyPackages
+              .map(
+                (package) =>
+                    package.toMap(),
+              )
+              .toList(),
+      'dailyPackages':
+          dailyPackages
+              .map(
+                (package) =>
+                    package.toMap(),
+              )
+              .toList(),
+      'specialRates':
+          specialRates
+              .map(
+                (rate) =>
+                    rate.toMap(),
+              )
+              .toList(),
+      'securityDeposit':
+          securityDeposit.toMap(),
+      'isActive': isActive,
     };
   }
 
+
   // ===========================================================================
-  // COPY WITH
+  // LEGACY UI COMPATIBILITY GETTERS
   // ===========================================================================
+  // These getters keep older screens compiling while the active pricing model
+  // remains hourly/daily + KM packages + special date rates.
+  // They do not participate in pricing calculations.
+
+  KmPricingMode get kmPricingMode => KmPricingMode.package;
+
+  double get hourlyRate {
+    for (final package in hourlyPackages) {
+      if (package.isActive && package.safeHourlyRate > 0) {
+        return package.safeHourlyRate;
+      }
+    }
+    return 0;
+  }
+
+  double get dailyRate {
+    for (final package in dailyPackages) {
+      if (package.isActive && package.safeDailyRate > 0) {
+        return package.safeDailyRate;
+      }
+    }
+    return 0;
+  }
+
+  /// Weekend/weekly/monthly are no longer supported by the pricing engine.
+  /// Kept at zero only so old display-only widgets do not break compilation.
+  double get weekendRate => 0;
+  double get weeklyRate => 0;
+  double get monthlyRate => 0;
+
+  double get extraKmRate {
+    final packages = <KmPricingPackage>[
+      ...hourlyPackages,
+      ...dailyPackages,
+    ];
+    for (final package in packages) {
+      if (package.isActive && package.safeExtraKmRate > 0) {
+        return package.safeExtraKmRate;
+      }
+    }
+    return 0;
+  }
+
+  List<int> get kmOptions {
+    final values = <int>{};
+    for (final package in <KmPricingPackage>[
+      ...hourlyPackages,
+      ...dailyPackages,
+    ]) {
+      if (package.isActive && !package.unlimitedKm) {
+        values.add(package.safeIncludedKm);
+      }
+    }
+    final result = values.where((km) => km > 0).toList()..sort();
+    return List.unmodifiable(result);
+  }
+
+  int get includedKmPerDay {
+    for (final package in dailyPackages) {
+      if (package.isActive && !package.unlimitedKm) {
+        return package.safeIncludedKm;
+      }
+    }
+    return 0;
+  }
+
+  bool get unlimitedKmEnabled =>
+      dailyPackages.any((package) => package.isActive && package.unlimitedKm);
+
+  double get unlimitedKmSurcharge => 0;
+
+  int get gracePeriodMinutes => 0;
+  double get extraHourRate => 0;
+  double get extraDayRate => 0;
+  double get lateReturnRate => 0;
+
+  bool get isAsset => securityDeposit.type.isMonetary == false &&
+      securityDeposit.type != DepositType.none;
+
+  /// Historical display-only alias used by old widgets.
+  double get securityDepositAmountValue => securityDeposit.monetaryAmount;
+
+  void validate() {
+    final errors = <String>[];
+
+    if (id.trim().isEmpty) errors.add('Pricing profile ID is required.');
+    if (tenantId.trim().isEmpty) errors.add('Tenant ID is required.');
+    if (name.trim().isEmpty) errors.add('Pricing profile name is required.');
+
+    if (hourlyPackages.isEmpty && dailyPackages.isEmpty) {
+      errors.add('At least one hourly or daily package is required.');
+    }
+
+    for (final package in <KmPricingPackage>[
+      ...hourlyPackages,
+      ...dailyPackages,
+    ]) {
+      if (package.id.trim().isEmpty) {
+        errors.add('A package has an empty ID.');
+      }
+      if (package.safeHourlyRate < 0 ||
+          package.safeDailyRate < 0 ||
+          package.safeExtraKmRate < 0) {
+        errors.add('Package "${package.id}" contains an invalid price.');
+      }
+    }
+
+    for (final rate in specialRates) {
+      if (rate.name.trim().isEmpty) {
+        errors.add('A special rate has no name.');
+      }
+      if (rate.endDate.isBefore(rate.startDate)) {
+        errors.add('Special rate "${rate.name}" has an invalid date range.');
+      }
+    }
+
+    if (errors.isNotEmpty) {
+      throw ArgumentError(errors.join(' '));
+    }
+  }
 
   PricingProfile copyWith({
     String? id,
     String? tenantId,
     String? vehicleId,
+    String? pricingGroupId,
     String? name,
     String? currency,
-    double? hourlyRate,
-    double? dailyRate,
-    double? weekendRate,
-    double? weeklyRate,
-    double? monthlyRate,
-    KmPricingMode? kmPricingMode,
-    int? includedKmPerDay,
-    List<int>? kmOptions,
-    double? perKmRate,
-    double? extraKmRate,
-    List<KmPricingPackage>? kmPackages,
-    bool? unlimitedKmEnabled,
-    double? unlimitedKmSurcharge,
-    int? gracePeriodMinutes,
-    double? extraHourRate,
-    double? extraDayRate,
-    double? lateReturnRate,
-    RentalTypePricing? hourlyPricing,
-    RentalTypePricing? dailyPricing,
-    RentalTypePricing? weekendPricing,
-    List<SpecialPricingRule>? specialPricingRules,
-    int? pricingVersion,
-    DepositConfig? depositConfig,
-    double? securityDeposit,
+    List<KmPricingPackage>?
+        hourlyPackages,
+    List<KmPricingPackage>?
+        dailyPackages,
+    List<SpecialRate>?
+        specialRates,
+    DepositConfig?
+        securityDeposit,
     bool? isActive,
   }) {
     return PricingProfile(
       id: id ?? this.id,
-
       tenantId:
           tenantId ?? this.tenantId,
-
       vehicleId:
           vehicleId ?? this.vehicleId,
-
-      name:
-          name ?? this.name,
-
+      pricingGroupId:
+          pricingGroupId ??
+              this.pricingGroupId,
+      name: name ?? this.name,
       currency:
           currency ?? this.currency,
-
-      hourlyRate:
-          hourlyRate ?? this.hourlyRate,
-
-      dailyRate:
-          dailyRate ?? this.dailyRate,
-
-      weekendRate:
-          weekendRate ?? this.weekendRate,
-
-      weeklyRate:
-          weeklyRate ?? this.weeklyRate,
-
-      monthlyRate:
-          monthlyRate ?? this.monthlyRate,
-
-      kmPricingMode:
-          kmPricingMode ?? this.kmPricingMode,
-
-      includedKmPerDay:
-          includedKmPerDay ?? this.includedKmPerDay,
-
-      kmOptions:
-          kmOptions ?? this.kmOptions,
-
-      perKmRate:
-          perKmRate ?? this.perKmRate,
-
-      extraKmRate:
-          extraKmRate ?? this.extraKmRate,
-
-      kmPackages:
-          kmPackages ?? this.kmPackages,
-
-      unlimitedKmEnabled:
-          unlimitedKmEnabled ??
-          this.unlimitedKmEnabled,
-
-      unlimitedKmSurcharge:
-          unlimitedKmSurcharge ??
-          this.unlimitedKmSurcharge,
-
-      gracePeriodMinutes:
-          gracePeriodMinutes ??
-          this.gracePeriodMinutes,
-
-      extraHourRate:
-          extraHourRate ??
-          this.extraHourRate,
-
-      extraDayRate:
-          extraDayRate ??
-          this.extraDayRate,
-
-      lateReturnRate:
-          lateReturnRate ??
-          this.lateReturnRate,
-
-      hourlyPricing:
-          hourlyPricing ?? this.hourlyPricing,
-
-      dailyPricing:
-          dailyPricing ?? this.dailyPricing,
-
-      weekendPricing:
-          weekendPricing ?? this.weekendPricing,
-
-      specialPricingRules:
-          specialPricingRules ?? this.specialPricingRules,
-
-      pricingVersion:
-          pricingVersion ?? this.pricingVersion,
-
-      depositConfig: securityDeposit != null
-          ? DepositConfig(
-              required: this.depositConfig.required,
-              defaultAmount: securityDeposit,
-              allowedTypes: this.depositConfig.allowedTypes,
-              minimumAssetValue: this.depositConfig.minimumAssetValue,
-            )
-          : (depositConfig ?? this.depositConfig),
-
+      hourlyPackages:
+          hourlyPackages ??
+              this.hourlyPackages,
+      dailyPackages:
+          dailyPackages ??
+              this.dailyPackages,
+      specialRates:
+          specialRates ??
+              this.specialRates,
+      securityDeposit:
+          securityDeposit ??
+              this.securityDeposit,
       isActive:
           isActive ?? this.isActive,
     );
   }
-
-  // ===========================================================================
-  // CONVERSION HELPERS
-  // ===========================================================================
-
-
-  static dynamic _rentalTypeMap(
-    Map<String, dynamic> map,
-    String key,
-  ) {
-    final raw = map['rentalTypes'];
-    if (raw is Map) return raw[key];
-    return null;
-  }
-
-  static bool _legacyRentalTypeEnabled(
-    Map<String, dynamic> map,
-    RentalType type,
-  ) {
-    final raw = map['rentalTypes'];
-    if (raw is Map) {
-      final key = type.value;
-      final entry = raw[key];
-      if (entry is Map && entry.containsKey('enabled')) {
-        return _safeBool(entry['enabled']);
-      }
-    }
-
-    // Existing profiles historically had rates without an enabled flag.
-    // Treat a positive legacy rate as enabled so existing data keeps working.
-    switch (type) {
-      case RentalType.hourly:
-        return _toDouble(map['hourlyRate']) > 0;
-      case RentalType.daily:
-        return _toDouble(map['dailyRate']) > 0;
-      case RentalType.weekend:
-        return _toDouble(map['weekendRate']) > 0;
-    }
-  }
-
-  static List<SpecialPricingRule> _toSpecialRuleList(
-    dynamic value,
-  ) {
-    if (value is! Iterable) return [];
-
-    final rules = <SpecialPricingRule>[];
-    int index = 0;
-
-    for (final item in value) {
-      if (item is Map) {
-        final map = Map<String, dynamic>.from(item);
-        rules.add(
-          SpecialPricingRule.fromMap(
-            map['id']?.toString() ?? 'special_$index',
-            map,
-          ),
-        );
-      }
-      index++;
-    }
-
-    return rules;
-  }
-
-  static bool _safeBool(
-    dynamic value, {
-    bool fallback = false,
-  }) {
-    if (value is bool) return value;
-    if (value is num) return value != 0;
-
-    final normalized = value?.toString().trim().toLowerCase();
-    if (normalized == 'true' || normalized == 'yes' || normalized == '1') {
-      return true;
-    }
-    if (normalized == 'false' || normalized == 'no' || normalized == '0') {
-      return false;
-    }
-    return fallback;
-  }
-
-  static int _safeInt(dynamic value) {
-    if (value is num) return value.toInt();
-    return int.tryParse(value?.toString() ?? '') ?? 0;
-  }
-
-  static int _positiveInt(
-    dynamic value, {
-    required int fallback,
-  }) {
-    final parsed = _safeInt(value);
-    return parsed > 0 ? parsed : fallback;
-  }
-
-  static double _safeDouble(
-    dynamic value, {
-    double fallback = 0,
-  }) {
-    if (value is num) return value.toDouble();
-    return double.tryParse(value?.toString() ?? '') ?? fallback;
-  }
-
-  static DateTime _safeDate(
-    dynamic value, {
-    DateTime? fallback,
-  }) {
-    if (value is DateTime) return value;
-
-    // Supports Firestore Timestamp without importing cloud_firestore into
-    // this pure model file: Timestamp exposes toDate() dynamically.
-    try {
-      final dynamic toDate = value;
-      final result = toDate.toDate();
-      if (result is DateTime) return result;
-    } catch (_) {
-      // Fall through to string parsing.
-    }
-
-    final parsed = DateTime.tryParse(value?.toString() ?? '');
-    return parsed ?? fallback ?? DateTime(2000, 1, 1);
-  }
-
-  static bool _nestedEnabled(dynamic value) {
-    if (value is Map) {
-      return _safeBool(value['enabled']);
-    }
-    return false;
-  }
-
-  static double _nestedRate(dynamic value) {
-    if (value is Map) {
-      return _safeDouble(value['rate']);
-    }
-    return 0;
-  }
-
-  static double _toDouble(
-    dynamic value,
-  ) {
-    if (value is num) {
-      return value.toDouble();
-    }
-
-    return double.tryParse(
-          value?.toString() ?? '',
-        ) ??
-        0;
-  }
-
-  static int _toInt(
-    dynamic value,
-  ) {
-    if (value is num) {
-      return value.toInt();
-    }
-
-    return int.tryParse(
-          value?.toString() ?? '',
-        ) ??
-        0;
-  }
-
-  static List<int> _toIntList(
-    dynamic value,
-  ) {
-    if (value is Iterable) {
-      return value
-          .map(
-            (item) => _toInt(item),
-          )
-          .where(
-            (value) => value > 0,
-          )
-          .toList();
-    }
-
-    return [];
-  }
-
-  static List<KmPricingPackage> _toPackageList(
-    dynamic value,
-  ) {
-    if (value is! Iterable) {
-      return [];
-    }
-
-    final packages =
-        <KmPricingPackage>[];
-
-    int index = 0;
-
-    for (final item in value) {
-      if (item is Map) {
-        final map =
-            Map<String, dynamic>.from(item);
-
-        packages.add(
-          KmPricingPackage.fromMap(
-            map['id']?.toString() ??
-                'package_$index',
-            map,
-          ),
-        );
-      }
-
-      index++;
-    }
-
-    return packages;
-  }
 }
 
-// ============================================================================
-// KM PRICING MODE
-// ============================================================================
-
+/// Kept only as a temporary source-compatibility enum for older imports.
+///
+/// New pricing code must use:
+///   hourlyPackages
+///   dailyPackages
+///
+/// Do not use this enum for pricing calculations.
 enum KmPricingMode {
   included,
   perKm,
@@ -1502,52 +1086,246 @@ enum KmPricingMode {
   package,
   slabs;
 
-  // ---------------------------------------------------------------------------
-  // ENUM → FIREBASE STRING
-  // ---------------------------------------------------------------------------
-
-  String get value {
-    switch (this) {
-      case KmPricingMode.included:
-        return 'included';
-
-      case KmPricingMode.perKm:
-        return 'perKm';
-
-      case KmPricingMode.unlimited:
-        return 'unlimited';
-
-      case KmPricingMode.package:
-        return 'package';
-
-      case KmPricingMode.slabs:
-        return 'slabs';
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // FIREBASE STRING → ENUM
-  // ---------------------------------------------------------------------------
+  String get value => name;
 
   static KmPricingMode fromString(
     dynamic value,
   ) {
-    switch (value?.toString()) {
+    switch (
+        value
+            ?.toString()
+            .trim()) {
       case 'perKm':
         return KmPricingMode.perKm;
-
       case 'unlimited':
         return KmPricingMode.unlimited;
-
       case 'package':
         return KmPricingMode.package;
-
       case 'slabs':
         return KmPricingMode.slabs;
-
       case 'included':
       default:
         return KmPricingMode.included;
     }
   }
+}
+
+// ============================================================================
+// SAFE CONVERSION HELPERS
+// ============================================================================
+
+bool _safeBool(
+  dynamic value, {
+  bool fallback = false,
+}) {
+  if (value is bool) {
+    return value;
+  }
+
+  if (value is num) {
+    return value != 0;
+  }
+
+  final normalized =
+      value
+          ?.toString()
+          .trim()
+          .toLowerCase();
+
+  if (normalized == 'true' ||
+      normalized == 'yes' ||
+      normalized == '1') {
+    return true;
+  }
+
+  if (normalized == 'false' ||
+      normalized == 'no' ||
+      normalized == '0') {
+    return false;
+  }
+
+  return fallback;
+}
+
+double _safeDouble(
+  dynamic value, {
+  double fallback = 0,
+}) {
+  if (value is num) {
+    final result =
+        value.toDouble();
+
+    return result.isFinite
+        ? result
+        : fallback;
+  }
+
+  final result =
+      double.tryParse(
+    value?.toString() ?? '',
+  );
+
+  if (result == null ||
+      !result.isFinite) {
+    return fallback;
+  }
+
+  return result;
+}
+
+DateTime _safeDate(
+  dynamic value, {
+  DateTime? fallback,
+}) {
+  if (value is DateTime) {
+    return value;
+  }
+
+  try {
+    final dynamic dynamicValue =
+        value;
+
+    final result =
+        dynamicValue.toDate();
+
+    if (result is DateTime) {
+      return result;
+    }
+  } catch (_) {}
+
+  final parsed =
+      DateTime.tryParse(
+    value?.toString() ?? '',
+  );
+
+  return parsed ??
+      fallback ??
+      DateTime(
+        2000,
+        1,
+        1,
+      );
+}
+
+Map<String, double>
+    _toDoubleMap(
+  dynamic value,
+) {
+  if (value is! Map) {
+    return {};
+  }
+
+  final result =
+      <String, double>{};
+
+  value.forEach(
+    (key, rawValue) {
+      final id =
+          key.toString();
+
+      final amount =
+          _safeDouble(
+        rawValue,
+      );
+
+      if (id.isNotEmpty &&
+          amount >= 0) {
+        result[id] = amount;
+      }
+    },
+  );
+
+  return Map.unmodifiable(
+    result,
+  );
+}
+
+List<KmPricingPackage>
+    _toPackageList(
+  dynamic value,
+) {
+  if (value is! Iterable) {
+    return [];
+  }
+
+  final packages =
+      <KmPricingPackage>[];
+
+  var index = 0;
+
+  for (final item in value) {
+    if (item is Map) {
+      final map =
+          Map<String, dynamic>.from(
+        item,
+      );
+
+      final packageId =
+          map['id']
+                  ?.toString()
+                  .trim()
+                  .isNotEmpty ==
+              true
+              ? map['id']
+                  .toString()
+                  .trim()
+              : 'package_$index';
+
+      packages.add(
+        KmPricingPackage.fromMap(
+          packageId,
+          map,
+        ),
+      );
+    }
+
+    index++;
+  }
+
+  return packages;
+}
+
+List<SpecialRate>
+    _toSpecialRateList(
+  dynamic value,
+) {
+  if (value is! Iterable) {
+    return [];
+  }
+
+  final rates =
+      <SpecialRate>[];
+
+  var index = 0;
+
+  for (final item in value) {
+    if (item is Map) {
+      final map =
+          Map<String, dynamic>.from(
+        item,
+      );
+
+      final rateId =
+          map['id']
+                  ?.toString()
+                  .trim()
+                  .isNotEmpty ==
+              true
+              ? map['id']
+                  .toString()
+                  .trim()
+              : 'special_$index';
+
+      rates.add(
+        SpecialRate.fromMap(
+          rateId,
+          map,
+        ),
+      );
+    }
+
+    index++;
+  }
+
+  return rates;
 }

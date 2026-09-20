@@ -158,6 +158,8 @@ class BookingPricingSnapshot {
   // New rental/pricing metadata. These are snapshots and therefore remain
   // unchanged when the live pricing configuration changes.
   final String? rentalType;
+  /// Historical compatibility field. New simplified pricing does not
+  /// require a mutable pricing version.
   final int pricingVersion;
   final String? specialPricingRuleId;
   final String? currency;
@@ -278,7 +280,10 @@ class Booking {
   /// their enum implementation.
   final String rentalType;
 
-  /// Pricing profile version used to calculate this booking.
+  /// Pricing profile version retained only as a historical snapshot.
+  ///
+  /// The simplified pricing model does not require versioning, but this field
+  /// remains optional for backward compatibility with existing bookings.
   final int pricingVersion;
 
   /// Special-date pricing rule used, if any.
@@ -483,9 +488,6 @@ class Booking {
 
   bool get isRentalTypeDaily =>
       rentalType == 'daily';
-
-  bool get isRentalTypeWeekend =>
-      rentalType == 'weekend';
 
   bool get isUpcoming =>
       status == BookingStatus.pending ||
@@ -1272,7 +1274,10 @@ class Booking {
       case 'hourly':
         return 'hourly';
       case 'weekend':
-        return 'weekend';
+        // Legacy bookings may contain weekend. The new pricing model has only
+        // hourly and daily rental types, so legacy weekend records are treated
+        // as daily for display/calculation compatibility.
+        return 'daily';
       case 'daily':
         return 'daily';
       default:

@@ -14,7 +14,6 @@ import '../../../cars/models/car.dart';
 /// - Hourly rentals use the exact pickup/return timestamps.
 /// - Daily rentals reserve every selected calendar day and end at
 ///   23:59:59.999 on the selected return date.
-/// - Weekend rentals use the same whole-calendar-day availability rule.
 /// - Minimum billable hours/days belong to pricing, NOT availability.
 class AdminAvailabilityService {
   AdminAvailabilityService._();
@@ -23,6 +22,10 @@ class AdminAvailabilityService {
       AdminAvailabilityService._();
 
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+
+  // Availability is operational data. Calendar reads intentionally use
+  // Source.server so a previous cached snapshot cannot silently remain
+  // visible after a booking/block is created or changed.
 
   CollectionReference<Map<String, dynamic>> _cars(String tenantId) {
     return _firestore
@@ -63,15 +66,26 @@ class AdminAvailabilityService {
     return id;
   }
 
+
+  /// Availability data must be fresh because this service is used by the
+  /// booking/calendar UI. Do not silently read an older Firestore cache.
+  Future<QuerySnapshot<Map<String, dynamic>>> _serverGet(
+    Query<Map<String, dynamic>> query,
+  ) {
+    return query.get(
+      const GetOptions(source: Source.server),
+    );
+  }
+
   /// Loads all active vehicles for a tenant.
   Future<List<Car>> getCars({
     String? tenantId,
   }) async {
     final id = _tenantId(tenantId);
 
-    final snapshot = await _cars(id)
-        .where('isActive', isEqualTo: true)
-        .get();
+    final snapshot = await _serverGet(
+      _cars(id).where('isActive', isEqualTo: true),
+    );
 
     final cars = snapshot.docs
         .map((doc) => Car.fromMap(doc.id, doc.data()))
@@ -101,12 +115,12 @@ class AdminAvailabilityService {
 
     // pickupDateTime < rangeEnd ensures bookings that started before the
     // requested window can still be considered.
-    final snapshot = await _bookings(id)
-        .where(
-          'pickupDateTime',
-          isLessThan: Timestamp.fromDate(rangeEnd),
-        )
-        .get();
+    final snapshot = await _serverGet(
+      _bookings(id).where(
+        'pickupDateTime',
+        isLessThan: Timestamp.fromDate(rangeEnd),
+      ),
+    );
 
     final now = DateTime.now();
     final results = <AvailabilityBooking>[];
@@ -172,9 +186,9 @@ class AdminAvailabilityService {
 
     final id = _tenantId(tenantId);
 
-    final snapshot = await _blocks(id)
-        .where('status', isEqualTo: 'active')
-        .get();
+    final snapshot = await _serverGet(
+      _blocks(id).where('status', isEqualTo: 'active'),
+    );
 
     final results = <AvailabilityBlock>[];
 
@@ -234,7 +248,7 @@ class AdminAvailabilityService {
   /// Loads bookings, blocks and vehicles for the COMPLETE requested range.
   ///
   /// This method intentionally does not apply pricing minimums or convert
-  /// daily/weekend ranges. Pass the operational range you want to inspect.
+  /// rental ranges. Pass the operational range you want to inspect.
   Future<AdminAvailabilitySnapshot> getAvailabilityForRange({
     required DateTime rangeStart,
     required DateTime rangeEnd,
@@ -268,17 +282,47 @@ class AdminAvailabilityService {
     );
   }
 
+
+  /// Forces a completely fresh availability snapshot from Firestore.
+  ///
+  /// This is useful after creating/updating/cancelling a booking or vehicle
+  /// block. The underlying reads use Source.server, so an older local
+  /// Firestore cache is not accepted as the calendar's source of truth.
+  Future<AdminAvailabilitySnapshot> refreshAvailabilityForRange({
+    required DateTime rangeStart,
+    required DateTime rangeEnd,
+    String? tenantId,
+  }) async {
+    return getAvailabilityForRange(
+      rangeStart: rangeStart,
+      rangeEnd: rangeEnd,
+      tenantId: tenantId,
+    );
+  }
+
   /// Returns the operational range used for vehicle availability.
   ///
   /// Hourly:
   ///   pickup 10:00 -> return 15:00
   ///   remains exactly 10:00 -> 15:00.
   ///
-  /// Daily / weekend:
+  /// Daily:
   ///   pickup Sep 18 -> return Sep 20
   ///   becomes Sep 18 00:00:00 -> Sep 20 23:59:59.999.
   ///
-  /// `rentalType` accepts `hourly`, `daily`, or `weekend`.
+  /// `rentalType` accepts `hourly` or `daily`.
+  /// Valid rental types in the simplified pricing model.
+  static const Set<String> supportedRentalTypes = {
+    'hourly',
+    'daily',
+  };
+
+  bool isSupportedRentalType(String rentalType) {
+    return supportedRentalTypes.contains(
+      rentalType.trim().toLowerCase(),
+    );
+  }
+
   ({DateTime start, DateTime end}) normalizeRentalRange({
     required DateTime pickupDateTime,
     required DateTime returnDateTime,
@@ -290,6 +334,12 @@ class AdminAvailabilityService {
 
     final type = rentalType.trim().toLowerCase();
 
+    if (!supportedRentalTypes.contains(type)) {
+      throw Exception(
+        'Unsupported rental type "$rentalType". Expected hourly or daily.',
+      );
+    }
+
     switch (type) {
       case 'hourly':
         return (
@@ -298,7 +348,6 @@ class AdminAvailabilityService {
         );
 
       case 'daily':
-      case 'weekend':
         final start = DateTime(
           pickupDateTime.year,
           pickupDateTime.month,
@@ -323,7 +372,7 @@ class AdminAvailabilityService {
       default:
         throw Exception(
           'Unsupported rental type "$rentalType". '
-          'Expected hourly, daily, or weekend.',
+          'Expected hourly or daily.',
         );
     }
   }
@@ -521,6 +570,14 @@ class AdminAvailabilityService {
     return conflicts;
   }
 
+  /// Half-open interval overlap:
+  /// [existingStart, existingEnd) overlaps [requestedStart, requestedEnd)
+  /// only when the intervals actually share time.
+  ///
+  /// This intentionally allows:
+  ///   Booking A return == Booking B pickup
+  /// because the first vehicle interval has ended exactly when the next one
+  /// begins.
   bool _overlaps(
     DateTime existingStart,
     DateTime existingEnd,

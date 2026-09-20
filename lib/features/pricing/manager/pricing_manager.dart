@@ -1,30 +1,27 @@
 import '../models/pricing_config.dart';
 import '../models/pricing_profile.dart';
+import '../models/km_pricing_package.dart';
 import '../services/pricing_service.dart';
 
-/// Central pricing facade used by customer and admin booking flows.
+/// Central pricing configuration facade.
 ///
-/// Responsibilities:
-/// - Load tenant pricing.
-/// - Load a vehicle's PricingProfile.
-/// - Expose rental-type availability/rules.
-/// - Resolve special-date pricing.
-/// - Expose pricing version for booking snapshots.
-/// - Keep all Firebase access inside PricingService.
+/// PricingManager only loads/resolves pricing configuration.
+/// PricingEngine remains the only class responsible for calculating totals.
 ///
-/// Important:
-/// PricingManager does NOT calculate booking totals. PricingEngine remains the
-/// single calculation layer. PricingManager only loads/resolves configuration.
+/// Simplified business model:
+///   - Hourly
+///   - Daily
+///   - KM packages
+///   - Special date rates
+///   - Security deposits
 class PricingManager {
   PricingManager._();
 
-  static final PricingManager instance = PricingManager._();
+  static final PricingManager instance =
+      PricingManager._();
 
-  // ===========================================================================
-  // PRICING SERVICE
-  // ===========================================================================
-
-  final PricingService _service = PricingService.instance;
+  final PricingService _service =
+      PricingService.instance;
 
   // ===========================================================================
   // INITIALIZE
@@ -36,7 +33,9 @@ class PricingManager {
     final normalizedTenantId = tenantId.trim();
 
     if (normalizedTenantId.isEmpty) {
-      throw ArgumentError('tenantId cannot be empty.');
+      throw ArgumentError(
+        'tenantId cannot be empty.',
+      );
     }
 
     return _service.loadPricing(
@@ -48,28 +47,17 @@ class PricingManager {
   // CURRENT PRICING
   // ===========================================================================
 
-  PricingConfig? get pricing {
-    return _service.cachedPricing;
-  }
+  PricingConfig? get pricing =>
+      _service.cachedPricing;
+
+  bool get isLoaded =>
+      _service.isLoaded;
+
+  String? get cachedTenantId =>
+      _service.cachedTenantId;
 
   // ===========================================================================
-  // LOADED
-  // ===========================================================================
-
-  bool get isLoaded {
-    return _service.isLoaded;
-  }
-
-  // ===========================================================================
-  // CACHED TENANT
-  // ===========================================================================
-
-  String? get cachedTenantId {
-    return _service.cachedTenantId;
-  }
-
-  // ===========================================================================
-  // GET CAR PRICING FROM CACHE
+  // PROFILE LOOKUP
   // ===========================================================================
 
   PricingProfile? getPricingForCar(
@@ -82,28 +70,25 @@ class PricingManager {
     return _service.getPricingForCar(id);
   }
 
-  // ===========================================================================
-  // GET CAR PRICING FROM FIREBASE
-  // ===========================================================================
-
-  /// Loads:
-  ///
-  /// tenants/{tenantId}/pricingProfiles/{pricingProfileId}
-  ///
-  /// PricingService remains responsible for Firebase access and caching.
   Future<PricingProfile?> loadPricingForCar({
     required String tenantId,
     required String pricingProfileId,
   }) async {
-    final normalizedTenantId = tenantId.trim();
-    final normalizedProfileId = pricingProfileId.trim();
+    final normalizedTenantId =
+        tenantId.trim();
+    final normalizedProfileId =
+        pricingProfileId.trim();
 
     if (normalizedTenantId.isEmpty) {
-      throw ArgumentError('tenantId cannot be empty.');
+      throw ArgumentError(
+        'tenantId cannot be empty.',
+      );
     }
 
     if (normalizedProfileId.isEmpty) {
-      throw ArgumentError('pricingProfileId cannot be empty.');
+      throw ArgumentError(
+        'pricingProfileId cannot be empty.',
+      );
     }
 
     return _service.getPricingForCarFromFirebase(
@@ -113,10 +98,9 @@ class PricingManager {
   }
 
   // ===========================================================================
-  // RENTAL TYPE HELPERS
+  // RENTAL TYPES
   // ===========================================================================
 
-  /// Returns whether Hourly/Daily/Weekend is enabled for the profile.
   bool isRentalTypeEnabled(
     PricingProfile profile,
     RentalType type,
@@ -124,18 +108,6 @@ class PricingManager {
     return profile.isRentalTypeEnabled(type);
   }
 
-  /// Returns the configured rental-type pricing.
-  RentalTypePricing rentalPricingFor(
-    PricingProfile profile,
-    RentalType type,
-  ) {
-    return profile.rentalPricingFor(type);
-  }
-
-  /// Returns rental types available for a date range.
-  ///
-  /// Special date rules are evaluated by PricingProfile. The booking UI
-  /// should use this before displaying the Hourly/Daily/Weekend cards.
   List<RentalType> availableRentalTypesForRange(
     PricingProfile profile, {
     required DateTime start,
@@ -151,97 +123,152 @@ class PricingManager {
     );
   }
 
-  /// Returns the special pricing rule that applies to the selected range.
-  SpecialPricingRule? specialRuleForRange(
+  // ===========================================================================
+  // PACKAGE HELPERS
+  // ===========================================================================
+
+  List<KmPricingPackage> packagesFor(
+    PricingProfile profile,
+    RentalType type,
+  ) {
+    return List.unmodifiable(
+      profile.packagesFor(type),
+    );
+  }
+
+  KmPricingPackage? getPackage(
+    PricingProfile profile, {
+    required RentalType type,
+    String? packageId,
+  }) {
+    if (packageId == null ||
+        packageId.trim().isEmpty) {
+      return null;
+    }
+
+    return profile.getPackage(
+      packageId.trim(),
+      rentalType: type,
+    );
+  }
+
+  KmPricingPackage? getPackageByKm(
+    PricingProfile profile, {
+    required RentalType type,
+    required int includedKm,
+  }) {
+    if (includedKm <= 0) return null;
+
+    return profile.getPackageByKm(
+      includedKm,
+      rentalType: type,
+    );
+  }
+
+  KmPricingPackage? getUnlimitedPackage(
+    PricingProfile profile, {
+    required RentalType type,
+  }) {
+    return profile.getUnlimitedPackage(
+      rentalType: type,
+    );
+  }
+
+  // ===========================================================================
+  // SPECIAL RATES
+  // ===========================================================================
+
+  SpecialRate? specialRateForDate(
+    PricingProfile profile,
+    DateTime date,
+  ) {
+    return profile.specialRateForDate(date);
+  }
+
+  SpecialRate? specialRateForRange(
     PricingProfile profile, {
     required DateTime start,
     required DateTime end,
   }) {
     if (end.isBefore(start)) return null;
 
-    return profile.specialRuleForRange(
+    return profile.specialRateForRange(
       start,
       end,
     );
   }
 
-  /// Gets the applicable profile-level rate.
-  ///
-  /// KM-package-specific rates must still be resolved by PricingEngine.
-  double baseRateFor(
+  double packagePriceForDate(
     PricingProfile profile, {
     required RentalType type,
-    DateTime? start,
-    DateTime? end,
+    required KmPricingPackage package,
+    required DateTime date,
   }) {
-    return profile.baseRateFor(
-      type,
-      start: start,
-      end: end,
+    return profile.priceFor(
+      rentalType: type,
+      package: package,
+      date: date,
     );
   }
 
-  /// Gets the applicable extra-KM rate, including special-date overrides.
-  double extraKmRateFor(
+  double extraKmRateForDate(
     PricingProfile profile, {
-    DateTime? start,
-    DateTime? end,
+    required KmPricingPackage package,
+    required DateTime date,
   }) {
     return profile.extraKmRateFor(
-      start: start,
-      end: end,
+      package: package,
+      date: date,
     );
   }
 
   // ===========================================================================
-  // HOURLY HELPERS
+  // HOURLY
   // ===========================================================================
 
-  int minimumHourlyBillingHours(
-    PricingProfile profile,
+  /// Hourly billing rounds any partial hour up to the next whole hour.
+  int billableHourlyHours(
+    DateTime start,
+    DateTime end,
   ) {
-    final configured = profile.hourlyPricing.minimumBillingHours;
+    if (!end.isAfter(start)) return 0;
 
-    return configured > 0 ? configured : 1;
+    final minutes = end.difference(start).inMinutes;
+
+    return (minutes / 60)
+        .ceil()
+        .clamp(1, 100000);
   }
 
-  /// Returns the billable hourly duration.
+  // ===========================================================================
+  // DAILY
+  // ===========================================================================
+
+  /// Daily pricing uses 24-hour billing units.
   ///
   /// Example:
-  /// actual = 3 hours
-  /// minimum = 5 hours
-  /// result = 5
-  int billableHourlyHours(
-    PricingProfile profile,
-    int actualHours,
+  /// 20 Sep 10:00 -> 25 Sep 10:00 = 5 days.
+  ///
+  /// Any partial 24-hour period counts as one additional day.
+  int billableDailyDays(
+    DateTime start,
+    DateTime end,
   ) {
-    final safeActual = actualHours < 0 ? 0 : actualHours;
-    final minimum = minimumHourlyBillingHours(profile);
+    if (!end.isAfter(start)) return 0;
 
-    return safeActual < minimum ? minimum : safeActual;
+    final minutes =
+        end.difference(start).inMinutes;
+
+    return (minutes / (24 * 60))
+        .ceil()
+        .clamp(1, 100000);
   }
 
-  // ===========================================================================
-  // DAILY HELPERS
-  // ===========================================================================
-
-  int minimumDailyBillingDays(
-    PricingProfile profile,
+  /// Operational availability for daily rentals is date-based and intentionally
+  /// separate from pricing calculation.
+  DateTime dailyAvailabilityStart(
+    DateTime pickupDate,
   ) {
-    final configured = profile.dailyPricing.minimumBillingDays;
-
-    return configured > 0 ? configured : 1;
-  }
-
-  /// Daily availability is date-based.
-  ///
-  /// For a selected pickup/return date, the booking availability range should
-  /// be normalized by the availability layer to:
-  ///
-  /// pickupDate 00:00:00
-  /// through
-  /// returnDate 23:59:59.999
-  DateTime dailyAvailabilityStart(DateTime pickupDate) {
     return DateTime(
       pickupDate.year,
       pickupDate.month,
@@ -249,7 +276,9 @@ class PricingManager {
     );
   }
 
-  DateTime dailyAvailabilityEnd(DateTime returnDate) {
+  DateTime dailyAvailabilityEnd(
+    DateTime returnDate,
+  ) {
     return DateTime(
       returnDate.year,
       returnDate.month,
@@ -262,108 +291,9 @@ class PricingManager {
   }
 
   // ===========================================================================
-  // WEEKEND HELPERS
+  // AVAILABILITY RANGE
   // ===========================================================================
 
-  List<int> weekendAllowedWeekdays(
-    PricingProfile profile,
-  ) {
-    final configured = profile.weekendPricing.allowedWeekdays;
-
-    if (configured.isEmpty) {
-      return const [DateTime.saturday, DateTime.sunday];
-    }
-
-    return List<int>.unmodifiable(configured);
-  }
-
-  bool isWeekendEligibleDate(
-    PricingProfile profile,
-    DateTime date,
-  ) {
-    return weekendAllowedWeekdays(profile).contains(date.weekday);
-  }
-
-  /// Verifies that every selected calendar date is allowed by the weekend
-  /// pricing configuration.
-  bool isWeekendRangeEligible(
-    PricingProfile profile, {
-    required DateTime start,
-    required DateTime end,
-  }) {
-    if (end.isBefore(start)) return false;
-
-    var cursor = DateTime(
-      start.year,
-      start.month,
-      start.day,
-    );
-
-    final last = DateTime(
-      end.year,
-      end.month,
-      end.day,
-    );
-
-    while (!cursor.isAfter(last)) {
-      if (!isWeekendEligibleDate(profile, cursor)) {
-        return false;
-      }
-
-      cursor = cursor.add(
-        const Duration(days: 1),
-      );
-    }
-
-    final totalDays = last.difference(
-          DateTime(
-            start.year,
-            start.month,
-            start.day,
-          ),
-        ).inDays +
-        1;
-
-    final config = profile.weekendPricing;
-
-    if (totalDays < config.minimumWeekendDays) {
-      return false;
-    }
-
-    if (config.maximumWeekendDays > 0 &&
-        totalDays > config.maximumWeekendDays) {
-      return false;
-    }
-
-    return true;
-  }
-
-  DateTime weekendAvailabilityStart(DateTime pickupDate) {
-    return dailyAvailabilityStart(pickupDate);
-  }
-
-  DateTime weekendAvailabilityEnd(DateTime returnDate) {
-    return dailyAvailabilityEnd(returnDate);
-  }
-
-  // ===========================================================================
-  // AVAILABILITY RANGE NORMALIZATION
-  // ===========================================================================
-
-  /// Converts a selected rental into the availability interval that should be
-  /// sent to AdminAvailabilityService.
-  ///
-  /// Hourly:
-  ///   exact pickup/return timestamps.
-  ///
-  /// Daily:
-  ///   pickup date 00:00 -> return date 23:59:59.999.
-  ///
-  /// Weekend:
-  ///   pickup date 00:00 -> return date 23:59:59.999.
-  ///
-  /// This method intentionally does not perform the Firestore availability
-  /// query. AdminAvailabilityService remains the authority for conflicts.
   DateTimeRangeValue normalizeAvailabilityRange({
     required RentalType type,
     required DateTime pickup,
@@ -383,29 +313,23 @@ class PricingManager {
         );
 
       case RentalType.daily:
-      case RentalType.weekend:
         return DateTimeRangeValue(
           start: dailyAvailabilityStart(pickup),
-          end: dailyAvailabilityEnd(returnDateTime),
+          end: dailyAvailabilityEnd(
+            returnDateTime,
+          ),
         );
     }
   }
 
   // ===========================================================================
-  // PRICING VERSION / SNAPSHOT
+  // PRICING SNAPSHOT
   // ===========================================================================
 
-  /// Current pricing version saved with a booking.
-  int pricingVersion(
-    PricingProfile profile,
-  ) {
-    return profile.pricingVersion;
-  }
-
-  /// Builds a serializable configuration snapshot.
+  /// Creates a simple immutable pricing snapshot for a booking.
   ///
-  /// The booking service should save this object into the booking at creation
-  /// time. Future pricing edits must never recalculate the old booking.
+  /// A booking should save the values calculated at booking time so later
+  /// pricing edits do not change an existing booking.
   Map<String, dynamic> buildPricingSnapshot({
     required PricingProfile profile,
     required RentalType rentalType,
@@ -423,14 +347,17 @@ class PricingManager {
     double securityDepositAmount = 0,
     double totalAmount = 0,
   }) {
-    final package = selectedKmPackageId == null
-        ? null
-        : profile.getPackage(selectedKmPackageId);
+    final package =
+        selectedKmPackageId == null
+            ? null
+            : profile.getPackage(
+                selectedKmPackageId,
+                rentalType: rentalType,
+              );
 
     return {
       'pricingProfileId': profile.id,
       'pricingProfileName': profile.name,
-      'pricingVersion': profile.pricingVersion,
       'currency': profile.currency,
 
       'rentalType': rentalType.value,
@@ -441,40 +368,34 @@ class PricingManager {
       'actualKm': actualKm,
       'plannedKm': plannedKm,
 
-      'hourlyRate': profile.hourlyRate,
-      'dailyRate': profile.dailyRate,
-      'weekendRate': profile.weekendRate,
+      'selectedKmPackage':
+          package?.toMap(),
 
-      'minimumBillingHours':
-          profile.hourlyPricing.minimumBillingHours,
-
-      'minimumBillingDays':
-          profile.dailyPricing.minimumBillingDays,
-
-      'weekendAllowedWeekdays':
-          profile.weekendPricing.allowedWeekdays,
-
-      'selectedKmPackage': package?.toMap(),
-
-      'extraKmRate': profile.extraKmRateFor(
-        start: pickup,
-        end: returnDateTime,
-      ),
+      'specialRate': profile
+          .specialRateForRange(
+            pickup,
+            returnDateTime,
+          )
+          ?.toMap(),
 
       'baseAmount': baseAmount,
       'extraKmAmount': extraKmAmount,
       'addOnAmount': addOnAmount,
-      'protectionAmount': protectionAmount,
-      'discountAmount': discountAmount,
+      'protectionAmount':
+          protectionAmount,
+      'discountAmount':
+          discountAmount,
       'taxAmount': taxAmount,
-      'securityDepositAmount': securityDepositAmount,
+      'securityDepositAmount':
+          securityDepositAmount,
       'totalAmount': totalAmount,
     };
   }
 
-  /// Builds a separate deposit snapshot.
-  ///
-  /// Physical/asset security is deliberately stored as an asset, not as money.
+  // ===========================================================================
+  // DEPOSIT SNAPSHOT
+  // ===========================================================================
+
   Map<String, dynamic> buildDepositSnapshot({
     required PricingProfile profile,
     required DepositType type,
@@ -485,30 +406,33 @@ class PricingManager {
     Map<String, dynamic>? securityAsset,
     String notes = '',
   }) {
+    // Asset deposits are security only; they do not become monetary payable
+    // amounts.
+    final monetaryAmount =
+        type.isMonetary
+            ? (amount < 0 ? 0 : amount)
+            : 0.0;
+
     return {
-      'required': profile.depositConfig.required,
+      'required': profile.securityDeposit.required,
       'type': type.value,
-      'amount': amount,
+      'amount': monetaryAmount,
       'status': status,
       'paymentMethod': paymentMethod,
       'transactionId': transactionId,
       'securityAsset': securityAsset,
       'notes': notes,
       'configuredDefaultAmount':
-          profile.depositConfig.defaultAmount,
+          profile.securityDepositAmount,
       'minimumAssetValue':
-          profile.depositConfig.minimumAssetValue,
+          profile.securityDeposit.minimumAssetValue,
     };
   }
 
   // ===========================================================================
-  // SET PRICING
+  // CACHE
   // ===========================================================================
 
-  /// Compatibility method.
-  ///
-  /// Accepts pricing already loaded from Firebase.
-  /// Does not create or modify dummy pricing.
   void setPricing(
     PricingConfig pricing, {
     String? tenantId,
@@ -519,19 +443,18 @@ class PricingManager {
     );
   }
 
-  // ===========================================================================
-  // CLEAR
-  // ===========================================================================
-
   void clear() {
     _service.clearCache();
   }
 }
 
-/// Normalized availability interval returned by PricingManager.
+/// Normalized availability interval.
 ///
-/// Kept as a tiny value object so screens do not have to duplicate the
-/// Hourly/Daily/Weekend date normalization logic.
+/// Hourly:
+///   exact pickup/return timestamps.
+///
+/// Daily:
+///   pickup date 00:00 -> return date 23:59:59.999.
 class DateTimeRangeValue {
   final DateTime start;
   final DateTime end;
@@ -541,5 +464,6 @@ class DateTimeRangeValue {
     required this.end,
   });
 
-  Duration get duration => end.difference(start);
+  Duration get duration =>
+      end.difference(start);
 }

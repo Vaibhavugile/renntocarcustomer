@@ -1,12 +1,24 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/config/app_config.dart';
+import '../../booking/screens/date_time_screen.dart';
 import '../../pricing/manager/pricing_manager.dart';
 import '../../pricing/models/km_pricing_package.dart';
 import '../../pricing/models/pricing_profile.dart';
 import '../models/car.dart';
-import '../../booking/screens/date_time_screen.dart';
 
+/// Customer-facing vehicle details screen.
+///
+/// Pricing is intentionally aligned with the simplified rental model:
+/// - Rental types: hourly + daily only
+/// - Each rental type uses KM packages
+/// - Daily packages define included KM per day
+/// - Extra KM is charged from the selected package
+/// - Date-range special rates can override normal prices
+/// - Security deposit is displayed separately from the trip total
+///
+/// This screen is presentation-only. The final amount is recalculated by the
+/// booking/pricing flow after the customer selects dates, package and options.
 class CarDetailsScreen extends StatefulWidget {
   final Car car;
 
@@ -16,54 +28,27 @@ class CarDetailsScreen extends StatefulWidget {
   });
 
   @override
-  State<CarDetailsScreen> createState() =>
-      _CarDetailsScreenState();
+  State<CarDetailsScreen> createState() => _CarDetailsScreenState();
 }
 
-class _CarDetailsScreenState
-    extends State<CarDetailsScreen> {
-  static const Color primary =
-      Color(0xFF0F766E);
-
-  static const Color accent =
-      Color(0xFF14B8A6);
-
-  static const Color background =
-      Color(0xFFF8FAF9);
-
-  static const Color card =
-      Color(0xFFFFFFFF);
-
-  static const Color softAccent =
-      Color(0xFFE6FFFB);
-
-  static const Color heading =
-      Color(0xFF17201F);
-
-  static const Color body =
-      Color(0xFF66706E);
-
-  static const Color muted =
-      Color(0xFF94A09D);
-
-  static const Color border =
-      Color(0xFFE5EBE9);
+class _CarDetailsScreenState extends State<CarDetailsScreen> {
+  static const Color primary = Color(0xFF0F766E);
+  static const Color accent = Color(0xFF14B8A6);
+  static const Color background = Color(0xFFF8FAF9);
+  static const Color card = Color(0xFFFFFFFF);
+  static const Color softAccent = Color(0xFFE6FFFB);
+  static const Color heading = Color(0xFF17201F);
+  static const Color body = Color(0xFF66706E);
+  static const Color muted = Color(0xFF94A09D);
+  static const Color border = Color(0xFFE5EBE9);
 
   PricingProfile? _pricingProfile;
+  KmPricingPackage? _selectedPackage;
 
   bool _isFavorite = false;
-
-  bool _showAllRates = false;
-  bool _showAllKmPackages = false;
-
+  bool _showAllPackages = false;
   bool _isPricingLoading = true;
-
   String? _pricingError;
-
-  // Customer's selected KM pricing package.
-  KmPricingPackage? _selectedKmPackage;
-
-  bool _unlimitedKmSelected = false;
 
   String get _tenantId => AppConfig.tenant.tenantId;
 
@@ -83,24 +68,18 @@ class _CarDetailsScreenState
 
     try {
       final tenantId = _tenantId.trim();
-
       if (tenantId.isEmpty) {
-        throw Exception(
-          'Tenant configuration is missing.',
-        );
+        throw Exception('Tenant configuration is missing.');
       }
 
-      final pricingProfileId =
-          widget.car.pricingProfileId.trim();
-
+      final pricingProfileId = widget.car.pricingProfileId.trim();
       if (pricingProfileId.isEmpty) {
         throw Exception(
           'Pricing profile is not configured for this vehicle.',
         );
       }
 
-      final pricing =
-          await PricingManager.instance.loadPricingForCar(
+      final pricing = await PricingManager.instance.loadPricingForCar(
         tenantId: tenantId,
         pricingProfileId: pricingProfileId,
       );
@@ -110,6 +89,7 @@ class _CarDetailsScreenState
       if (pricing == null) {
         setState(() {
           _pricingProfile = null;
+          _selectedPackage = null;
           _isPricingLoading = false;
           _pricingError =
               'Pricing details are unavailable for this vehicle.';
@@ -117,24 +97,23 @@ class _CarDetailsScreenState
         return;
       }
 
-      KmPricingPackage? selectedPackage;
+      // Prefer a daily package for the customer-facing vehicle summary,
+      // because daily rental is the most common display price.
+      final packages = <KmPricingPackage>[
+        ...pricing.dailyPackages,
+      ];
 
-      if (pricing.kmPricingMode == KmPricingMode.package &&
-          pricing.kmPackages.isNotEmpty) {
-        try {
-          selectedPackage = pricing.kmPackages.firstWhere(
-            (package) => !package.unlimitedKm,
-          );
-        } catch (_) {
-          selectedPackage = pricing.kmPackages.first;
-        }
+      KmPricingPackage? selected;
+      if (packages.isNotEmpty) {
+        selected = packages.firstWhere(
+          (p) => p.isActive,
+          orElse: () => packages.first,
+        );
       }
 
       setState(() {
         _pricingProfile = pricing;
-        _selectedKmPackage = selectedPackage;
-        _unlimitedKmSelected =
-            selectedPackage?.unlimitedKm ?? false;
+        _selectedPackage = selected;
         _isPricingLoading = false;
         _pricingError = null;
       });
@@ -143,12 +122,19 @@ class _CarDetailsScreenState
 
       setState(() {
         _pricingProfile = null;
-        _selectedKmPackage = null;
-        _unlimitedKmSelected = false;
+        _selectedPackage = null;
         _isPricingLoading = false;
-        _pricingError = e.toString();
+        _pricingError = _cleanError(e);
       });
     }
+  }
+
+  String _cleanError(Object error) {
+    final text = error.toString();
+    if (text.startsWith('Exception: ')) {
+      return text.substring(11);
+    }
+    return text;
   }
 
   @override
@@ -158,26 +144,21 @@ class _CarDetailsScreenState
     return Scaffold(
       backgroundColor: background,
       body: CustomScrollView(
-        physics:
-            const BouncingScrollPhysics(),
+        physics: const BouncingScrollPhysics(),
         slivers: [
           _buildAppBar(),
           SliverToBoxAdapter(
-            child: _buildContent(
-              car,
-              _pricingProfile,
-            ),
+            child: _buildContent(car, _pricingProfile),
           ),
         ],
       ),
-      bottomNavigationBar:
-          _buildBottomBar(car),
+      bottomNavigationBar: _buildBottomBar(car),
     );
   }
 
-  // ------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // APP BAR
-  // ------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   Widget _buildAppBar() {
     return SliverAppBar(
@@ -191,9 +172,7 @@ class _CarDetailsScreenState
         padding: const EdgeInsets.all(8),
         child: _circleButton(
           icon: Icons.arrow_back_rounded,
-          onTap: () {
-            Navigator.pop(context);
-          },
+          onTap: () => Navigator.pop(context),
         ),
       ),
       actions: [
@@ -203,13 +182,9 @@ class _CarDetailsScreenState
             icon: _isFavorite
                 ? Icons.favorite_rounded
                 : Icons.favorite_border_rounded,
-            iconColor: _isFavorite
-                ? Colors.redAccent
-                : heading,
+            iconColor: _isFavorite ? Colors.redAccent : heading,
             onTap: () {
-              setState(() {
-                _isFavorite = !_isFavorite;
-              });
+              setState(() => _isFavorite = !_isFavorite);
             },
           ),
         ),
@@ -226,13 +201,10 @@ class _CarDetailsScreenState
     Color? iconColor,
   }) {
     return Material(
-      color: Colors.white.withValues(
-        alpha: 0.94,
-      ),
+      color: Colors.white.withValues(alpha: 0.94),
       shape: const CircleBorder(),
       child: InkWell(
-        customBorder:
-            const CircleBorder(),
+        customBorder: const CircleBorder(),
         onTap: onTap,
         child: SizedBox(
           width: 42,
@@ -247,10 +219,6 @@ class _CarDetailsScreenState
     );
   }
 
-  // ------------------------------------------------------------
-  // HERO IMAGE
-  // ------------------------------------------------------------
-
   Widget _buildHeroImage() {
     final car = widget.car;
 
@@ -260,31 +228,18 @@ class _CarDetailsScreenState
         Image.network(
           car.image,
           fit: BoxFit.cover,
-          errorBuilder: (
-            context,
-            error,
-            stackTrace,
-          ) {
-            return Container(
-              color: const Color(0xFFEFF4F3),
-              child: const Center(
-                child: Icon(
-                  Icons
-                      .directions_car_outlined,
-                  size: 72,
-                  color: muted,
-                ),
+          errorBuilder: (_, __, ___) => Container(
+            color: const Color(0xFFEFF4F3),
+            child: const Center(
+              child: Icon(
+                Icons.directions_car_outlined,
+                size: 72,
+                color: muted,
               ),
-            );
-          },
-          loadingBuilder: (
-            context,
-            child,
-            loadingProgress,
-          ) {
-            if (loadingProgress == null) {
-              return child;
-            }
+            ),
+          ),
+          loadingBuilder: (_, child, progress) {
+            if (progress == null) return child;
 
             return Container(
               color: const Color(0xFFEFF4F3),
@@ -297,52 +252,40 @@ class _CarDetailsScreenState
             );
           },
         ),
-
-        // Image overlay
         DecoratedBox(
           decoration: BoxDecoration(
             gradient: LinearGradient(
-              begin:
-                  Alignment.topCenter,
-              end:
-                  Alignment.bottomCenter,
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
               colors: [
                 Colors.transparent,
-                Colors.black.withValues(
-                  alpha: 0.58,
-                ),
+                Colors.black.withValues(alpha: 0.58),
               ],
             ),
           ),
         ),
-
         Positioned(
           left: 20,
           right: 20,
           bottom: 22,
           child: Row(
-            crossAxisAlignment:
-                CrossAxisAlignment.end,
+            crossAxisAlignment: CrossAxisAlignment.end,
             children: [
               Expanded(
                 child: Text(
                   car.name,
                   maxLines: 2,
-                  overflow:
-                      TextOverflow.ellipsis,
+                  overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     color: Colors.white,
                     fontSize: 28,
                     height: 1.05,
-                    fontWeight:
-                        FontWeight.w900,
+                    fontWeight: FontWeight.w900,
                   ),
                 ),
               ),
               const SizedBox(width: 12),
-              _availabilityBadge(
-                car.isAvailable,
-              ),
+              _availabilityBadge(car.isAvailable),
             ],
           ),
         ),
@@ -350,111 +293,65 @@ class _CarDetailsScreenState
     );
   }
 
-  Widget _availabilityBadge(
-    bool isAvailable,
-  ) {
+  Widget _availabilityBadge(bool isAvailable) {
     return Container(
-      padding:
-          const EdgeInsets.symmetric(
+      padding: const EdgeInsets.symmetric(
         horizontal: 11,
         vertical: 7,
       ),
       decoration: BoxDecoration(
-        color: Colors.white
-            .withValues(alpha: 0.94),
-        borderRadius:
-            BorderRadius.circular(12),
+        color: Colors.white.withValues(alpha: 0.94),
+        borderRadius: BorderRadius.circular(12),
       ),
       child: Text(
-        isAvailable
-            ? 'AVAILABLE'
-            : 'UNAVAILABLE',
+        isAvailable ? 'AVAILABLE' : 'UNAVAILABLE',
         style: TextStyle(
-          color: isAvailable
-              ? primary
-              : Colors.redAccent,
+          color: isAvailable ? primary : Colors.redAccent,
           fontSize: 9,
-          fontWeight:
-              FontWeight.w900,
+          fontWeight: FontWeight.w900,
           letterSpacing: 0.5,
         ),
       ),
     );
   }
 
-  // ------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // CONTENT
-  // ------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
-  Widget _buildContent(
-    Car car,
-    PricingProfile? pricing,
-  ) {
+  Widget _buildContent(Car car, PricingProfile? pricing) {
     return Padding(
-      padding:
-          const EdgeInsets.fromLTRB(
-        20,
-        22,
-        20,
-        36,
-      ),
+      padding: const EdgeInsets.fromLTRB(20, 22, 20, 36),
       child: Column(
-        crossAxisAlignment:
-            CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _buildTitleSection(
-            car,
-            pricing,
-          ),
-
+          _buildTitleSection(car, pricing),
           const SizedBox(height: 22),
-
           _buildSpecs(car),
-
           const SizedBox(height: 24),
-
-          _buildPricingSection(
-            pricing,
-          ),
-
+          _buildRentalTypesSection(pricing),
           const SizedBox(height: 24),
-
-          _buildKmSection(
-            pricing,
-          ),
-
+          _buildPackagesSection(pricing),
           const SizedBox(height: 24),
-
-          _buildDepositSection(
-            pricing,
-          ),
-
+          _buildSpecialRatesSection(pricing),
           const SizedBox(height: 24),
-
-          _buildRentalInformation(
-            pricing,
-          ),
-
+          _buildDepositSection(pricing),
           const SizedBox(height: 24),
-
+          _buildRentalInformation(),
+          const SizedBox(height: 24),
           _buildPricingNote(),
         ],
       ),
     );
   }
 
-  // ------------------------------------------------------------
-  // TITLE
-  // ------------------------------------------------------------
-
   Widget _buildTitleSection(
     Car car,
     PricingProfile? pricing,
   ) {
-    final package = _selectedKmPackage;
-
-    final dailyRate = package?.dailyRate ??
-        pricing?.dailyRate ??
+    final package = _selectedPackage;
+    final dailyRate = package?.safeDailyRate ??
+        _firstPositiveDailyRate(pricing) ??
         car.pricePerDay.toDouble();
 
     return Row(
@@ -485,51 +382,57 @@ class _CarDetailsScreenState
             ],
           ),
         ),
-        const SizedBox(width: 12),
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.end,
-          children: [
-            Text(
-              '₹${_formatAmount(dailyRate)}',
-              style: const TextStyle(
-                color: primary,
-                fontSize: 20,
-                fontWeight: FontWeight.w900,
+        if (dailyRate > 0) ...[
+          const SizedBox(width: 12),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Text(
+                '₹${_formatAmount(dailyRate)}',
+                style: const TextStyle(
+                  color: primary,
+                  fontSize: 20,
+                  fontWeight: FontWeight.w900,
+                ),
               ),
-            ),
-            const SizedBox(height: 2),
-            Text(
-              package != null
-                  ? 'per day • ${package.name}'
-                  : 'starting / day',
-              textAlign: TextAlign.right,
-              style: const TextStyle(
-                color: body,
-                fontSize: 9,
-                fontWeight: FontWeight.w600,
+              const SizedBox(height: 2),
+              Text(
+                package != null ? 'per day • ${package.name}' : 'per day',
+                textAlign: TextAlign.right,
+                style: const TextStyle(
+                  color: body,
+                  fontSize: 9,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
-            ),
-          ],
-        ),
+            ],
+          ),
+        ],
       ],
     );
   }
 
-  // ------------------------------------------------------------
+  double? _firstPositiveDailyRate(PricingProfile? pricing) {
+    if (pricing == null) return null;
+
+    for (final package in pricing.dailyPackages) {
+      if (package.safeDailyRate > 0) return package.safeDailyRate;
+    }
+
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
   // CAR SPECS
-  // ------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   Widget _buildSpecs(Car car) {
     return Container(
-      padding:
-          const EdgeInsets.all(18),
+      padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
         color: card,
-        borderRadius:
-            BorderRadius.circular(22),
-        border: Border.all(
-          color: border,
-        ),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: border),
         boxShadow: const [
           BoxShadow(
             color: Color(0x0717201F),
@@ -580,8 +483,7 @@ class _CarDetailsScreenState
           height: 40,
           decoration: BoxDecoration(
             color: softAccent,
-            borderRadius:
-                BorderRadius.circular(13),
+            borderRadius: BorderRadius.circular(13),
           ),
           child: Icon(
             icon,
@@ -594,13 +496,11 @@ class _CarDetailsScreenState
           label,
           textAlign: TextAlign.center,
           maxLines: 1,
-          overflow:
-              TextOverflow.ellipsis,
+          overflow: TextOverflow.ellipsis,
           style: const TextStyle(
             color: muted,
             fontSize: 9,
-            fontWeight:
-                FontWeight.w600,
+            fontWeight: FontWeight.w600,
           ),
         ),
         const SizedBox(height: 3),
@@ -608,13 +508,11 @@ class _CarDetailsScreenState
           value,
           textAlign: TextAlign.center,
           maxLines: 1,
-          overflow:
-              TextOverflow.ellipsis,
+          overflow: TextOverflow.ellipsis,
           style: const TextStyle(
             color: heading,
             fontSize: 11,
-            fontWeight:
-                FontWeight.w800,
+            fontWeight: FontWeight.w800,
           ),
         ),
       ],
@@ -629,28 +527,439 @@ class _CarDetailsScreenState
     );
   }
 
-  // ------------------------------------------------------------
-  // PRICING
-  // ------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // RENTAL TYPES
+  // ---------------------------------------------------------------------------
 
-  Widget _buildPricingSection(PricingProfile? pricing) {
+  Widget _buildRentalTypesSection(PricingProfile? pricing) {
     if (pricing == null) return _buildPricingUnavailable();
 
-    final package = _selectedKmPackage;
-    final hourly = package?.hourlyRate ?? pricing.hourlyRate;
-    final daily = package?.dailyRate ?? pricing.dailyRate;
-    final weekend = package?.weekendRate ?? pricing.weekendRate;
-    final weekly = package?.weeklyRate ?? pricing.weeklyRate;
-    final monthly = package?.monthlyRate ?? pricing.monthlyRate;
+    final hourly = pricing.hourlyPackages.any((p) => p.isActive && p.safeHourlyRate > 0);
+    final daily = pricing.dailyPackages.any((p) => p.isActive && p.safeDailyRate > 0);
+
+    if (!hourly && !daily) {
+      return _buildPricingUnavailable(
+        message: 'No active hourly or daily rental pricing is configured.',
+      );
+    }
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _sectionTitle(
-          'Rental pricing',
-          package == null
-              ? 'Current rates for this vehicle'
-              : '${package.name} package selected',
+          'Rental options',
+          'Choose hourly or daily rental during booking',
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            if (hourly)
+              Expanded(
+                child: _rentalTypeCard(
+                  Icons.schedule_outlined,
+                  'Hourly',
+                  'Flexible short trips',
+                ),
+              ),
+            if (hourly && daily) const SizedBox(width: 10),
+            if (daily)
+              Expanded(
+                child: _rentalTypeCard(
+                  Icons.today_outlined,
+                  'Daily',
+                  'KM included per day',
+                  highlighted: true,
+                ),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _rentalTypeCard(
+    IconData icon,
+    String title,
+    String subtitle, {
+    bool highlighted = false,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: highlighted ? softAccent : card,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color: highlighted ? primary : border,
+          width: highlighted ? 1.2 : 1,
+        ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 38,
+            height: 38,
+            decoration: BoxDecoration(
+              color: highlighted ? Colors.white : background,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(
+              icon,
+              color: primary,
+              size: 18,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: heading,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  subtitle,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: body,
+                    fontSize: 9,
+                    height: 1.25,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // PACKAGES
+  // ---------------------------------------------------------------------------
+
+  Widget _buildPackagesSection(PricingProfile? pricing) {
+    if (pricing == null) return const SizedBox.shrink();
+
+    final packages = pricing.dailyPackages
+        .where((p) => p.isActive)
+        .toList();
+
+    final hourlyPackages = pricing.hourlyPackages
+        .where((p) => p.isActive)
+        .toList();
+
+    if (packages.isEmpty && hourlyPackages.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    final visibleDaily = _showAllPackages
+        ? packages
+        : packages.take(3).toList();
+
+    final remaining = packages.length - visibleDaily.length;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _sectionTitle(
+          'KM packages',
+          'Select the package that fits your rental',
+        ),
+        const SizedBox(height: 12),
+        if (packages.isNotEmpty)
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: card,
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(color: border),
+              boxShadow: const [
+                BoxShadow(
+                  color: Color(0x0717201F),
+                  blurRadius: 18,
+                  offset: Offset(0, 7),
+                ),
+              ],
+            ),
+            child: Column(
+              children: [
+                for (var i = 0; i < visibleDaily.length; i++) ...[
+                  if (i > 0) const SizedBox(height: 8),
+                  _packageCard(
+                    visibleDaily[i],
+                    rentalType: 'daily',
+                  ),
+                ],
+                if (remaining > 0) ...[
+                  const SizedBox(height: 10),
+                  _smallExpandButton(
+                    expanded: _showAllPackages,
+                    label: _showAllPackages
+                        ? 'Show fewer packages'
+                        : 'View all ${packages.length} daily packages',
+                    onTap: () {
+                      setState(() {
+                        _showAllPackages = !_showAllPackages;
+                      });
+                    },
+                  ),
+                ],
+                if (hourlyPackages.isNotEmpty) ...[
+                  const SizedBox(height: 16),
+                  _packageSubheading(
+                    'Hourly packages',
+                    '${hourlyPackages.length} active package${hourlyPackages.length == 1 ? '' : 's'}',
+                  ),
+                  const SizedBox(height: 8),
+                  for (var i = 0; i < hourlyPackages.length; i++) ...[
+                    if (i > 0) const SizedBox(height: 8),
+                    _hourlyPackageCard(hourlyPackages[i]),
+                  ],
+                ],
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _packageCard(
+    KmPricingPackage package, {
+    required String rentalType,
+  }) {
+    final selected = _selectedPackage?.id == package.id;
+    final kmText = package.unlimitedKm
+        ? 'Unlimited KM'
+        : '${_formatKm(package.safeIncludedKm)} KM included per day';
+
+    final rate = package.safeDailyRate;
+    final extra = package.unlimitedKm
+        ? 'No extra KM charge'
+        : '₹${_formatAmount(package.safeExtraKmRate)} / KM extra';
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: () {
+          setState(() {
+            _selectedPackage = package;
+          });
+        },
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOut,
+          width: double.infinity,
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: selected ? softAccent : const Color(0xFFF3F6F5),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: selected ? primary : border,
+              width: selected ? 1.4 : 1,
+            ),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(
+                  package.unlimitedKm
+                      ? Icons.all_inclusive_rounded
+                      : Icons.speed_rounded,
+                  size: 18,
+                  color: primary,
+                ),
+              ),
+              const SizedBox(width: 11),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      package.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: heading,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      kmText,
+                      style: const TextStyle(
+                        color: body,
+                        fontSize: 9,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '₹${_formatAmount(rate)} / day',
+                      style: const TextStyle(
+                        color: primary,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Icon(
+                    selected
+                        ? Icons.check_circle_rounded
+                        : Icons.radio_button_unchecked_rounded,
+                    size: 19,
+                    color: selected ? primary : muted,
+                  ),
+                  const SizedBox(height: 5),
+                  Text(
+                    extra,
+                    textAlign: TextAlign.right,
+                    style: const TextStyle(
+                      color: body,
+                      fontSize: 8,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _hourlyPackageCard(KmPricingPackage package) {
+    final rate = package.safeHourlyRate;
+    final kmText = package.unlimitedKm
+        ? 'Unlimited KM'
+        : '${_formatKm(package.safeIncludedKm)} KM included';
+
+    return Container(
+      padding: const EdgeInsets.all(13),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(15),
+        border: Border.all(color: border),
+      ),
+      child: Row(
+        children: [
+          const Icon(
+            Icons.schedule_outlined,
+            size: 18,
+            color: primary,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  package.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: heading,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  kmText,
+                  style: const TextStyle(
+                    color: body,
+                    fontSize: 9,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Text(
+            '₹${_formatAmount(rate)} / hr',
+            style: const TextStyle(
+              color: primary,
+              fontSize: 11,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _packageSubheading(String title, String subtitle) {
+    return Row(
+      children: [
+        const Icon(
+          Icons.access_time_rounded,
+          color: primary,
+          size: 17,
+        ),
+        const SizedBox(width: 7),
+        Expanded(
+          child: Text(
+            title,
+            style: const TextStyle(
+              color: heading,
+              fontSize: 12,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ),
+        Text(
+          subtitle,
+          style: const TextStyle(
+            color: muted,
+            fontSize: 8,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // SPECIAL RATES
+  // ---------------------------------------------------------------------------
+
+  Widget _buildSpecialRatesSection(PricingProfile? pricing) {
+    if (pricing == null) return const SizedBox.shrink();
+
+    final rates = pricing.specialRates
+        .where((rate) => rate.isActive)
+        .toList();
+
+    if (rates.isEmpty) return const SizedBox.shrink();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _sectionTitle(
+          'Special rates',
+          'Date-based pricing may apply on selected dates',
         ),
         const SizedBox(height: 12),
         Container(
@@ -659,71 +968,13 @@ class _CarDetailsScreenState
             color: card,
             borderRadius: BorderRadius.circular(22),
             border: Border.all(color: border),
-            boxShadow: const [
-              BoxShadow(
-                color: Color(0x0717201F),
-                blurRadius: 18,
-                offset: Offset(0, 7),
-              ),
-            ],
           ),
           child: Column(
             children: [
-              _selectedRateHeader(package: package, daily: daily),
-              AnimatedSize(
-                duration: const Duration(milliseconds: 220),
-                curve: Curves.easeOut,
-                child: _showAllRates
-                    ? Padding(
-                        padding: const EdgeInsets.only(top: 12),
-                        child: Column(
-                          children: [
-                            _compactRateRow(
-                              Icons.schedule_outlined,
-                              'Hourly',
-                              '₹${_formatAmount(hourly)}',
-                              'per hour',
-                            ),
-                            _compactRateRow(
-                              Icons.today_outlined,
-                              'Daily',
-                              '₹${_formatAmount(daily)}',
-                              'per day',
-                              highlighted: true,
-                            ),
-                            _compactRateRow(
-                              Icons.date_range_outlined,
-                              'Weekend',
-                              '₹${_formatAmount(weekend)}',
-                              'weekend rate',
-                            ),
-                            _compactRateRow(
-                              Icons.view_week_outlined,
-                              'Weekly',
-                              '₹${_formatAmount(weekly)}',
-                              'per week',
-                            ),
-                            _compactRateRow(
-                              Icons.calendar_month_outlined,
-                              'Monthly',
-                              '₹${_formatAmount(monthly)}',
-                              'per month',
-                            ),
-                          ],
-                        ),
-                      )
-                    : const SizedBox.shrink(),
-              ),
-              const SizedBox(height: 8),
-              _smallExpandButton(
-                expanded: _showAllRates,
-                label: _showAllRates
-                    ? 'Hide hourly, daily & more'
-                    : 'View hourly, daily, weekend, weekly & monthly',
-                onTap: () {
-                  setState(() => _showAllRates = !_showAllRates);
-                },
-              ),
+              for (var i = 0; i < rates.length; i++) ...[
+                if (i > 0) const Divider(height: 20, color: border),
+                _specialRateRow(rates[i]),
+              ],
             ],
           ),
         ),
@@ -731,143 +982,319 @@ class _CarDetailsScreenState
     );
   }
 
-  Widget _selectedRateHeader({
-    required KmPricingPackage? package,
-    required double daily,
-  }) {
-    final title = package == null
-        ? 'Current daily price'
-        : package.unlimitedKm
-            ? 'Unlimited KM'
-            : '${_formatKm(package.includedKm ?? 0)} KM package';
+  Widget _specialRateRow(SpecialRate rate) {
+    final dateText =
+        '${_formatDate(rate.startDate)} – ${_formatDate(rate.endDate)}';
+
+    final hourly = _firstMapValue(rate.hourlyPrices);
+    final daily = _firstMapValue(rate.dailyPrices);
 
     return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Container(
-          width: 46,
-          height: 46,
+          width: 40,
+          height: 40,
           decoration: BoxDecoration(
             color: softAccent,
-            borderRadius: BorderRadius.circular(14),
+            borderRadius: BorderRadius.circular(12),
           ),
           child: const Icon(
-            Icons.payments_outlined,
+            Icons.event_available_outlined,
             color: primary,
-            size: 21,
+            size: 19,
           ),
         ),
-        const SizedBox(width: 12),
+        const SizedBox(width: 10),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                title,
+                rate.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
                   color: heading,
-                  fontSize: 13,
+                  fontSize: 11,
                   fontWeight: FontWeight.w900,
                 ),
               ),
               const SizedBox(height: 3),
               Text(
-                package?.name ?? 'Vehicle pricing',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+                dateText,
                 style: const TextStyle(
-                  color: body,
-                  fontSize: 10,
+                  color: muted,
+                  fontSize: 9,
                   fontWeight: FontWeight.w600,
                 ),
               ),
+              const SizedBox(height: 5),
+              Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                children: [
+                  if (hourly != null)
+                    _rateChip('Hourly ₹${_formatAmount(hourly)}'),
+                  if (daily != null)
+                    _rateChip('Daily ₹${_formatAmount(daily)}'),
+                  if (rate.extraKmRate != null &&
+                      rate.extraKmRate! >= 0)
+                    _rateChip(
+                      'Extra KM ₹${_formatAmount(rate.extraKmRate!)}',
+                    ),
+                ],
+              ),
             ],
           ),
-        ),
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.end,
-          children: [
-            Text(
-              _isPricingLoading
-                  ? '—'
-                  : '₹${_formatAmount(daily)}',
-              style: const TextStyle(
-                color: primary,
-                fontSize: 19,
-                fontWeight: FontWeight.w900,
-              ),
-            ),
-            const Text(
-              'per day',
-              style: TextStyle(
-                color: muted,
-                fontSize: 9,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ],
         ),
       ],
     );
   }
 
-  Widget _compactRateRow(
-    IconData icon,
-    String title,
-    String value,
-    String subtitle, {
-    bool highlighted = false,
-  }) {
+  Widget _rateChip(String text) {
     return Container(
-      margin: const EdgeInsets.only(bottom: 7),
       padding: const EdgeInsets.symmetric(
-        horizontal: 11,
-        vertical: 10,
+        horizontal: 7,
+        vertical: 4,
       ),
       decoration: BoxDecoration(
-        color: highlighted ? softAccent : background,
-        borderRadius: BorderRadius.circular(13),
-        border: Border.all(
-          color: highlighted ? primary : border,
-          width: highlighted ? 1.1 : 1,
+        color: background,
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: border),
+      ),
+      child: Text(
+        text,
+        style: const TextStyle(
+          color: body,
+          fontSize: 8,
+          fontWeight: FontWeight.w800,
         ),
+      ),
+    );
+  }
+
+  double? _firstMapValue(Map<String, double> values) {
+    for (final value in values.values) {
+      if (value >= 0) return value;
+    }
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // SECURITY DEPOSIT
+  // ---------------------------------------------------------------------------
+
+  Widget _buildDepositSection(PricingProfile? pricing) {
+    if (pricing == null) return const SizedBox.shrink();
+
+    final deposit = pricing.securityDeposit;
+    final isNone = deposit.type == DepositType.none;
+
+    String title;
+    String subtitle;
+    String amount = '';
+
+    if (isNone) {
+      title = 'No security deposit';
+      subtitle = 'No separate security deposit is configured.';
+    } else if (deposit.isMonetary) {
+      title = 'Refundable security deposit';
+      subtitle = deposit.paymentMethod.isNotEmpty
+          ? 'Collected separately • ${deposit.paymentMethod}'
+          : 'Collected separately from the rental amount.';
+      amount = '₹${_formatAmount(deposit.amount)}';
+    } else {
+      title = deposit.type == DepositType.vehicleAsset
+          ? 'Vehicle / bike as security'
+          : 'Other asset as security';
+
+      subtitle = deposit.minimumAssetValue > 0
+          ? 'Minimum asset value ₹${_formatAmount(deposit.minimumAssetValue)}'
+          : 'Asset details will be collected during the booking process.';
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: card,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: border),
       ),
       child: Row(
         children: [
-          Icon(
-            icon,
-            size: 17,
-            color: highlighted ? primary : body,
+          Container(
+            width: 46,
+            height: 46,
+            decoration: BoxDecoration(
+              color: const Color(0xFFF3F6F5),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Icon(
+              isNone
+                  ? Icons.verified_outlined
+                  : Icons.account_balance_wallet_outlined,
+              color: primary,
+            ),
           ),
-          const SizedBox(width: 9),
+          const SizedBox(width: 13),
           Expanded(
-            child: Text(
-              title,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: heading,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  subtitle,
+                  style: const TextStyle(
+                    color: body,
+                    fontSize: 10,
+                    height: 1.4,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (amount.isNotEmpty) ...[
+            const SizedBox(width: 10),
+            Text(
+              amount,
               style: const TextStyle(
                 color: heading,
-                fontSize: 11,
-                fontWeight: FontWeight.w800,
+                fontSize: 14,
+                fontWeight: FontWeight.w900,
               ),
             ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // RENTAL INFORMATION
+  // ---------------------------------------------------------------------------
+
+  Widget _buildRentalInformation() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _sectionTitle(
+          'Rental information',
+          'The final amount is calculated during booking',
+        ),
+        const SizedBox(height: 13),
+        Container(
+          decoration: BoxDecoration(
+            color: card,
+            borderRadius: BorderRadius.circular(22),
+            border: Border.all(color: border),
           ),
-          Text(
-            subtitle,
-            style: const TextStyle(
-              color: muted,
-              fontSize: 9,
-              fontWeight: FontWeight.w600,
-            ),
+          child: const Column(
+            children: [
+              _StaticInfoRow(
+                icon: Icons.payments_outlined,
+                title: 'Pricing',
+                value: 'Package based',
+              ),
+              Divider(height: 1, color: border),
+              _StaticInfoRow(
+                icon: Icons.speed_outlined,
+                title: 'Extra KM',
+                value: 'Package rate',
+              ),
+              Divider(height: 1, color: border),
+              _StaticInfoRow(
+                icon: Icons.event_repeat_outlined,
+                title: 'Special dates',
+                value: 'Date-range rules',
+              ),
+              Divider(height: 1, color: border),
+              _StaticInfoRow(
+                icon: Icons.account_balance_wallet_outlined,
+                title: 'Deposit',
+                value: 'Separate from trip total',
+              ),
+            ],
           ),
-          const SizedBox(width: 10),
-          Text(
-            value,
-            style: TextStyle(
-              color: highlighted ? primary : heading,
-              fontSize: 12,
-              fontWeight: FontWeight.w900,
+        ),
+      ],
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // NOTE
+  // ---------------------------------------------------------------------------
+
+  Widget _buildPricingNote() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF3F6F5),
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: const Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            Icons.verified_outlined,
+            size: 18,
+            color: primary,
+          ),
+          SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'The final booking price is calculated after you select rental dates, time, rental type, KM package, add-ons, protection, discounts and applicable taxes. The security deposit remains separate from the trip total.',
+              style: TextStyle(
+                color: body,
+                fontSize: 10,
+                height: 1.5,
+                fontWeight: FontWeight.w500,
+              ),
             ),
           ),
         ],
       ),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // SECTION TITLE / SMALL UI
+  // ---------------------------------------------------------------------------
+
+  Widget _sectionTitle(
+    String title,
+    String subtitle,
+  ) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          title,
+          style: const TextStyle(
+            color: heading,
+            fontSize: 18,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+        const SizedBox(height: 3),
+        Text(
+          subtitle,
+          style: const TextStyle(
+            color: muted,
+            fontSize: 10,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ],
     );
   }
 
@@ -919,16 +1346,14 @@ class _CarDetailsScreenState
     );
   }
 
-  Widget _buildPricingUnavailable() {
+  Widget _buildPricingUnavailable({String? message}) {
     if (_isPricingLoading) {
       return Container(
         padding: const EdgeInsets.all(18),
         decoration: BoxDecoration(
           color: card,
           borderRadius: BorderRadius.circular(20),
-          border: Border.all(
-            color: border,
-          ),
+          border: Border.all(color: border),
         ),
         child: const Row(
           children: [
@@ -975,7 +1400,8 @@ class _CarDetailsScreenState
           const SizedBox(width: 12),
           Expanded(
             child: Text(
-              _pricingError ??
+              message ??
+                  _pricingError ??
                   'Pricing details are currently unavailable for this vehicle.',
               style: const TextStyle(
                 color: Color(0xFF765522),
@@ -1002,935 +1428,19 @@ class _CarDetailsScreenState
     );
   }
 
-  // ------------------------------------------------------------
-  // KM
-  // ------------------------------------------------------------
-
-  Widget _buildKmSection(PricingProfile? pricing) {
-    if (pricing == null) return const SizedBox.shrink();
-
-    final packages = [...pricing.kmPackages];
-
-    if (pricing.kmPricingMode != KmPricingMode.package ||
-        packages.isEmpty) {
-      return _buildLegacyKmSection(pricing);
-    }
-
-    final selected = _selectedKmPackage ?? packages.first;
-    final remaining = packages
-        .where((package) => package.id != selected.id)
-        .toList();
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _sectionTitle(
-          'KM package',
-          'Choose the allowance that fits your trip',
-        ),
-        const SizedBox(height: 12),
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: card,
-            borderRadius: BorderRadius.circular(22),
-            border: Border.all(color: border),
-            boxShadow: const [
-              BoxShadow(
-                color: Color(0x0717201F),
-                blurRadius: 18,
-                offset: Offset(0, 7),
-              ),
-            ],
-          ),
-          child: Column(
-            children: [
-              // The selected/first package is always shown first.
-              _kmPackageCard(selected),
-              AnimatedSize(
-                duration: const Duration(milliseconds: 220),
-                curve: Curves.easeOut,
-                child: _showAllKmPackages && remaining.isNotEmpty
-                    ? Padding(
-                        padding: const EdgeInsets.only(top: 2),
-                        child: Column(
-                          children: remaining
-                              .map(
-                                (package) => Padding(
-                                  padding:
-                                      const EdgeInsets.only(top: 8),
-                                  child: _kmPackageCard(package),
-                                ),
-                              )
-                              .toList(),
-                        ),
-                      )
-                    : const SizedBox.shrink(),
-              ),
-              if (remaining.isNotEmpty) ...[
-                const SizedBox(height: 8),
-                _smallExpandButton(
-                  expanded: _showAllKmPackages,
-                  label: _showAllKmPackages
-                      ? 'Show selected package only'
-                      : 'View all ${packages.length} KM packages',
-                  onTap: () {
-                    setState(() {
-                      _showAllKmPackages = !_showAllKmPackages;
-                    });
-                  },
-                ),
-              ],
-              const SizedBox(height: 9),
-              _buildSelectedKmSummary(pricing),
-              const SizedBox(height: 9),
-              _buildExtraKmInfo(),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _kmPackageCard(
-    KmPricingPackage package,
-  ) {
-    final selected = _selectedKmPackage?.id == package.id;
-
-    final kmText = package.unlimitedKm
-        ? 'Unlimited KM'
-        : '${_formatKm(package.includedKm ?? 0)} KM included';
-
-    final dailyText = package.dailyRate > 0
-        ? '₹${_formatAmount(package.dailyRate)} / day'
-        : 'Daily pricing available';
-
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(16),
-        onTap: () {
-          setState(() {
-            _selectedKmPackage = package;
-            _unlimitedKmSelected = package.unlimitedKm;
-            _showAllKmPackages = false;
-          });
-        },
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          curve: Curves.easeOut,
-          width: double.infinity,
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            color: selected
-                ? softAccent
-                : const Color(0xFFF3F6F5),
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(
-              color: selected ? primary : border,
-              width: selected ? 1.4 : 1,
-            ),
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 38,
-                height: 38,
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Icon(
-                  package.unlimitedKm
-                      ? Icons.all_inclusive_rounded
-                      : Icons.speed_rounded,
-                  size: 18,
-                  color: primary,
-                ),
-              ),
-              const SizedBox(width: 11),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Flexible(
-                          child: Text(
-                            package.name,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: heading,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w900,
-                            ),
-                          ),
-                        ),
-                        if (package.name.toLowerCase() == 'basic') ...[
-                          const SizedBox(width: 7),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 6,
-                              vertical: 3,
-                            ),
-                            decoration: BoxDecoration(
-                              color: primary,
-                              borderRadius: BorderRadius.circular(6),
-                            ),
-                            child: const Text(
-                              'STARTER',
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 7,
-                                fontWeight: FontWeight.w900,
-                                letterSpacing: .4,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      kmText,
-                      style: const TextStyle(
-                        color: body,
-                        fontSize: 9,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      dailyText,
-                      style: const TextStyle(
-                        color: primary,
-                        fontSize: 10,
-                        fontWeight: FontWeight.w900,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Icon(
-                    selected
-                        ? Icons.check_circle_rounded
-                        : Icons.radio_button_unchecked_rounded,
-                    size: 19,
-                    color: selected ? primary : muted,
-                  ),
-                  const SizedBox(height: 5),
-                  if (!package.unlimitedKm)
-                    Text(
-                      '₹${_formatAmount(package.extraKmRate)}/KM extra',
-                      style: const TextStyle(
-                        color: body,
-                        fontSize: 8,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    )
-                  else
-                    const Text(
-                      'No extra KM',
-                      style: TextStyle(
-                        color: body,
-                        fontSize: 8,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildExtraKmInfo() {
-    final package = _selectedKmPackage;
-
-    if (package == null) {
-      return const SizedBox.shrink();
-    }
-
-    final text = package.unlimitedKm
-        ? 'Unlimited KM selected. No extra KM charge applies.'
-        : 'After ${_formatKm(package.includedKm ?? 0)} KM, extra usage is charged at ₹${_formatAmount(package.extraKmRate)} / KM.';
-
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: 12,
-        vertical: 10,
-      ),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF3F6F5),
-        borderRadius: BorderRadius.circular(14),
-      ),
-      child: Row(
-        children: [
-          const Icon(
-            Icons.info_outline_rounded,
-            size: 16,
-            color: primary,
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              text,
-              style: const TextStyle(
-                color: body,
-                fontSize: 9,
-                height: 1.4,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // Legacy KM UI is retained for Firebase pricing profiles that use a
-  // non-package KM pricing mode.
-  Widget _buildLegacyKmSection(
-    PricingProfile pricing,
-  ) {
-    final options = [...pricing.kmOptions]..sort();
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _sectionTitle(
-          'KM policy',
-          'Flexible KM allowances for your booking',
-        ),
-        const SizedBox(height: 13),
-        Container(
-          padding: const EdgeInsets.all(18),
-          decoration: BoxDecoration(
-            color: card,
-            borderRadius: BorderRadius.circular(22),
-            border: Border.all(color: border),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Choose your KM allowance',
-                style: TextStyle(
-                  color: heading,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-              const SizedBox(height: 12),
-              if (options.isNotEmpty)
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: options.map((km) {
-                    return _kmOptionChip(
-                      label: '${_formatKm(km)} KM',
-                      selected: !_unlimitedKmSelected &&
-                          pricing.includedKmPerDay == km,
-                      onTap: () {
-                        setState(() {
-                          _unlimitedKmSelected = false;
-                        });
-                      },
-                    );
-                  }).toList(),
-                ),
-              if (pricing.unlimitedKmEnabled) ...[
-                const SizedBox(height: 10),
-                _unlimitedKmCard(
-                  surcharge: pricing.unlimitedKmSurcharge,
-                  selected: _unlimitedKmSelected,
-                  onTap: () {
-                    setState(() {
-                      _unlimitedKmSelected = true;
-                      _selectedKmPackage = null;
-                    });
-                  },
-                ),
-              ],
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _kmOptionChip({
-    required String label,
-    required bool selected,
-    required VoidCallback onTap,
-  }) {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(14),
-        onTap: onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          curve: Curves.easeOut,
-          padding: const EdgeInsets.symmetric(
-            horizontal: 13,
-            vertical: 10,
-          ),
-          decoration: BoxDecoration(
-            color: selected ? softAccent : const Color(0xFFF3F6F5),
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(
-              color: selected ? primary : border,
-              width: selected ? 1.4 : 1,
-            ),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                selected
-                    ? Icons.check_circle_rounded
-                    : Icons.radio_button_unchecked_rounded,
-                size: 15,
-                color: selected ? primary : muted,
-              ),
-              const SizedBox(width: 6),
-              Text(
-                label,
-                style: TextStyle(
-                  color: heading,
-                  fontSize: 10,
-                  fontWeight:
-                      selected ? FontWeight.w900 : FontWeight.w800,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _unlimitedKmCard({
-    required double surcharge,
-    required bool selected,
-    required VoidCallback onTap,
-  }) {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(15),
-        onTap: onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          curve: Curves.easeOut,
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(
-            horizontal: 13,
-            vertical: 12,
-          ),
-          decoration: BoxDecoration(
-            color: selected ? softAccent : const Color(0xFFF3F6F5),
-            borderRadius: BorderRadius.circular(15),
-            border: Border.all(
-              color: selected ? primary : border,
-              width: selected ? 1.4 : 1,
-            ),
-          ),
-          child: Row(
-            children: [
-              const Icon(
-                Icons.all_inclusive_rounded,
-                size: 18,
-                color: primary,
-              ),
-              const SizedBox(width: 10),
-              const Expanded(
-                child: Text(
-                  'Unlimited KM',
-                  style: TextStyle(
-                    color: heading,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
-              ),
-              Text(
-                surcharge > 0
-                    ? '+₹${_formatAmount(surcharge)} / day'
-                    : 'Included',
-                style: const TextStyle(
-                  color: primary,
-                  fontSize: 9,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Icon(
-                selected
-                    ? Icons.check_circle_rounded
-                    : Icons.radio_button_unchecked_rounded,
-                size: 18,
-                color: selected ? primary : muted,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  String _formatKm(int value) {
-    if (value >= 1000 && value % 1000 == 0) {
-      return '${value ~/ 1000}K';
-    }
-
-    return value.toString();
-  }
-
-  Widget _buildSelectedKmSummary(
-    PricingProfile pricing,
-  ) {
-    final package = _selectedKmPackage;
-
-    final String value;
-    final String extra;
-
-    if (package != null) {
-      value = package.unlimitedKm
-          ? 'Unlimited KM'
-          : '${_formatKm(package.includedKm ?? 0)} KM';
-
-      extra = package.unlimitedKm
-          ? 'No extra KM charge'
-          : '₹${_formatAmount(package.extraKmRate)} / KM after allowance';
-    } else if (_unlimitedKmSelected) {
-      value = 'Unlimited KM';
-      extra = 'Unlimited legacy pricing';
-    } else {
-      value = 'Default allowance';
-      extra = 'Based on vehicle pricing policy';
-    }
-
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 180),
-      padding: const EdgeInsets.symmetric(
-        horizontal: 13,
-        vertical: 11,
-      ),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF8FAF9),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: border),
-      ),
-      child: Row(
-        children: [
-          const Icon(
-            Icons.check_circle_outline_rounded,
-            size: 17,
-            color: primary,
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Selected package',
-                  style: TextStyle(
-                    color: body,
-                    fontSize: 9,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  value,
-                  style: const TextStyle(
-                    color: heading,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Text(
-            extra,
-            textAlign: TextAlign.right,
-            style: const TextStyle(
-              color: primary,
-              fontSize: 8,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ------------------------------------------------------------
-  // SECURITY DEPOSIT
-  // ------------------------------------------------------------
-
-  Widget _buildDepositSection(
-    PricingProfile? pricing,
-  ) {
-    if (pricing == null) {
-      return const SizedBox.shrink();
-    }
-
-    return Container(
-      padding:
-          const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: card,
-        borderRadius:
-            BorderRadius.circular(22),
-        border: Border.all(
-          color: border,
-        ),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 46,
-            height: 46,
-            decoration: BoxDecoration(
-              color: const Color(
-                0xFFF3F6F5,
-              ),
-              borderRadius:
-                  BorderRadius.circular(14),
-            ),
-            child: const Icon(
-              Icons
-                  .account_balance_wallet_outlined,
-              color: primary,
-            ),
-          ),
-          const SizedBox(width: 13),
-          const Expanded(
-            child: Column(
-              crossAxisAlignment:
-                  CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Security deposit',
-                  style: TextStyle(
-                    color: heading,
-                    fontSize: 13,
-                    fontWeight:
-                        FontWeight.w900,
-                  ),
-                ),
-                SizedBox(height: 3),
-                Text(
-                  'Refundable security deposit may apply to the booking.',
-                  style: TextStyle(
-                    color: body,
-                    fontSize: 10,
-                    height: 1.4,
-                    fontWeight:
-                        FontWeight.w500,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 10),
-          Text(
-            '₹${_formatAmount(pricing.securityDeposit)}',
-            style: const TextStyle(
-              color: heading,
-              fontSize: 14,
-              fontWeight:
-                  FontWeight.w900,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ------------------------------------------------------------
-  // RENTAL INFORMATION
-  // ------------------------------------------------------------
-
-  Widget _buildRentalInformation(
-    PricingProfile? pricing,
-  ) {
-    if (pricing == null) {
-      return const SizedBox.shrink();
-    }
-
-    return Column(
-      crossAxisAlignment:
-          CrossAxisAlignment.start,
-      children: [
-        _sectionTitle(
-          'Rental information',
-          'Important pricing conditions',
-        ),
-
-        const SizedBox(height: 13),
-
-        Container(
-          decoration: BoxDecoration(
-            color: card,
-            borderRadius:
-                BorderRadius.circular(22),
-            border: Border.all(
-              color: border,
-            ),
-          ),
-          child: Column(
-            children: [
-              _infoRow(
-                Icons
-                    .hourglass_bottom_outlined,
-                'Grace period',
-                '${pricing.gracePeriodMinutes} minutes',
-              ),
-              _divider(),
-              _infoRow(
-                Icons
-                    .access_time_rounded,
-                'Extra hour',
-                '₹${_formatAmount(pricing.extraHourRate)}',
-              ),
-              _divider(),
-              _infoRow(
-                Icons
-                    .event_repeat_outlined,
-                'Extra day',
-                '₹${_formatAmount(pricing.extraDayRate)}',
-              ),
-              _divider(),
-              _infoRow(
-                Icons
-                    .schedule_outlined,
-                'Late return',
-                '₹${_formatAmount(pricing.lateReturnRate)}',
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _priceRow({
-    required IconData icon,
-    required String title,
-    required String value,
-    required String subtitle,
-    bool highlighted = false,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: 16,
-        vertical: 14,
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 42,
-            height: 42,
-            decoration: BoxDecoration(
-              color: highlighted ? softAccent : background,
-              borderRadius: BorderRadius.circular(13),
-            ),
-            child: Icon(
-              icon,
-              color: highlighted ? primary : body,
-              size: 21,
-            ),
-          ),
-          const SizedBox(width: 13),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    color: heading,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  subtitle,
-                  style: const TextStyle(
-                    color: muted,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Text(
-            value,
-            style: TextStyle(
-              color: highlighted ? primary : heading,
-              fontSize: 15,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _infoRow(
-    IconData icon,
-    String title,
-    String value,
-  ) {
-    return Padding(
-      padding:
-          const EdgeInsets.symmetric(
-        horizontal: 16,
-        vertical: 14,
-      ),
-      child: Row(
-        children: [
-          Icon(
-            icon,
-            size: 18,
-            color: accent,
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              title,
-              style: const TextStyle(
-                color: body,
-                fontSize: 11,
-                fontWeight:
-                    FontWeight.w600,
-              ),
-            ),
-          ),
-          Text(
-            value,
-            style: const TextStyle(
-              color: heading,
-              fontSize: 11,
-              fontWeight:
-                  FontWeight.w900,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _divider() {
-    return const Divider(
-      height: 1,
-      thickness: 1,
-      color: border,
-    );
-  }
-
-  // ------------------------------------------------------------
-  // NOTE
-  // ------------------------------------------------------------
-
-  Widget _buildPricingNote() {
-    return Container(
-      padding:
-          const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(
-          0xFFF3F6F5,
-        ),
-        borderRadius:
-            BorderRadius.circular(18),
-      ),
-      child: const Row(
-        crossAxisAlignment:
-            CrossAxisAlignment.start,
-        children: [
-          Icon(
-            Icons
-                .verified_outlined,
-            size: 18,
-            color: primary,
-          ),
-          SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              'The final booking price is calculated after you select your rental dates, time, KM/package, add-ons, protection, discounts and applicable taxes.',
-              style: TextStyle(
-                color: body,
-                fontSize: 10,
-                height: 1.5,
-                fontWeight:
-                    FontWeight.w500,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ------------------------------------------------------------
-  // SECTION TITLE
-  // ------------------------------------------------------------
-
-  Widget _sectionTitle(
-    String title,
-    String subtitle,
-  ) {
-    return Column(
-      crossAxisAlignment:
-          CrossAxisAlignment.start,
-      children: [
-        Text(
-          title,
-          style: const TextStyle(
-            color: heading,
-            fontSize: 18,
-            fontWeight:
-                FontWeight.w900,
-          ),
-        ),
-        const SizedBox(height: 3),
-        Text(
-          subtitle,
-          style: const TextStyle(
-            color: muted,
-            fontSize: 10,
-            fontWeight:
-                FontWeight.w500,
-          ),
-        ),
-      ],
-    );
-  }
-
-  // ------------------------------------------------------------
-  // BOTTOM BUTTON
-  // ------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // BOTTOM ACTION
+  // ---------------------------------------------------------------------------
 
   Widget _buildBottomBar(Car car) {
+    final enabled = car.isAvailable &&
+        !_isPricingLoading &&
+        _pricingProfile != null;
+
     return SafeArea(
       top: false,
       child: Container(
-        padding:
-            const EdgeInsets.fromLTRB(
+        padding: const EdgeInsets.fromLTRB(
           20,
           12,
           20,
@@ -1939,9 +1449,7 @@ class _CarDetailsScreenState
         decoration: const BoxDecoration(
           color: Colors.white,
           border: Border(
-            top: BorderSide(
-              color: border,
-            ),
+            top: BorderSide(color: border),
           ),
           boxShadow: [
             BoxShadow(
@@ -1954,60 +1462,35 @@ class _CarDetailsScreenState
         child: SizedBox(
           height: 54,
           child: ElevatedButton(
-            onPressed: car.isAvailable &&
-                    !_isPricingLoading &&
-                    _pricingProfile != null
-                ? _chooseDateTime
-                : null,
-            style: ElevatedButton
-                .styleFrom(
+            onPressed: enabled ? _chooseDateTime : null,
+            style: ElevatedButton.styleFrom(
               backgroundColor: primary,
-              foregroundColor:
-                  Colors.white,
-              disabledBackgroundColor:
-                  const Color(
-                0xFFD7DEDC,
-              ),
-              disabledForegroundColor:
-                  const Color(
-                0xFF7D8986,
-              ),
+              foregroundColor: Colors.white,
+              disabledBackgroundColor: Color(0xFFD7DEDC),
+              disabledForegroundColor: Color(0xFF7D8986),
               elevation: 0,
-              shape:
-                  RoundedRectangleBorder(
-                borderRadius:
-                    BorderRadius.circular(
-                  17,
-                ),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(17),
               ),
             ),
             child: Row(
-              mainAxisAlignment:
-                  MainAxisAlignment.center,
+              mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 Text(
-                  car.isAvailable &&
-                          !_isPricingLoading &&
-                          _pricingProfile !=
-                              null
+                  enabled
                       ? 'Choose date & time'
                       : _isPricingLoading
                           ? 'Loading pricing...'
                           : 'Currently unavailable',
                   style: const TextStyle(
                     fontSize: 14,
-                    fontWeight:
-                        FontWeight.w900,
+                    fontWeight: FontWeight.w900,
                   ),
                 ),
-                if (car.isAvailable &&
-                    !_isPricingLoading &&
-                    _pricingProfile !=
-                        null) ...[
+                if (enabled) ...[
                   const SizedBox(width: 8),
                   const Icon(
-                    Icons
-                        .arrow_forward_rounded,
+                    Icons.arrow_forward_rounded,
                     size: 18,
                   ),
                 ],
@@ -2026,18 +1509,6 @@ class _CarDetailsScreenState
       return;
     }
 
-    /*
-     * Continue into the real booking flow.
-     *
-     * The selected vehicle is passed to DateTimeScreen.
-     * DateTimeScreen performs the live Firebase availability
-     * check for this specific vehicle and then continues to
-     * branch selection → pricing → review → payment.
-     *
-     * The selected KM package remains part of this screen's
-     * pricing UI. The final booking pricing is calculated again
-     * in the pricing flow before the booking is created.
-     */
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -2048,17 +1519,84 @@ class _CarDetailsScreenState
     );
   }
 
-  // ------------------------------------------------------------
-  // HELPERS
-  // ------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // FORMATTING
+  // ---------------------------------------------------------------------------
 
   String _formatAmount(double value) {
+    if (!value.isFinite) return '0';
+
     if (value == value.roundToDouble()) {
-      return value
-          .toInt()
-          .toString();
+      return value.toInt().toString();
     }
 
     return value.toStringAsFixed(2);
+  }
+
+  String _formatKm(int value) {
+    if (value >= 1000 && value % 1000 == 0) {
+      return '${value ~/ 1000}K';
+    }
+    return value.toString();
+  }
+
+  String _formatDate(DateTime value) {
+    final day = value.day.toString().padLeft(2, '0');
+    final month = value.month.toString().padLeft(2, '0');
+    return '$day/$month/${value.year}';
+  }
+}
+
+class _StaticInfoRow extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String value;
+
+  const _StaticInfoRow({
+    required this.icon,
+    required this.title,
+    required this.value,
+  });
+
+  static const Color primary = Color(0xFF0F766E);
+  static const Color heading = Color(0xFF17201F);
+  static const Color body = Color(0xFF66706E);
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: 16,
+        vertical: 14,
+      ),
+      child: Row(
+        children: [
+          Icon(
+            icon,
+            size: 18,
+            color: primary,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              title,
+              style: const TextStyle(
+                color: body,
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          Text(
+            value,
+            style: const TextStyle(
+              color: heading,
+              fontSize: 11,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }

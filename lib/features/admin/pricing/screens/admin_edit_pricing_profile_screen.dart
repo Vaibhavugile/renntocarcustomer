@@ -7,6 +7,22 @@ import '../../../pricing/models/km_pricing_package.dart';
 import '../../../pricing/models/pricing_profile.dart';
 import '../../../pricing/services/pricing_profile_service.dart';
 
+/// Edit screen for the simplified car-rental pricing model.
+///
+/// Supported rental types:
+///   - Hourly
+///   - Daily
+///
+/// Removed from the old screen:
+///   - Weekend rental type
+///   - Weekly rental type
+///   - Monthly rental type
+///   - Legacy KM pricing modes
+///   - Minimum/maximum weekend rules
+///   - Legacy extra-hour/day/late-return pricing
+///   - Pricing version management
+///
+/// Security deposit is kept separate from trip pricing.
 class AdminEditPricingProfileScreen extends StatefulWidget {
   final PricingProfile profile;
 
@@ -34,118 +50,31 @@ class _AdminEditPricingProfileScreenState
 
   final _formKey = GlobalKey<FormState>();
 
-  final TextEditingController _nameController =
-      TextEditingController();
+  final _nameController = TextEditingController();
+  final _pricingGroupController = TextEditingController();
 
-  final TextEditingController _hourlyController =
-      TextEditingController();
+  final _depositAmountController = TextEditingController();
+  final _paymentMethodController = TextEditingController();
+  final _assetDescriptionController = TextEditingController();
+  final _minimumAssetValueController = TextEditingController();
 
-  final TextEditingController _dailyController =
-      TextEditingController();
-
-  final TextEditingController _weekendController =
-      TextEditingController();
-
-  final TextEditingController _weeklyController =
-      TextEditingController();
-
-  final TextEditingController _monthlyController =
-      TextEditingController();
-
-  final TextEditingController _includedKmController =
-      TextEditingController();
-
-  final TextEditingController _perKmController =
-      TextEditingController();
-
-  final TextEditingController _extraKmController =
-      TextEditingController();
-
-  final TextEditingController
-      _unlimitedSurchargeController =
-      TextEditingController();
-
-  final TextEditingController _graceController =
-      TextEditingController();
-
-  final TextEditingController _extraHourController =
-      TextEditingController();
-
-  final TextEditingController _extraDayController =
-      TextEditingController();
-
-  final TextEditingController _lateReturnController =
-      TextEditingController();
-
-  final TextEditingController _depositController =
-      TextEditingController();
-
-  final TextEditingController _kmOptionsController =
-      TextEditingController();
-
-  // Rental-type pricing configuration.
-  final TextEditingController _hourlyMinHoursController =
-      TextEditingController(text: '1');
-  final TextEditingController _dailyMinDaysController =
-      TextEditingController(text: '1');
-  final TextEditingController _weekendMinDaysController =
-      TextEditingController(text: '2');
-  final TextEditingController _weekendMaxDaysController =
-      TextEditingController(text: '2');
-
-  final TextEditingController _specialRuleNameController =
-      TextEditingController();
-  final TextEditingController _specialHourlyController =
-      TextEditingController();
-  final TextEditingController _specialDailyController =
-      TextEditingController();
-  final TextEditingController _specialWeekendController =
-      TextEditingController();
-  final TextEditingController _specialExtraKmController =
-      TextEditingController();
-  final TextEditingController _specialMinHoursController =
-      TextEditingController(text: '1');
-
-  bool _hourlyEnabled = true;
-  bool _dailyEnabled = true;
-  bool _weekendEnabled = true;
-  bool _hourlyRequireTime = true;
-  bool _dailyRequireTime = true;
-  bool _weekendRequireTime = false;
-
-  bool _depositRequired = false;
-  final Set<DepositType> _depositTypes = <DepositType>{};
-  final TextEditingController _minimumAssetValueController =
-      TextEditingController();
-
-  bool _specialEnabled = false;
-  bool _specialHourlyEnabled = true;
-  bool _specialDailyEnabled = true;
-  bool _specialWeekendEnabled = true;
-  DateTime? _specialStartDate;
-  DateTime? _specialEndDate;
-  int _pricingVersion = 1;
+  final List<_EditPackageDraft> _packages = [];
+  final List<_EditSpecialRateDraft> _specialRates = [];
 
   List<Car> _cars = [];
-
   Car? _selectedCar;
-
-  late KmPricingMode _kmPricingMode;
-
-  late bool _unlimitedEnabled;
-  late bool _isActive;
 
   bool _isLoadingCars = true;
   bool _isSaving = false;
+  bool _isActive = true;
 
-  final List<_EditPackageDraft> _packages = [];
+  DepositType _depositType = DepositType.none;
 
   String get tenantId => AppConfig.tenant.tenantId;
 
   @override
   void initState() {
     super.initState();
-
     _initializeFields();
     _loadCars();
   }
@@ -154,115 +83,40 @@ class _AdminEditPricingProfileScreenState
     final profile = widget.profile;
 
     _nameController.text = profile.name;
+    _pricingGroupController.text = profile.pricingGroupId;
+    _isActive = profile.isActive;
 
-    _hourlyController.text =
-        _formatNumber(profile.hourlyRate);
-
-    _dailyController.text =
-        _formatNumber(profile.dailyRate);
-
-    _weekendController.text =
-        _formatNumber(profile.weekendRate);
-
-    _weeklyController.text =
-        _formatNumber(profile.weeklyRate);
-
-    _monthlyController.text =
-        _formatNumber(profile.monthlyRate);
-
-    _includedKmController.text =
-        profile.includedKmPerDay.toString();
-
-    _perKmController.text =
-        _formatNumber(profile.perKmRate);
-
-    _extraKmController.text =
-        _formatNumber(profile.extraKmRate);
-
-    _unlimitedSurchargeController.text =
-        _formatNumber(
-      profile.unlimitedKmSurcharge,
-    );
-
-    _graceController.text =
-        profile.gracePeriodMinutes.toString();
-
-    _extraHourController.text =
-        _formatNumber(profile.extraHourRate);
-
-    _extraDayController.text =
-        _formatNumber(profile.extraDayRate);
-
-    _lateReturnController.text =
-        _formatNumber(profile.lateReturnRate);
-
-    _depositController.text =
-        _formatNumber(profile.securityDeposit);
-
-    _kmOptionsController.text =
-        profile.kmOptions.join(', ');
-
-    _pricingVersion = profile.pricingVersion;
-
-    final hourlyPricing = profile.hourlyPricing;
-    final dailyPricing = profile.dailyPricing;
-    final weekendPricing = profile.weekendPricing;
-
-    _hourlyEnabled = hourlyPricing.enabled;
-    _hourlyMinHoursController.text =
-        hourlyPricing.minimumBillingHours.toString();
-    _hourlyRequireTime = hourlyPricing.requireTimeSelection;
-
-    _dailyEnabled = dailyPricing.enabled;
-    _dailyMinDaysController.text =
-        dailyPricing.minimumBillingDays.toString();
-    _dailyRequireTime = dailyPricing.requireTimeSelection;
-
-    _weekendEnabled = weekendPricing.enabled;
-    _weekendMinDaysController.text =
-        weekendPricing.minimumWeekendDays.toString();
-    _weekendMaxDaysController.text =
-        weekendPricing.maximumWeekendDays.toString();
-    _weekendRequireTime = weekendPricing.requireTimeSelection;
-
-    final deposit = profile.depositConfig;
-    _depositRequired = deposit.required;
-    _depositTypes.addAll(deposit.allowedTypes);
+    final deposit = profile.securityDeposit;
+    _depositType = deposit.type;
+    _depositAmountController.text = _formatNumber(deposit.amount);
+    _paymentMethodController.text = deposit.paymentMethod;
+    _assetDescriptionController.text = deposit.assetDescription;
     _minimumAssetValueController.text =
         _formatNumber(deposit.minimumAssetValue);
 
-    if (profile.specialPricingRules.isNotEmpty) {
-      final rule = profile.specialPricingRules.first;
-      _specialEnabled = rule.enabled;
-      _specialRuleNameController.text = rule.name;
-      _specialStartDate = rule.startDate;
-      _specialEndDate = rule.endDate;
-      _specialHourlyEnabled = rule.hourlyEnabled;
-      _specialDailyEnabled = rule.dailyEnabled;
-      _specialWeekendEnabled = rule.weekendEnabled;
-      _specialHourlyController.text = _formatNumber(rule.hourlyRate);
-      _specialDailyController.text = _formatNumber(rule.dailyRate);
-      _specialWeekendController.text = _formatNumber(rule.weekendRate);
-      _specialExtraKmController.text = _formatNumber(rule.extraKmRate);
-      _specialMinHoursController.text =
-          rule.minimumBillingHours.toString();
+    final byId = <String, _EditPackageDraft>{};
+
+    for (final package in profile.hourlyPackages) {
+      final draft = byId.putIfAbsent(
+        package.id,
+        () => _EditPackageDraft.fromPackage(package),
+      );
+      draft.hourlyController.text = _formatNumber(package.hourlyRate);
     }
 
-    _kmPricingMode =
-        profile.kmPricingMode;
+    for (final package in profile.dailyPackages) {
+      final draft = byId.putIfAbsent(
+        package.id,
+        () => _EditPackageDraft.fromPackage(package),
+      );
+      draft.dailyController.text = _formatNumber(package.dailyRate);
+    }
 
-    _unlimitedEnabled =
-        profile.unlimitedKmEnabled;
+    _packages.addAll(byId.values);
 
-    _isActive =
-        profile.isActive;
-
-    for (final package
-        in profile.kmPackages) {
-      _packages.add(
-        _EditPackageDraft.fromPackage(
-          package,
-        ),
+    for (final rate in profile.specialRates) {
+      _specialRates.add(
+        _EditSpecialRateDraft.fromSpecialRate(rate),
       );
     }
   }
@@ -276,27 +130,14 @@ class _AdminEditPricingProfileScreenState
       if (!mounted) return;
 
       setState(() {
-        _cars = cars
-            .where((car) => car.isActive)
-            .toList();
-
-        for (final car in _cars) {
-          if (car.id ==
-              widget.profile.vehicleId) {
-            _selectedCar = car;
-            break;
-          }
-        }
-
+        _cars = cars.where((car) => car.isActive).toList();
+        _selectedCar = _findCarById(widget.profile.vehicleId);
         _isLoadingCars = false;
       });
     } catch (_) {
       if (!mounted) return;
 
-      setState(() {
-        _isLoadingCars = false;
-      });
-
+      setState(() => _isLoadingCars = false);
       _showSnackBar(
         'Unable to load vehicles.',
         isError: true,
@@ -304,38 +145,28 @@ class _AdminEditPricingProfileScreenState
     }
   }
 
+  Car? _findCarById(String id) {
+    if (id.trim().isEmpty) return null;
+    for (final car in _cars) {
+      if (car.id == id) return car;
+    }
+    return null;
+  }
+
   @override
   void dispose() {
     _nameController.dispose();
-    _hourlyController.dispose();
-    _dailyController.dispose();
-    _weekendController.dispose();
-    _weeklyController.dispose();
-    _monthlyController.dispose();
-    _includedKmController.dispose();
-    _perKmController.dispose();
-    _extraKmController.dispose();
-    _unlimitedSurchargeController.dispose();
-    _graceController.dispose();
-    _extraHourController.dispose();
-    _extraDayController.dispose();
-    _lateReturnController.dispose();
-    _depositController.dispose();
-    _kmOptionsController.dispose();
-    _hourlyMinHoursController.dispose();
-    _dailyMinDaysController.dispose();
-    _weekendMinDaysController.dispose();
-    _weekendMaxDaysController.dispose();
-    _specialRuleNameController.dispose();
-    _specialHourlyController.dispose();
-    _specialDailyController.dispose();
-    _specialWeekendController.dispose();
-    _specialExtraKmController.dispose();
-    _specialMinHoursController.dispose();
+    _pricingGroupController.dispose();
+    _depositAmountController.dispose();
+    _paymentMethodController.dispose();
+    _assetDescriptionController.dispose();
     _minimumAssetValueController.dispose();
 
     for (final package in _packages) {
       package.dispose();
+    }
+    for (final rate in _specialRates) {
+      rate.dispose();
     }
 
     super.dispose();
@@ -343,68 +174,38 @@ class _AdminEditPricingProfileScreenState
 
   void _addPackage() {
     setState(() {
-      _packages.add(
-        _EditPackageDraft(),
-      );
+      _packages.add(_EditPackageDraft());
     });
   }
 
   void _removePackage(int index) {
-    final package = _packages[index];
-
-    setState(() {
-      _packages.removeAt(index);
-    });
-
+    final package = _packages.removeAt(index);
     package.dispose();
+    setState(() {});
+  }
+
+  void _addSpecialRate() {
+    final now = DateTime.now();
+    setState(() {
+      _specialRates.add(
+        _EditSpecialRateDraft(
+          startDate: DateTime(now.year, now.month, now.day),
+          endDate: DateTime(now.year, now.month, now.day),
+        ),
+      );
+    });
+  }
+
+  void _removeSpecialRate(int index) {
+    final rate = _specialRates.removeAt(index);
+    rate.dispose();
+    setState(() {});
   }
 
   Future<void> _save() async {
-    if (!_formKey.currentState!.validate()) {
-      return;
-    }
+    if (!_formKey.currentState!.validate()) return;
 
-    if (_specialEnabled &&
-        (_specialStartDate == null || _specialEndDate == null)) {
-      _showSnackBar(
-        'Select both special pricing start and end dates.',
-        isError: true,
-      );
-      return;
-    }
-
-    if (_specialEnabled &&
-        _specialStartDate != null &&
-        _specialEndDate != null &&
-        _specialEndDate!.isBefore(_specialStartDate!)) {
-      _showSnackBar(
-        'Special pricing end date cannot be before start date.',
-        isError: true,
-      );
-      return;
-    }
-
-    if (_weekendEnabled &&
-        _positiveInt(_weekendMaxDaysController, fallback: 2) <
-            _positiveInt(_weekendMinDaysController, fallback: 2)) {
-      _showSnackBar(
-        'Weekend maximum days cannot be less than minimum days.',
-        isError: true,
-      );
-      return;
-    }
-
-    if (_selectedCar == null) {
-      _showSnackBar(
-        'Please select a vehicle.',
-        isError: true,
-      );
-      return;
-    }
-
-    if (_kmPricingMode ==
-            KmPricingMode.package &&
-        _packages.isEmpty) {
+    if (_packages.isEmpty) {
       _showSnackBar(
         'Add at least one KM package.',
         isError: true,
@@ -412,194 +213,202 @@ class _AdminEditPricingProfileScreenState
       return;
     }
 
-    setState(() {
-      _isSaving = true;
-    });
+    for (var i = 0; i < _packages.length; i++) {
+      final package = _packages[i];
+      final hasHourly = _number(package.hourlyController) > 0;
+      final hasDaily = _number(package.dailyController) > 0;
+
+      if (!hasHourly && !hasDaily) {
+        _showSnackBar(
+          'Package ${i + 1} needs an hourly or daily price.',
+          isError: true,
+        );
+        return;
+      }
+
+      if (!package.unlimited &&
+          _integer(package.kmController) <= 0) {
+        _showSnackBar(
+          'Enter included KM for package ${i + 1}, or enable Unlimited KM.',
+          isError: true,
+        );
+        return;
+      }
+    }
+
+    for (var i = 0; i < _specialRates.length; i++) {
+      final rate = _specialRates[i];
+      if (rate.startDate == null || rate.endDate == null) {
+        _showSnackBar(
+          'Select both dates for special rate ${i + 1}.',
+          isError: true,
+        );
+        return;
+      }
+      if (rate.endDate!.isBefore(rate.startDate!)) {
+        _showSnackBar(
+          'Special rate ${i + 1} end date cannot be before start date.',
+          isError: true,
+        );
+        return;
+      }
+    }
+
+    setState(() => _isSaving = true);
 
     try {
-      final updatedProfile =
-          PricingProfile(
+      final packageModels = _packages.map(_buildPackage).toList();
+
+      final hourlyPackages = packageModels
+          .where((package) => package.hourlyRate > 0)
+          .toList(growable: false);
+      final dailyPackages = packageModels
+          .where((package) => package.dailyRate > 0)
+          .toList(growable: false);
+
+      if (hourlyPackages.isEmpty && dailyPackages.isEmpty) {
+        throw Exception('At least one hourly or daily package is required.');
+      }
+
+      final updatedProfile = PricingProfile(
         id: widget.profile.id,
         tenantId: tenantId,
-        vehicleId: _selectedCar!.id,
+        vehicleId: _selectedCar?.id ?? '',
+        pricingGroupId: _pricingGroupController.text.trim(),
         name: _nameController.text.trim(),
         currency: widget.profile.currency,
-
-        hourlyRate:
-            _number(_hourlyController),
-        dailyRate:
-            _number(_dailyController),
-        weekendRate:
-            _number(_weekendController),
-        weeklyRate:
-            _number(_weeklyController),
-        monthlyRate:
-            _number(_monthlyController),
-
-        kmPricingMode:
-            _kmPricingMode,
-        includedKmPerDay:
-            _integer(_includedKmController),
-        kmOptions:
-            _parseKmOptions(),
-        perKmRate:
-            _number(_perKmController),
-        extraKmRate:
-            _number(_extraKmController),
-
-        kmPackages:
-            _packages.map(
-          _buildPackage,
-        ).toList(),
-
-        unlimitedKmEnabled:
-            _unlimitedEnabled,
-        unlimitedKmSurcharge:
-            _number(
-          _unlimitedSurchargeController,
-        ),
-
-        gracePeriodMinutes:
-            _integer(_graceController),
-        extraHourRate:
-            _number(_extraHourController),
-        extraDayRate:
-            _number(_extraDayController),
-        lateReturnRate:
-            _number(_lateReturnController),
-
-        securityDeposit:
-            _number(_depositController),
-
-        hourlyPricing: RentalTypePricing(
-          enabled: _hourlyEnabled,
-          minimumBillingHours:
-              _positiveInt(_hourlyMinHoursController, fallback: 1),
-          requireTimeSelection: _hourlyRequireTime,
-          rate: _number(_hourlyController),
-        ),
-        dailyPricing: RentalTypePricing(
-          enabled: _dailyEnabled,
-          minimumBillingDays:
-              _positiveInt(_dailyMinDaysController, fallback: 1),
-          requireTimeSelection: _dailyRequireTime,
-          rate: _number(_dailyController),
-        ),
-        weekendPricing: RentalTypePricing(
-          enabled: _weekendEnabled,
-          minimumWeekendDays:
-              _positiveInt(_weekendMinDaysController, fallback: 2),
-          maximumWeekendDays:
-              _positiveInt(_weekendMaxDaysController, fallback: 2),
-          allowedWeekdays: const [6, 7],
-          requireTimeSelection: _weekendRequireTime,
-          rate: _number(_weekendController),
-        ),
-        specialPricingRules: _buildSpecialRules(),
-        pricingVersion: _pricingVersion + 1,
-        depositConfig: DepositConfig(
-          required: _depositRequired,
-          defaultAmount: _number(_depositController),
-          allowedTypes: _depositTypes.toList(),
-          minimumAssetValue:
-              _number(_minimumAssetValueController),
-        ),
-
+        hourlyPackages: hourlyPackages,
+        dailyPackages: dailyPackages,
+        specialRates: _buildSpecialRates(),
+        securityDeposit: _buildDepositConfig(),
         isActive: _isActive,
       );
 
-      await PricingProfileService.instance
-          .updatePricingProfile(
+      await PricingProfileService.instance.updatePricingProfile(
         tenantId: tenantId,
-        pricingProfileId:
-            widget.profile.id,
+        pricingProfileId: widget.profile.id,
         profile: updatedProfile,
       );
 
       if (!mounted) return;
 
-      _showSnackBar(
-        'Pricing profile updated successfully.',
-      );
-
-      Navigator.pop(
-        context,
-        true,
-      );
+      _showSnackBar('Pricing profile updated successfully.');
+      Navigator.pop(context, true);
     } catch (e) {
       if (!mounted) return;
 
       _showSnackBar(
-        e.toString().replaceFirst(
-              'Exception: ',
-              '',
-            ),
+        e.toString().replaceFirst('Exception: ', ''),
         isError: true,
       );
     } finally {
-      if (mounted) {
-        setState(() {
-          _isSaving = false;
-        });
+      if (mounted) setState(() => _isSaving = false);
+    }
+  }
+
+  KmPricingPackage _buildPackage(_EditPackageDraft draft) {
+    final id = draft.idController.text.trim().isEmpty
+        ? 'package_${DateTime.now().microsecondsSinceEpoch}'
+        : draft.idController.text.trim();
+
+    return KmPricingPackage(
+      id: id,
+      name: draft.nameController.text.trim().isEmpty
+          ? id
+          : draft.nameController.text.trim(),
+      includedKm: draft.unlimited
+          ? null
+          : _integer(draft.kmController),
+      unlimitedKm: draft.unlimited,
+      isActive: draft.isActive,
+      hourlyRate: _number(draft.hourlyController),
+      dailyRate: _number(draft.dailyController),
+      extraKmRate: _number(draft.extraKmController),
+    );
+  }
+
+  List<SpecialRate> _buildSpecialRates() {
+    final result = <SpecialRate>[];
+
+    for (final draft in _specialRates) {
+      final start = draft.startDate;
+      final end = draft.endDate;
+      if (start == null || end == null) continue;
+
+      final hourlyPrices = <String, double>{};
+      final dailyPrices = <String, double>{};
+
+      for (final package in _packages) {
+        final id = package.idController.text.trim();
+        if (id.isEmpty) continue;
+
+        final hourly = _number(draft.hourlyControllers[id]);
+        final daily = _number(draft.dailyControllers[id]);
+
+        if (hourly > 0) hourlyPrices[id] = hourly;
+        if (daily > 0) dailyPrices[id] = daily;
       }
+
+      final extraKmText = draft.extraKmController.text.trim();
+      final extraKm = extraKmText.isEmpty
+          ? null
+          : double.tryParse(extraKmText);
+
+      result.add(
+        SpecialRate(
+          id: draft.id.isEmpty
+              ? 'special_${DateTime.now().microsecondsSinceEpoch}'
+              : draft.id,
+          name: draft.nameController.text.trim().isEmpty
+              ? 'Special Pricing'
+              : draft.nameController.text.trim(),
+          startDate: DateTime(start.year, start.month, start.day),
+          endDate: DateTime(end.year, end.month, end.day),
+          isActive: draft.isActive,
+          hourlyPrices: hourlyPrices,
+          dailyPrices: dailyPrices,
+          extraKmRate: extraKm != null && extraKm >= 0 ? extraKm : null,
+        ),
+      );
     }
+
+    return result;
   }
 
-  List<SpecialPricingRule> _buildSpecialRules() {
-    if (!_specialEnabled ||
-        _specialStartDate == null ||
-        _specialEndDate == null) {
-      return const [];
+  DepositConfig _buildDepositConfig() {
+    final type = _depositType;
+
+    if (type == DepositType.none) {
+      return const DepositConfig();
     }
 
-    final start = DateTime(
-      _specialStartDate!.year,
-      _specialStartDate!.month,
-      _specialStartDate!.day,
-    );
-    final end = DateTime(
-      _specialEndDate!.year,
-      _specialEndDate!.month,
-      _specialEndDate!.day,
-    );
+    final isMoney = type.isMonetary;
 
-    return [
-      SpecialPricingRule(
-        id: widget.profile.specialPricingRules.isNotEmpty
-            ? widget.profile.specialPricingRules.first.id
-            : 'special_${DateTime.now().microsecondsSinceEpoch}',
-        name: _specialRuleNameController.text.trim().isEmpty
-            ? 'Special Pricing'
-            : _specialRuleNameController.text.trim(),
-        startDate: start,
-        endDate: end,
-        enabled: true,
-        hourlyEnabled: _specialHourlyEnabled,
-        dailyEnabled: _specialDailyEnabled,
-        weekendEnabled: _specialWeekendEnabled,
-        hourlyRate: _number(_specialHourlyController),
-        dailyRate: _number(_specialDailyController),
-        weekendRate: _number(_specialWeekendController),
-        extraKmRate: _number(_specialExtraKmController),
-        minimumBillingHours:
-            _positiveInt(_specialMinHoursController, fallback: 1),
-      ),
-    ];
+    return DepositConfig(
+      type: type,
+      amount: isMoney ? _number(_depositAmountController) : 0,
+      paymentMethod: isMoney
+          ? _paymentMethodController.text.trim()
+          : '',
+      assetDescription: type == DepositType.vehicleAsset ||
+              type == DepositType.otherAsset
+          ? _assetDescriptionController.text.trim()
+          : '',
+      minimumAssetValue: type == DepositType.vehicleAsset ||
+              type == DepositType.otherAsset
+          ? _number(_minimumAssetValueController)
+          : 0,
+    );
   }
 
-  int _positiveInt(
-    TextEditingController controller, {
-    required int fallback,
-  }) {
-    final value = int.tryParse(controller.text.trim());
-    return value != null && value > 0 ? value : fallback;
-  }
-
-  Future<void> _pickSpecialDate({required bool start}) async {
+  Future<void> _pickSpecialDate(
+    _EditSpecialRateDraft rate, {
+    required bool start,
+  }) async {
     final now = DateTime.now();
     final initial = start
-        ? (_specialStartDate ?? now)
-        : (_specialEndDate ?? _specialStartDate ?? now);
+        ? (rate.startDate ?? now)
+        : (rate.endDate ?? rate.startDate ?? now);
 
     final picked = await showDatePicker(
       context: context,
@@ -623,21 +432,19 @@ class _AdminEditPricingProfileScreenState
 
     setState(() {
       if (start) {
-        _specialStartDate = picked;
-        if (_specialEndDate != null &&
-            _specialEndDate!.isBefore(picked)) {
-          _specialEndDate = picked;
+        rate.startDate = picked;
+        if (rate.endDate != null && rate.endDate!.isBefore(picked)) {
+          rate.endDate = picked;
         }
       } else {
-        if (_specialStartDate != null &&
-            picked.isBefore(_specialStartDate!)) {
+        if (rate.startDate != null && picked.isBefore(rate.startDate!)) {
           _showSnackBar(
-            'Special pricing end date cannot be before start date.',
+            'End date cannot be before start date.',
             isError: true,
           );
           return;
         }
-        _specialEndDate = picked;
+        rate.endDate = picked;
       }
     });
   }
@@ -649,102 +456,26 @@ class _AdminEditPricingProfileScreenState
     return '$d/$m/${date.year}';
   }
 
-  KmPricingPackage _buildPackage(
-    _EditPackageDraft draft,
-  ) {
-    return KmPricingPackage(
-      id: draft.idController.text
-              .trim()
-              .isEmpty
-          ? 'package_${DateTime.now().microsecondsSinceEpoch}'
-          : draft.idController.text.trim(),
-      name:
-          draft.nameController.text.trim(),
-      includedKm:
-          draft.unlimited
-              ? null
-              : int.tryParse(
-                  draft.kmController.text.trim(),
-                ),
-      unlimitedKm:
-          draft.unlimited,
-      hourlyRate:
-          _number(
-        draft.hourlyController,
-      ),
-      dailyRate:
-          _number(
-        draft.dailyController,
-      ),
-      weekendRate:
-          _number(
-        draft.weekendController,
-      ),
-      weeklyRate:
-          _number(
-        draft.weeklyController,
-      ),
-      monthlyRate:
-          _number(
-        draft.monthlyController,
-      ),
-      extraKmRate:
-          _number(
-        draft.extraKmController,
-      ),
-      isActive: draft.isActive,
-      supportedRentalTypes: draft.supportedRentalTypes.toList(),
-      minimumBillingHours:
-          _positiveInt(draft.minimumHoursController, fallback: 1),
-      minimumBillingDays:
-          _positiveInt(draft.minimumDaysController, fallback: 1),
-      minimumWeekendDays:
-          _positiveInt(draft.minimumWeekendDaysController, fallback: 2),
-      maximumWeekendDays:
-          _positiveInt(draft.maximumWeekendDaysController, fallback: 2),
-    );
+  double _number(TextEditingController? controller) {
+    if (controller == null) return 0;
+    final value = double.tryParse(controller.text.trim()) ?? 0;
+    return value.isFinite && value >= 0 ? value : 0;
   }
 
-  List<int> _parseKmOptions() {
-    return _kmOptionsController.text
-        .split(',')
-        .map(
-          (value) => int.tryParse(
-            value.trim(),
-          ),
-        )
-        .whereType<int>()
-        .where((value) => value > 0)
-        .toSet()
-        .toList();
+  int _integer(TextEditingController controller) {
+    final value = int.tryParse(controller.text.trim()) ?? 0;
+    return value < 0 ? 0 : value;
   }
 
-  double _number(
-    TextEditingController controller,
-  ) {
-    return double.tryParse(
-          controller.text.trim(),
-        ) ??
-        0;
-  }
-
-  int _integer(
-    TextEditingController controller,
-  ) {
-    return int.tryParse(
-          controller.text.trim(),
-        ) ??
-        0;
-  }
-
-  String _formatNumber(
-    double value,
-  ) {
-    if (value == value.roundToDouble()) {
-      return value.toInt().toString();
-    }
-
+  String _formatNumber(double value) {
+    if (!value.isFinite || value == 0) return '0';
+    if (value == value.roundToDouble()) return value.toInt().toString();
     return value.toString();
+  }
+
+  String? _required(String? value) {
+    if (value == null || value.trim().isEmpty) return 'Required';
+    return null;
   }
 
   void _showSnackBar(
@@ -762,18 +493,11 @@ class _AdminEditPricingProfileScreenState
               fontWeight: FontWeight.w600,
             ),
           ),
-          backgroundColor:
-              isError
-                  ? Colors.red.shade700
-                  : primary,
-          behavior:
-              SnackBarBehavior.floating,
-          margin:
-              const EdgeInsets.all(16),
-          shape:
-              RoundedRectangleBorder(
-            borderRadius:
-                BorderRadius.circular(12),
+          backgroundColor: isError ? Colors.red.shade700 : primary,
+          behavior: SnackBarBehavior.floating,
+          margin: const EdgeInsets.all(16),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
           ),
         ),
       );
@@ -785,8 +509,7 @@ class _AdminEditPricingProfileScreenState
       backgroundColor: background,
       appBar: AppBar(
         backgroundColor: background,
-        surfaceTintColor:
-            Colors.transparent,
+        surfaceTintColor: Colors.transparent,
         elevation: 0,
         title: const Text(
           'Edit Pricing Profile',
@@ -801,267 +524,106 @@ class _AdminEditPricingProfileScreenState
       body: Form(
         key: _formKey,
         child: ListView(
-          padding:
-              const EdgeInsets.fromLTRB(
-            20,
-            6,
-            20,
-            40,
-          ),
+          padding: const EdgeInsets.fromLTRB(20, 6, 20, 40),
           children: [
-            _profileIdentity(),
-            const SizedBox(height: 16),
-            _section(
-              title: 'Vehicle',
-              subtitle:
-                  'Change the vehicle attached to this pricing profile.',
-              icon:
-                  Icons.directions_car_outlined,
-              child:
-                  _vehicleDropdown(),
-            ),
+            _identityCard(),
             const SizedBox(height: 16),
             _section(
               title: 'Profile Details',
-              subtitle:
-                  'Update the profile information.',
+              subtitle: 'Update the shared pricing profile information.',
               icon: Icons.badge_outlined,
-              child: Column(
-                children: [
-                  _field(
-                    controller:
-                        _nameController,
-                    label:
-                        'Pricing profile name',
-                    hint:
-                        'Pricing profile',
-                    validator:
-                        _required,
-                  ),
-                  const SizedBox(
-                    height: 14,
-                  ),
-                  TextFormField(
-                    initialValue:
-                        widget.profile.currency,
-                    readOnly: true,
-                    decoration:
-                        _decoration(
-                      'Currency',
-                      widget.profile.currency,
-                    ),
-                    style:
-                        const TextStyle(
-                      fontFamily:
-                          'Manrope',
-                      fontWeight:
-                          FontWeight.w700,
-                      color: heading,
-                    ),
-                  ),
-                ],
-              ),
+              child: _profileDetails(),
             ),
             const SizedBox(height: 16),
             _section(
-              title: 'Base Rental Rates',
+              title: 'Vehicle / Pricing Group',
               subtitle:
-                  'Update the default rental rates.',
-              icon:
-                  Icons.payments_outlined,
-              child: _rateGrid(),
+                  'A pricing group can be reused by multiple cars. Vehicle link is optional.',
+              icon: Icons.directions_car_outlined,
+              child: _vehicleAndGroup(),
             ),
             const SizedBox(height: 16),
             _section(
-              title: 'KM Pricing',
+              title: 'Rental Packages',
               subtitle:
-                  'Update distance pricing rules and packages.',
-              icon:
-                  Icons.route_outlined,
-              child: Column(
-                crossAxisAlignment:
-                    CrossAxisAlignment.start,
-                children: [
-                  _modeSelector(),
-                  const SizedBox(
-                    height: 16,
-                  ),
-                  if (_kmPricingMode ==
-                      KmPricingMode.included)
-                    _includedKmFields(),
-                  if (_kmPricingMode ==
-                      KmPricingMode.perKm)
-                    _perKmFields(),
-                  if (_kmPricingMode ==
-                      KmPricingMode.slabs)
-                    _slabFields(),
-                  if (_kmPricingMode ==
-                      KmPricingMode.unlimited)
-                    _unlimitedFields(),
-                  if (_kmPricingMode ==
-                      KmPricingMode.package)
-                    _packageFields(),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-            _section(
-              title: 'Extra Charges',
-              subtitle:
-                  'Update extension and late-return charges.',
-              icon:
-                  Icons.schedule_outlined,
-              child: _extraCharges(),
-            ),
-            const SizedBox(height: 16),
-            _section(
-              title: 'Security Deposit',
-              subtitle:
-                  'Update the security deposit.',
-              icon: Icons
-                  .account_balance_wallet_outlined,
-              child: _field(
-                controller:
-                    _depositController,
-                label:
-                    'Security deposit',
-                hint: '5000',
-                keyboardType:
-                    TextInputType.number,
-              ),
-            ),
-            const SizedBox(height: 16),
-            _section(
-              title: 'Rental Type Rules',
-              subtitle:
-                  'Control which rental modes are available and their minimum billing rules.',
-              icon: Icons.timelapse_outlined,
-              child: _rentalTypeRules(),
+                  'Configure only hourly and daily packages. Each package can have its own KM allowance and extra-KM rate.',
+              icon: Icons.route_outlined,
+              child: _packagesSection(),
             ),
             const SizedBox(height: 16),
             _section(
               title: 'Special Date Pricing',
               subtitle:
-                  'Override normal rates for selected dates such as holidays or events.',
+                  'Use date ranges for weekends, holidays, festivals or high-season periods.',
               icon: Icons.event_available_outlined,
-              child: _specialPricingSection(),
+              child: _specialRatesSection(),
             ),
             const SizedBox(height: 16),
             _section(
-              title: 'Security Deposit Configuration',
+              title: 'Security Deposit',
               subtitle:
-                  'Configure deposit requirement, accepted deposit methods and asset rules.',
+                  'Deposit is separate from the trip total. Monetary deposits affect amount payable; asset deposits do not.',
               icon: Icons.account_balance_wallet_outlined,
-              child: _depositConfiguration(),
-            ),
-            const SizedBox(height: 16),
-            _section(
-              title: 'Pricing Version',
-              subtitle:
-                  'Every pricing update increments the profile version.',
-              icon: Icons.history_outlined,
-              child: _versionInfo(),
+              child: _depositSection(),
             ),
             const SizedBox(height: 16),
             _section(
               title: 'Status',
-              subtitle:
-                  'Inactive profiles cannot be used for new bookings.',
-              icon:
-                  Icons.toggle_on_outlined,
-              child:
-                  SwitchListTile.adaptive(
-                contentPadding:
-                    EdgeInsets.zero,
-                activeColor:
-                    primary,
-                title:
-                    const Text(
+              subtitle: 'Inactive profiles cannot be used for new bookings.',
+              icon: Icons.toggle_on_outlined,
+              child: SwitchListTile.adaptive(
+                contentPadding: EdgeInsets.zero,
+                activeColor: primary,
+                title: const Text(
                   'Active pricing profile',
-                  style:
-                      TextStyle(
-                    fontFamily:
-                        'Manrope',
+                  style: TextStyle(
+                    fontFamily: 'Manrope',
                     fontSize: 14,
-                    fontWeight:
-                        FontWeight.w700,
-                    color:
-                        heading,
+                    fontWeight: FontWeight.w700,
+                    color: heading,
                   ),
                 ),
-                subtitle:
-                    const Text(
+                subtitle: const Text(
                   'Enable this profile for bookings.',
-                  style:
-                      TextStyle(
-                    fontFamily:
-                        'Manrope',
+                  style: TextStyle(
+                    fontFamily: 'Manrope',
                     fontSize: 12,
-                    color:
-                        body,
+                    color: body,
                   ),
                 ),
-                value:
-                    _isActive,
-                onChanged:
-                    (value) {
-                  setState(() {
-                    _isActive =
-                        value;
-                  });
-                },
+                value: _isActive,
+                onChanged: (value) => setState(() => _isActive = value),
               ),
             ),
-            const SizedBox(
-              height: 24,
-            ),
+            const SizedBox(height: 24),
             SizedBox(
               height: 52,
-              child:
-                  ElevatedButton(
-                onPressed:
-                    _isSaving
-                        ? null
-                        : _save,
-                style:
-                    ElevatedButton.styleFrom(
-                  backgroundColor:
-                      primary,
-                  foregroundColor:
-                      Colors.white,
-                  disabledBackgroundColor:
-                      primary.withValues(
-                    alpha: 0.5,
-                  ),
+              child: ElevatedButton(
+                onPressed: _isSaving ? null : _save,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: primary,
+                  foregroundColor: Colors.white,
+                  disabledBackgroundColor: primary.withValues(alpha: 0.5),
                   elevation: 0,
-                  shape:
-                      RoundedRectangleBorder(
-                    borderRadius:
-                        BorderRadius.circular(
-                      15,
-                    ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(15),
                   ),
                 ),
                 child: _isSaving
                     ? const SizedBox(
                         width: 21,
                         height: 21,
-                        child:
-                            CircularProgressIndicator(
+                        child: CircularProgressIndicator(
                           strokeWidth: 2.2,
-                          color:
-                              Colors.white,
+                          color: Colors.white,
                         ),
                       )
                     : const Text(
                         'Save Changes',
-                        style:
-                            TextStyle(
-                          fontFamily:
-                              'Manrope',
+                        style: TextStyle(
+                          fontFamily: 'Manrope',
                           fontSize: 14,
-                          fontWeight:
-                              FontWeight.w800,
+                          fontWeight: FontWeight.w800,
                         ),
                       ),
               ),
@@ -1072,64 +634,39 @@ class _AdminEditPricingProfileScreenState
     );
   }
 
-  Widget _profileIdentity() {
+  Widget _identityCard() {
     return Container(
-      padding:
-          const EdgeInsets.all(17),
-      decoration:
-          BoxDecoration(
+      padding: const EdgeInsets.all(17),
+      decoration: BoxDecoration(
         color: softAccent,
-        borderRadius:
-            BorderRadius.circular(
-          18,
-        ),
-        border: Border.all(
-          color:
-              accent.withValues(
-            alpha: 0.18,
-          ),
-        ),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: accent.withValues(alpha: 0.18)),
       ),
       child: Row(
         children: [
-          const Icon(
-            Icons.price_change_outlined,
-            color: primary,
-            size: 24,
-          ),
-          const SizedBox(
-            width: 12,
-          ),
+          const Icon(Icons.price_change_outlined, color: primary, size: 24),
+          const SizedBox(width: 12),
           Expanded(
             child: Column(
-              crossAxisAlignment:
-                  CrossAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
                   'Pricing Profile ID',
                   style: TextStyle(
-                    fontFamily:
-                        'Manrope',
+                    fontFamily: 'Manrope',
                     fontSize: 10.5,
-                    fontWeight:
-                        FontWeight.w700,
+                    fontWeight: FontWeight.w700,
                     color: body,
                   ),
                 ),
-                const SizedBox(
-                  height: 3,
-                ),
+                const SizedBox(height: 3),
                 Text(
                   widget.profile.id,
-                  style:
-                      const TextStyle(
-                    fontFamily:
-                        'Manrope',
+                  style: const TextStyle(
+                    fontFamily: 'Manrope',
                     fontSize: 13,
-                    fontWeight:
-                        FontWeight.w800,
-                    color:
-                        heading,
+                    fontWeight: FontWeight.w800,
+                    color: heading,
                   ),
                 ),
               ],
@@ -1140,424 +677,134 @@ class _AdminEditPricingProfileScreenState
     );
   }
 
-  Widget _vehicleDropdown() {
-    if (_isLoadingCars) {
-      return const LinearProgressIndicator(
-        color: primary,
-        backgroundColor:
-            softAccent,
-      );
-    }
-
-    return DropdownButtonFormField<Car>(
-      initialValue:
-          _selectedCar,
-      isExpanded: true,
-      decoration:
-          _decoration(
-        'Vehicle',
-        'Select vehicle',
-      ),
-      items:
-          _cars.map((car) {
-        return DropdownMenuItem<Car>(
-          value: car,
-          child: Text(
-            car.name,
-            style:
-                const TextStyle(
-              fontFamily:
-                  'Manrope',
-              fontSize: 13.5,
-              color:
-                  heading,
-            ),
+  Widget _profileDetails() {
+    return Column(
+      children: [
+        _field(
+          controller: _nameController,
+          label: 'Pricing profile name',
+          hint: 'Premium SUV',
+          validator: _required,
+        ),
+        const SizedBox(height: 12),
+        TextFormField(
+          initialValue: widget.profile.currency,
+          readOnly: true,
+          decoration: _decoration('Currency', widget.profile.currency),
+          style: const TextStyle(
+            fontFamily: 'Manrope',
+            fontWeight: FontWeight.w700,
+            color: heading,
           ),
-        );
-      }).toList(),
-      onChanged:
-          (car) {
-        setState(() {
-          _selectedCar =
-              car;
-        });
-      },
-      validator:
-          (value) {
-        if (value ==
-            null) {
-          return 'Select a vehicle';
-        }
-        return null;
-      },
-    );
-  }
-
-  Widget _rateGrid() {
-    return Column(
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child:
-                  _field(
-                controller:
-                    _hourlyController,
-                label:
-                    'Hourly',
-                hint:
-                    '399',
-                keyboardType:
-                    TextInputType
-                        .number,
-              ),
-            ),
-            const SizedBox(
-              width: 12,
-            ),
-            Expanded(
-              child:
-                  _field(
-                controller:
-                    _dailyController,
-                label:
-                    'Daily',
-                hint:
-                    '2499',
-                keyboardType:
-                    TextInputType
-                        .number,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(
-          height: 12,
-        ),
-        Row(
-          children: [
-            Expanded(
-              child:
-                  _field(
-                controller:
-                    _weekendController,
-                label:
-                    'Weekend',
-                hint:
-                    '2799',
-                keyboardType:
-                    TextInputType
-                        .number,
-              ),
-            ),
-            const SizedBox(
-              width: 12,
-            ),
-            Expanded(
-              child:
-                  _field(
-                controller:
-                    _weeklyController,
-                label:
-                    'Weekly',
-                hint:
-                    '13999',
-                keyboardType:
-                    TextInputType
-                        .number,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(
-          height: 12,
-        ),
-        _field(
-          controller:
-              _monthlyController,
-          label:
-              'Monthly',
-          hint:
-              '44999',
-          keyboardType:
-              TextInputType.number,
         ),
       ],
     );
   }
 
-  Widget _modeSelector() {
-    return DropdownButtonFormField<KmPricingMode>(
-      initialValue:
-          _kmPricingMode,
-      decoration:
-          _decoration(
-        'KM pricing mode',
-        'Select KM pricing',
-      ),
-      items:
-          KmPricingMode.values
-              .map(
-                (mode) {
-          return DropdownMenuItem(
-            value: mode,
-            child:
-                Text(
-              _modeLabel(
-                mode,
-              ),
-              style:
-                  const TextStyle(
-                fontFamily:
-                    'Manrope',
-                fontSize:
-                    13,
-                color:
-                    heading,
-              ),
+  Widget _vehicleAndGroup() {
+    return Column(
+      children: [
+        if (_isLoadingCars)
+          const LinearProgressIndicator(
+            color: primary,
+            backgroundColor: softAccent,
+          )
+        else
+          DropdownButtonFormField<Car?>(
+            initialValue: _selectedCar,
+            isExpanded: true,
+            decoration: _decoration(
+              'Vehicle link',
+              'Optional vehicle',
             ),
-          );
-        },
-              )
-              .toList(),
-      onChanged:
-          (value) {
-        if (value ==
-            null) {
-          return;
-        }
-
-        setState(() {
-          _kmPricingMode =
-              value;
-        });
-      },
-    );
-  }
-
-  Widget _includedKmFields() {
-    return Column(
-      children: [
+            items: [
+              const DropdownMenuItem<Car?>(
+                value: null,
+                child: Text(
+                  'No specific vehicle — shared group',
+                  style: TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 13.5,
+                    color: heading,
+                  ),
+                ),
+              ),
+              ..._cars.map(
+                (car) => DropdownMenuItem<Car?>(
+                  value: car,
+                  child: Text(
+                    car.name,
+                    style: const TextStyle(
+                      fontFamily: 'Manrope',
+                      fontSize: 13.5,
+                      color: heading,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+            onChanged: (car) => setState(() => _selectedCar = car),
+          ),
+        const SizedBox(height: 12),
         _field(
-          controller:
-              _includedKmController,
-          label:
-              'Included KM per day',
-          hint: '150',
-          keyboardType:
-              TextInputType.number,
-        ),
-        const SizedBox(
-          height: 12,
-        ),
-        _field(
-          controller:
-              _kmOptionsController,
-          label:
-              'KM options',
-          hint:
-              '150, 300, 500, 750, 1000',
-          helper:
-              'Separate values with commas.',
+          controller: _pricingGroupController,
+          label: 'Pricing group ID',
+          hint: 'premium_suv',
+          helper: 'Use the same group ID for cars that share these prices.',
         ),
       ],
     );
   }
 
-  Widget _perKmFields() {
+  Widget _packagesSection() {
     return Column(
-      children: [
-        _field(
-          controller:
-              _perKmController,
-          label:
-              'Per KM rate',
-          hint:
-              '18',
-          keyboardType:
-              TextInputType.number,
-        ),
-        const SizedBox(
-          height: 12,
-        ),
-        _field(
-          controller:
-              _extraKmController,
-          label:
-              'Extra KM rate',
-          hint:
-              '15',
-          keyboardType:
-              TextInputType.number,
-        ),
-      ],
-    );
-  }
-
-  Widget _slabFields() {
-    return Column(
-      children: [
-        _field(
-          controller:
-              _kmOptionsController,
-          label:
-              'KM slab options',
-          hint:
-              '150, 300, 500, 750, 1000',
-        ),
-        const SizedBox(
-          height: 12,
-        ),
-        _field(
-          controller:
-              _extraKmController,
-          label:
-              'Extra KM rate',
-          hint:
-              '15',
-          keyboardType:
-              TextInputType.number,
-        ),
-      ],
-    );
-  }
-
-  Widget _unlimitedFields() {
-    return _field(
-      controller:
-          _unlimitedSurchargeController,
-      label:
-          'Unlimited KM surcharge',
-      hint:
-          '1000',
-      keyboardType:
-          TextInputType.number,
-    );
-  }
-
-  Widget _packageFields() {
-    return Column(
-      crossAxisAlignment:
-          CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
           children: [
             const Expanded(
               child: Text(
                 'KM Packages',
-                style:
-                    TextStyle(
-                  fontFamily:
-                      'Manrope',
+                style: TextStyle(
+                  fontFamily: 'Manrope',
                   fontSize: 14,
-                  fontWeight:
-                      FontWeight.w800,
-                  color:
-                      heading,
+                  fontWeight: FontWeight.w800,
+                  color: heading,
                 ),
               ),
             ),
             TextButton.icon(
-              onPressed:
-                  _addPackage,
-              icon:
-                  const Icon(
-                Icons.add_rounded,
-                size: 18,
-              ),
-              label:
-                  const Text(
-                'Add',
-              ),
-              style:
-                  TextButton.styleFrom(
-                foregroundColor:
-                    primary,
-                textStyle:
-                    const TextStyle(
-                  fontFamily:
-                      'Manrope',
-                  fontWeight:
-                      FontWeight.w700,
+              onPressed: _addPackage,
+              icon: const Icon(Icons.add_rounded, size: 18),
+              label: const Text('Add Package'),
+              style: TextButton.styleFrom(
+                foregroundColor: primary,
+                textStyle: const TextStyle(
+                  fontFamily: 'Manrope',
+                  fontWeight: FontWeight.w700,
                 ),
               ),
             ),
           ],
         ),
         if (_packages.isEmpty)
-          Container(
-            width:
-                double.infinity,
-            padding:
-                const EdgeInsets.all(
-              16,
-            ),
-            decoration:
-                BoxDecoration(
-              color:
-                  background,
-              borderRadius:
-                  BorderRadius.circular(
-                14,
-              ),
-              border:
-                  Border.all(
-                color:
-                    border,
-              ),
-            ),
-            child:
-                const Text(
-              'No KM packages configured.',
-              style:
-                  TextStyle(
-                fontFamily:
-                    'Manrope',
-                fontSize:
-                    12,
-                color:
-                    body,
-              ),
-            ),
-          ),
+          _emptyBox('No KM packages configured.'),
         ...List.generate(
           _packages.length,
-          (index) =>
-              _packageCard(
-            index,
-            _packages[index],
-          ),
+          (index) => _packageCard(index, _packages[index]),
         ),
       ],
     );
   }
 
-  Widget _packageCard(
-    int index,
-    _EditPackageDraft package,
-  ) {
+  Widget _packageCard(int index, _EditPackageDraft package) {
     return Container(
-      margin:
-          const EdgeInsets.only(
-        top: 12,
-      ),
-      padding:
-          const EdgeInsets.all(
-        15,
-      ),
-      decoration:
-          BoxDecoration(
-        color:
-            background,
-        borderRadius:
-            BorderRadius.circular(
-          17,
-        ),
-        border:
-            Border.all(
-          color:
-              border,
-        ),
+      margin: const EdgeInsets.only(top: 12),
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(17),
+        border: Border.all(color: border),
       ),
       child: Column(
         children: [
@@ -1566,266 +813,110 @@ class _AdminEditPricingProfileScreenState
               Container(
                 width: 34,
                 height: 34,
-                decoration:
-                    BoxDecoration(
-                  color:
-                      softAccent,
-                  borderRadius:
-                      BorderRadius.circular(
-                    10,
-                  ),
+                decoration: BoxDecoration(
+                  color: softAccent,
+                  borderRadius: BorderRadius.circular(10),
                 ),
-                child:
-                    const Icon(
-                  Icons
-                      .inventory_2_outlined,
+                child: const Icon(
+                  Icons.inventory_2_outlined,
                   size: 18,
-                  color:
-                      primary,
+                  color: primary,
                 ),
               ),
-              const SizedBox(
-                width: 10,
-              ),
+              const SizedBox(width: 10),
               Expanded(
-                child:
-                    Text(
+                child: Text(
                   'Package ${index + 1}',
-                  style:
-                      const TextStyle(
-                    fontFamily:
-                        'Manrope',
-                    fontSize:
-                        13,
-                    fontWeight:
-                        FontWeight.w800,
-                    color:
-                        heading,
+                  style: const TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                    color: heading,
                   ),
                 ),
               ),
               IconButton(
-                onPressed:
-                    () =>
-                        _removePackage(
-                  index,
-                ),
-                icon:
-                    const Icon(
-                  Icons
-                      .delete_outline_rounded,
-                  color:
-                      muted,
+                onPressed: () => _removePackage(index),
+                icon: const Icon(
+                  Icons.delete_outline_rounded,
+                  color: muted,
                   size: 20,
                 ),
               ),
             ],
           ),
-          const SizedBox(
-            height: 10,
-          ),
+          const SizedBox(height: 10),
           _field(
-            controller:
-                package.idController,
-            label:
-                'Package ID',
-            hint:
-                'creta_500',
+            controller: package.idController,
+            label: 'Package ID',
+            hint: 'suv_500',
+            validator: _required,
           ),
-          const SizedBox(
-            height: 10,
-          ),
+          const SizedBox(height: 10),
           _field(
-            controller:
-                package.nameController,
-            label:
-                'Package name',
-            hint:
-                '500 KM',
+            controller: package.nameController,
+            label: 'Package name',
+            hint: '500 KM',
+            validator: _required,
           ),
-          const SizedBox(
-            height: 10,
-          ),
+          const SizedBox(height: 8),
           SwitchListTile.adaptive(
-            contentPadding:
-                EdgeInsets.zero,
-            activeColor:
-                primary,
-            title:
-                const Text(
+            contentPadding: EdgeInsets.zero,
+            activeColor: primary,
+            title: const Text(
               'Unlimited KM',
-              style:
-                  TextStyle(
-                fontFamily:
-                    'Manrope',
-                fontSize:
-                    13,
-                fontWeight:
-                    FontWeight.w700,
-                color:
-                    heading,
+              style: TextStyle(
+                fontFamily: 'Manrope',
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: heading,
               ),
             ),
-            value:
-                package.unlimited,
-            onChanged:
-                (value) {
-              setState(() {
-                package.unlimited =
-                    value;
-              });
-            },
+            value: package.unlimited,
+            onChanged: (value) => setState(() => package.unlimited = value),
           ),
           if (!package.unlimited)
             _field(
-              controller:
-                  package.kmController,
-              label:
-                  'Included KM',
-              hint:
-                  '500',
-              keyboardType:
-                  TextInputType
-                      .number,
+              controller: package.kmController,
+              label: 'Included KM',
+              hint: '500',
+              keyboardType: TextInputType.number,
+              validator: (value) {
+                if (package.unlimited) return null;
+                final km = int.tryParse(value?.trim() ?? '');
+                return km == null || km <= 0 ? 'Enter included KM' : null;
+              },
             ),
-          const SizedBox(
-            height: 10,
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: _field(
+                  controller: package.hourlyController,
+                  label: 'Hourly price',
+                  hint: '499',
+                  keyboardType: TextInputType.number,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _field(
+                  controller: package.dailyController,
+                  label: 'Daily price',
+                  hint: '3199',
+                  keyboardType: TextInputType.number,
+                ),
+              ),
+            ],
           ),
-          _packageRates(
-            package,
+          const SizedBox(height: 10),
+          _field(
+            controller: package.extraKmController,
+            label: 'Extra KM rate',
+            hint: '14',
+            keyboardType: TextInputType.number,
           ),
-          const SizedBox(height: 12),
-          _packageAdvanced(package),
-        ],
-      ),
-    );
-  }
-
-  Widget _packageRates(
-    _EditPackageDraft package,
-  ) {
-    return Column(
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child:
-                  _field(
-                controller:
-                    package
-                        .hourlyController,
-                label:
-                    'Hourly',
-                hint:
-                    '499',
-                keyboardType:
-                    TextInputType
-                        .number,
-              ),
-            ),
-            const SizedBox(
-              width: 10,
-            ),
-            Expanded(
-              child:
-                  _field(
-                controller:
-                    package
-                        .dailyController,
-                label:
-                    'Daily',
-                hint:
-                    '3199',
-                keyboardType:
-                    TextInputType
-                        .number,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(
-          height: 10,
-        ),
-        Row(
-          children: [
-            Expanded(
-              child:
-                  _field(
-                controller:
-                    package
-                        .weekendController,
-                label:
-                    'Weekend',
-                hint:
-                    '3499',
-                keyboardType:
-                    TextInputType
-                        .number,
-              ),
-            ),
-            const SizedBox(
-              width: 10,
-            ),
-            Expanded(
-              child:
-                  _field(
-                controller:
-                    package
-                        .weeklyController,
-                label:
-                    'Weekly',
-                hint:
-                    '16999',
-                keyboardType:
-                    TextInputType
-                        .number,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(
-          height: 10,
-        ),
-        _field(
-          controller:
-              package
-                  .monthlyController,
-          label:
-              'Monthly',
-          hint:
-              '54999',
-          keyboardType:
-              TextInputType.number,
-        ),
-        const SizedBox(
-          height: 10,
-        ),
-        _field(
-          controller:
-              package
-                  .extraKmController,
-          label:
-              'Extra KM rate',
-          hint:
-              '14',
-          keyboardType:
-              TextInputType.number,
-        ),
-      ],
-    );
-  }
-
-  Widget _packageAdvanced(_EditPackageDraft package) {
-    return Container(
-      padding: const EdgeInsets.all(13),
-      decoration: BoxDecoration(
-        color: card,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: border),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
+          const SizedBox(height: 8),
           SwitchListTile.adaptive(
             contentPadding: EdgeInsets.zero,
             activeColor: primary,
@@ -1839,316 +930,87 @@ class _AdminEditPricingProfileScreenState
               ),
             ),
             value: package.isActive,
-            onChanged: (v) => setState(() => package.isActive = v),
+            onChanged: (value) => setState(() => package.isActive = value),
           ),
-          const Text(
-            'Supported rental types',
-            style: TextStyle(
-              fontFamily: 'Manrope',
-              fontSize: 12,
-              fontWeight: FontWeight.w700,
-              color: body,
-            ),
-          ),
-          const SizedBox(height: 6),
-          Wrap(
-            spacing: 7,
-            children: KmPackageRentalType.values.map((type) {
-              final selected =
-                  package.supportedRentalTypes.contains(type);
-              return FilterChip(
-                label: Text(_packageRentalTypeLabel(type)),
-                selected: selected,
-                selectedColor: softAccent,
-                checkmarkColor: primary,
-                onSelected: (v) {
-                  setState(() {
-                    if (v) {
-                      package.supportedRentalTypes.add(type);
-                    } else {
-                      package.supportedRentalTypes.remove(type);
-                    }
-                  });
-                },
-              );
-            }).toList(),
-          ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              Expanded(
-                child: _field(
-                  controller: package.minimumHoursController,
-                  label: 'Min hours',
-                  hint: '1',
-                  keyboardType: TextInputType.number,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _field(
-                  controller: package.minimumDaysController,
-                  label: 'Min days',
-                  hint: '1',
-                  keyboardType: TextInputType.number,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              Expanded(
-                child: _field(
-                  controller: package.minimumWeekendDaysController,
-                  label: 'Min weekend days',
-                  hint: '2',
-                  keyboardType: TextInputType.number,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _field(
-                  controller: package.maximumWeekendDaysController,
-                  label: 'Max weekend days',
-                  hint: '2',
-                  keyboardType: TextInputType.number,
-                ),
-              ),
-            ],
+          _infoText(
+            'Daily included KM is multiplied by the number of rental days. Example: 250 KM/day × 4 days = 1,000 KM included.',
           ),
         ],
       ),
     );
   }
 
-  String _packageRentalTypeLabel(KmPackageRentalType type) {
-    switch (type) {
-      case KmPackageRentalType.hourly:
-        return 'Hourly';
-      case KmPackageRentalType.daily:
-        return 'Daily';
-      case KmPackageRentalType.weekend:
-        return 'Weekend';
-      case KmPackageRentalType.weekly:
-        return 'Weekly';
-      case KmPackageRentalType.monthly:
-        return 'Monthly';
-    }
-  }
-
-  Widget _extraCharges() {
-    return Column(
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child:
-                  _field(
-                controller:
-                    _graceController,
-                label:
-                    'Grace minutes',
-                hint:
-                    '30',
-                keyboardType:
-                    TextInputType
-                        .number,
-              ),
-            ),
-            const SizedBox(
-              width: 12,
-            ),
-            Expanded(
-              child:
-                  _field(
-                controller:
-                    _extraHourController,
-                label:
-                    'Extra hour',
-                hint:
-                    '299',
-                keyboardType:
-                    TextInputType
-                        .number,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(
-          height: 12,
-        ),
-        Row(
-          children: [
-            Expanded(
-              child:
-                  _field(
-                controller:
-                    _extraDayController,
-                label:
-                    'Extra day',
-                hint:
-                    '2499',
-                keyboardType:
-                    TextInputType
-                        .number,
-              ),
-            ),
-            const SizedBox(
-              width: 12,
-            ),
-            Expanded(
-              child:
-                  _field(
-                controller:
-                    _lateReturnController,
-                label:
-                    'Late return',
-                hint:
-                    '349',
-                keyboardType:
-                    TextInputType
-                        .number,
-              ),
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _rentalTypeRules() {
-    return Column(
-      children: [
-        _ruleSwitch(
-          title: 'Hourly rental',
-          subtitle: 'Allow hourly bookings.',
-          value: _hourlyEnabled,
-          onChanged: (v) => setState(() => _hourlyEnabled = v),
-        ),
-        if (_hourlyEnabled)
-          Row(
-            children: [
-              Expanded(
-                child: _field(
-                  controller: _hourlyMinHoursController,
-                  label: 'Minimum billable hours',
-                  hint: '1',
-                  keyboardType: TextInputType.number,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: _switchField(
-                  title: 'Time selection',
-                  value: _hourlyRequireTime,
-                  onChanged: (v) =>
-                      setState(() => _hourlyRequireTime = v),
-                ),
-              ),
-            ],
-          ),
-        const SizedBox(height: 10),
-        _ruleSwitch(
-          title: 'Daily rental',
-          subtitle: 'Allow daily bookings.',
-          value: _dailyEnabled,
-          onChanged: (v) => setState(() => _dailyEnabled = v),
-        ),
-        if (_dailyEnabled)
-          Row(
-            children: [
-              Expanded(
-                child: _field(
-                  controller: _dailyMinDaysController,
-                  label: 'Minimum billable days',
-                  hint: '1',
-                  keyboardType: TextInputType.number,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: _switchField(
-                  title: 'Time selection',
-                  value: _dailyRequireTime,
-                  onChanged: (v) =>
-                      setState(() => _dailyRequireTime = v),
-                ),
-              ),
-            ],
-          ),
-        const SizedBox(height: 10),
-        _ruleSwitch(
-          title: 'Weekend rental',
-          subtitle: 'Allow weekend-specific rentals.',
-          value: _weekendEnabled,
-          onChanged: (v) => setState(() => _weekendEnabled = v),
-        ),
-        if (_weekendEnabled) ...[
-          Row(
-            children: [
-              Expanded(
-                child: _field(
-                  controller: _weekendMinDaysController,
-                  label: 'Minimum weekend days',
-                  hint: '2',
-                  keyboardType: TextInputType.number,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: _field(
-                  controller: _weekendMaxDaysController,
-                  label: 'Maximum weekend days',
-                  hint: '2',
-                  keyboardType: TextInputType.number,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          _switchField(
-            title: 'Time selection',
-            value: _weekendRequireTime,
-            onChanged: (v) =>
-                setState(() => _weekendRequireTime = v),
-          ),
-        ],
-      ],
-    );
-  }
-
-  Widget _specialPricingSection() {
+  Widget _specialRatesSection() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        SwitchListTile.adaptive(
-          contentPadding: EdgeInsets.zero,
-          activeColor: primary,
-          title: const Text(
-            'Enable special date pricing',
-            style: TextStyle(
-              fontFamily: 'Manrope',
-              fontWeight: FontWeight.w700,
-              color: heading,
+        Row(
+          children: [
+            const Expanded(
+              child: Text(
+                'Special Date Rules',
+                style: TextStyle(
+                  fontFamily: 'Manrope',
+                  fontSize: 14,
+                  fontWeight: FontWeight.w800,
+                  color: heading,
+                ),
+              ),
             ),
-          ),
-          value: _specialEnabled,
-          onChanged: (v) => setState(() => _specialEnabled = v),
+            TextButton.icon(
+              onPressed: _addSpecialRate,
+              icon: const Icon(Icons.add_rounded, size: 18),
+              label: const Text('Add Rule'),
+              style: TextButton.styleFrom(foregroundColor: primary),
+            ),
+          ],
         ),
-        if (!_specialEnabled)
-          const Text(
-            'No special-date override is currently enabled.',
-            style: TextStyle(
-              fontFamily: 'Manrope',
-              fontSize: 12,
-              color: muted,
-            ),
+        if (_specialRates.isEmpty)
+          _emptyBox(
+            'No special rates. Normal package prices will be used.',
           ),
-        if (_specialEnabled) ...[
-          const SizedBox(height: 8),
+        ...List.generate(
+          _specialRates.length,
+          (index) => _specialRateCard(index, _specialRates[index]),
+        ),
+      ],
+    );
+  }
+
+  Widget _specialRateCard(int index, _EditSpecialRateDraft rate) {
+    return Container(
+      margin: const EdgeInsets.only(top: 12),
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(17),
+        border: Border.all(color: border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.event_outlined, color: primary, size: 20),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Special Rule ${index + 1}',
+                  style: const TextStyle(
+                    fontFamily: 'Manrope',
+                    fontWeight: FontWeight.w800,
+                    color: heading,
+                  ),
+                ),
+              ),
+              IconButton(
+                onPressed: () => _removeSpecialRate(index),
+                icon: const Icon(Icons.delete_outline, color: muted),
+              ),
+            ],
+          ),
           _field(
-            controller: _specialRuleNameController,
+            controller: rate.nameController,
             label: 'Rule name',
             hint: 'Diwali / New Year / Holiday',
           ),
@@ -2158,280 +1020,229 @@ class _AdminEditPricingProfileScreenState
               Expanded(
                 child: _datePickerField(
                   label: 'Start date',
-                  value: _specialStartDate,
-                  onTap: () => _pickSpecialDate(start: true),
+                  value: rate.startDate,
+                  onTap: () => _pickSpecialDate(rate, start: true),
                 ),
               ),
-              const SizedBox(width: 12),
+              const SizedBox(width: 10),
               Expanded(
                 child: _datePickerField(
                   label: 'End date',
-                  value: _specialEndDate,
-                  onTap: () => _pickSpecialDate(start: false),
+                  value: rate.endDate,
+                  onTap: () => _pickSpecialDate(rate, start: false),
                 ),
               ),
             ],
           ),
           const SizedBox(height: 12),
           _field(
-            controller: _specialMinHoursController,
-            label: 'Minimum billable hours',
-            hint: '1',
-            keyboardType: TextInputType.number,
-          ),
-          const SizedBox(height: 12),
-          _switchField(
-            title: 'Special hourly pricing',
-            value: _specialHourlyEnabled,
-            onChanged: (v) =>
-                setState(() => _specialHourlyEnabled = v),
-          ),
-          if (_specialHourlyEnabled)
-            _field(
-              controller: _specialHourlyController,
-              label: 'Special hourly rate',
-              hint: '599',
-              keyboardType: TextInputType.number,
-            ),
-          const SizedBox(height: 8),
-          _switchField(
-            title: 'Special daily pricing',
-            value: _specialDailyEnabled,
-            onChanged: (v) =>
-                setState(() => _specialDailyEnabled = v),
-          ),
-          if (_specialDailyEnabled)
-            _field(
-              controller: _specialDailyController,
-              label: 'Special daily rate',
-              hint: '2999',
-              keyboardType: TextInputType.number,
-            ),
-          const SizedBox(height: 8),
-          _switchField(
-            title: 'Special weekend pricing',
-            value: _specialWeekendEnabled,
-            onChanged: (v) =>
-                setState(() => _specialWeekendEnabled = v),
-          ),
-          if (_specialWeekendEnabled)
-            _field(
-              controller: _specialWeekendController,
-              label: 'Special weekend rate',
-              hint: '3499',
-              keyboardType: TextInputType.number,
-            ),
-          const SizedBox(height: 8),
-          _field(
-            controller: _specialExtraKmController,
+            controller: rate.extraKmController,
             label: 'Special extra KM rate',
             hint: '20',
             keyboardType: TextInputType.number,
+            helper: 'Leave blank to keep each package normal extra-KM rate.',
           ),
-        ],
-      ],
-    );
-  }
-
-  Widget _depositConfiguration() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        SwitchListTile.adaptive(
-          contentPadding: EdgeInsets.zero,
-          activeColor: primary,
-          title: const Text(
-            'Security deposit required',
+          const SizedBox(height: 12),
+          const Text(
+            'Package-specific special prices',
             style: TextStyle(
               fontFamily: 'Manrope',
-              fontWeight: FontWeight.w700,
+              fontSize: 12.5,
+              fontWeight: FontWeight.w800,
               color: heading,
             ),
           ),
-          value: _depositRequired,
-          onChanged: (v) => setState(() => _depositRequired = v),
-        ),
-        _field(
-          controller: _depositController,
-          label: 'Default deposit amount',
-          hint: '5000',
-          keyboardType: TextInputType.number,
-        ),
-        const SizedBox(height: 12),
-        const Text(
-          'Accepted deposit types',
-          style: TextStyle(
-            fontFamily: 'Manrope',
-            fontSize: 12.5,
-            fontWeight: FontWeight.w700,
-            color: body,
+          const SizedBox(height: 8),
+          if (_packages.isEmpty)
+            _infoText('Add packages above before configuring special prices.'),
+          ..._packages.map(
+            (package) => _specialPackageRow(rate, package),
           ),
-        ),
-        const SizedBox(height: 6),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: DepositType.values
-              .where((type) => type != DepositType.none)
-              .map(
-                (type) => FilterChip(
-                  label: Text(_depositTypeLabel(type)),
-                  selected: _depositTypes.contains(type),
-                  selectedColor: softAccent,
-                  checkmarkColor: primary,
-                  onSelected: (selected) {
-                    setState(() {
-                      if (selected) {
-                        _depositTypes.add(type);
-                      } else {
-                        _depositTypes.remove(type);
-                      }
-                    });
-                  },
-                ),
-              )
-              .toList(),
-        ),
-        const SizedBox(height: 12),
-        _field(
-          controller: _minimumAssetValueController,
-          label: 'Minimum asset value',
-          hint: '10000',
-          keyboardType: TextInputType.number,
-          helper:
-              'Used when vehicle/other assets are accepted as deposit.',
-        ),
-      ],
-    );
-  }
-
-  Widget _versionInfo() {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: background,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: border),
-      ),
-      child: Row(
-        children: [
-          const Icon(Icons.verified_outlined, color: primary),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              'Current pricing version: $_pricingVersion',
-              style: const TextStyle(
+          const SizedBox(height: 8),
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            activeColor: primary,
+            title: const Text(
+              'Rule active',
+              style: TextStyle(
                 fontFamily: 'Manrope',
-                fontSize: 13,
                 fontWeight: FontWeight.w700,
+                fontSize: 12.5,
                 color: heading,
               ),
             ),
+            value: rate.isActive,
+            onChanged: (value) => setState(() => rate.isActive = value),
           ),
         ],
       ),
     );
   }
 
-  Widget _ruleSwitch({
-    required String title,
-    required String subtitle,
-    required bool value,
-    required ValueChanged<bool> onChanged,
-  }) {
-    return SwitchListTile.adaptive(
-      contentPadding: EdgeInsets.zero,
-      activeColor: primary,
-      title: Text(
-        title,
-        style: const TextStyle(
-          fontFamily: 'Manrope',
-          fontSize: 13.5,
-          fontWeight: FontWeight.w700,
-          color: heading,
-        ),
-      ),
-      subtitle: Text(
-        subtitle,
-        style: const TextStyle(
-          fontFamily: 'Manrope',
-          fontSize: 11.5,
-          color: body,
-        ),
-      ),
-      value: value,
-      onChanged: onChanged,
-    );
-  }
+  Widget _specialPackageRow(
+    _EditSpecialRateDraft rate,
+    _EditPackageDraft package,
+  ) {
+    final id = package.idController.text.trim();
+    if (id.isEmpty) {
+      return _infoText('Enter package ID to configure its special price.');
+    }
 
-  Widget _switchField({
-    required String title,
-    required bool value,
-    required ValueChanged<bool> onChanged,
-  }) {
+    final hourly = rate.hourlyControllers.putIfAbsent(
+      id,
+      () => TextEditingController(),
+    );
+    final daily = rate.dailyControllers.putIfAbsent(
+      id,
+      () => TextEditingController(),
+    );
+
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
-        color: background,
-        borderRadius: BorderRadius.circular(13),
+        color: card,
+        borderRadius: BorderRadius.circular(12),
         border: Border.all(color: border),
       ),
-      child: SwitchListTile.adaptive(
-        contentPadding: EdgeInsets.zero,
-        dense: true,
-        activeColor: primary,
-        title: Text(
-          title,
-          style: const TextStyle(
-            fontFamily: 'Manrope',
-            fontSize: 12,
-            fontWeight: FontWeight.w700,
-            color: heading,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            package.nameController.text.trim().isEmpty
+                ? id
+                : package.nameController.text.trim(),
+            style: const TextStyle(
+              fontFamily: 'Manrope',
+              fontWeight: FontWeight.w700,
+              fontSize: 12,
+              color: heading,
+            ),
           ),
-        ),
-        value: value,
-        onChanged: onChanged,
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: _field(
+                  controller: hourly,
+                  label: 'Special hourly',
+                  hint: '599',
+                  keyboardType: TextInputType.number,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _field(
+                  controller: daily,
+                  label: 'Special daily',
+                  hint: '3499',
+                  keyboardType: TextInputType.number,
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
 
-  Widget _datePickerField({
-    required String label,
-    required DateTime? value,
-    required VoidCallback onTap,
-  }) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(13),
-      child: InputDecorator(
-        decoration: _decoration(label, 'Select date'),
-        child: Text(
-          _dateLabel(value),
-          style: TextStyle(
-            fontFamily: 'Manrope',
-            fontSize: 13,
-            fontWeight: value == null ? FontWeight.w400 : FontWeight.w700,
-            color: value == null ? muted : heading,
-          ),
+  Widget _depositSection() {
+    final isMoney = _depositType.isMonetary;
+    final isAsset = _depositType == DepositType.vehicleAsset ||
+        _depositType == DepositType.otherAsset;
+
+    return Column(
+      children: [
+        DropdownButtonFormField<DepositType>(
+          initialValue: _depositType,
+          decoration: _decoration('Deposit type', 'Select deposit type'),
+          items: DepositType.values
+              .map(
+                (type) => DropdownMenuItem<DepositType>(
+                  value: type,
+                  child: Text(
+                    _depositLabel(type),
+                    style: const TextStyle(
+                      fontFamily: 'Manrope',
+                      fontSize: 13,
+                      color: heading,
+                    ),
+                  ),
+                ),
+              )
+              .toList(),
+          onChanged: (type) {
+            if (type == null) return;
+            setState(() => _depositType = type);
+          },
         ),
-      ),
+        if (isMoney) ...[
+          const SizedBox(height: 12),
+          _field(
+            controller: _depositAmountController,
+            label: 'Security deposit amount',
+            hint: '5000',
+            keyboardType: TextInputType.number,
+          ),
+          const SizedBox(height: 12),
+          _field(
+            controller: _paymentMethodController,
+            label: 'Default payment method',
+            hint: 'Cash / UPI / Bank Transfer',
+          ),
+        ],
+        if (isAsset) ...[
+          const SizedBox(height: 12),
+          _field(
+            controller: _assetDescriptionController,
+            label: 'Asset description',
+            hint: 'Customer bike / other asset',
+          ),
+          const SizedBox(height: 12),
+          _field(
+            controller: _minimumAssetValueController,
+            label: 'Minimum asset value',
+            hint: '50000',
+            keyboardType: TextInputType.number,
+          ),
+        ],
+        if (_depositType == DepositType.none)
+          Padding(
+            padding: const EdgeInsets.only(top: 10),
+            child: _infoText('No security deposit will be required by default.'),
+          ),
+        if (isMoney)
+          Padding(
+            padding: const EdgeInsets.only(top: 10),
+            child: _infoText(
+              'The deposit is not included in Trip Total. It is added separately to the amount payable when collected.',
+            ),
+          ),
+        if (isAsset)
+          Padding(
+            padding: const EdgeInsets.only(top: 10),
+            child: _infoText(
+              'Customer bike/asset deposits are security records and do not add money to the trip total or amount payable.',
+            ),
+          ),
+      ],
     );
   }
 
-  String _depositTypeLabel(DepositType type) {
+  String _depositLabel(DepositType type) {
     switch (type) {
       case DepositType.none:
-        return 'None';
+        return 'No Deposit';
       case DepositType.cash:
         return 'Cash';
       case DepositType.online:
-        return 'Online';
+        return 'Online / UPI';
       case DepositType.bankTransfer:
-        return 'Bank transfer';
+        return 'Bank Transfer';
       case DepositType.vehicleAsset:
-        return 'Vehicle asset';
+        return 'Customer Bike';
       case DepositType.otherAsset:
-        return 'Other asset';
+        return 'Other Asset';
     }
   }
 
@@ -2442,104 +1253,55 @@ class _AdminEditPricingProfileScreenState
     required Widget child,
   }) {
     return Container(
-      padding:
-          const EdgeInsets.all(
-        18,
-      ),
-      decoration:
-          BoxDecoration(
-        color:
-            card,
-        borderRadius:
-            BorderRadius.circular(
-          21,
-        ),
-        border:
-            Border.all(
-          color:
-              border,
-        ),
-        boxShadow: [
+      padding: const EdgeInsets.all(17),
+      decoration: BoxDecoration(
+        color: card,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: border),
+        boxShadow: const [
           BoxShadow(
-            color:
-                Colors.black.withValues(
-              alpha:
-                  0.025,
-            ),
-            blurRadius:
-                14,
-            offset:
-                const Offset(
-              0,
-              5,
-            ),
+            blurRadius: 18,
+            offset: Offset(0, 5),
+            color: Color(0x0A17201F),
           ),
         ],
       ),
       child: Column(
-        crossAxisAlignment:
-            CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
               Container(
-                width: 40,
-                height: 40,
-                decoration:
-                    BoxDecoration(
-                  color:
-                      softAccent,
-                  borderRadius:
-                      BorderRadius.circular(
-                    12,
-                  ),
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: softAccent,
+                  borderRadius: BorderRadius.circular(11),
                 ),
-                child:
-                    Icon(
-                  icon,
-                  color:
-                      primary,
-                  size:
-                      21,
-                ),
+                child: Icon(icon, color: primary, size: 20),
               ),
-              const SizedBox(
-                width: 11,
-              ),
+              const SizedBox(width: 11),
               Expanded(
                 child: Column(
-                  crossAxisAlignment:
-                      CrossAxisAlignment.start,
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
                       title,
-                      style:
-                          const TextStyle(
-                        fontFamily:
-                            'Manrope',
-                        fontSize:
-                            15,
-                        fontWeight:
-                            FontWeight.w800,
-                        color:
-                            heading,
+                      style: const TextStyle(
+                        fontFamily: 'Manrope',
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                        color: heading,
                       ),
                     ),
-                    const SizedBox(
-                      height: 2,
-                    ),
+                    const SizedBox(height: 2),
                     Text(
                       subtitle,
-                      style:
-                          const TextStyle(
-                        fontFamily:
-                            'Manrope',
-                        fontSize:
-                            11.5,
-                        height:
-                            1.35,
-                        color:
-                            body,
+                      style: const TextStyle(
+                        fontFamily: 'Manrope',
+                        fontSize: 11.5,
+                        height: 1.35,
+                        color: body,
                       ),
                     ),
                   ],
@@ -2547,9 +1309,7 @@ class _AdminEditPricingProfileScreenState
               ),
             ],
           ),
-          const SizedBox(
-            height: 17,
-          ),
+          const SizedBox(height: 16),
           child,
         ],
       ),
@@ -2560,252 +1320,171 @@ class _AdminEditPricingProfileScreenState
     required TextEditingController controller,
     required String label,
     required String hint,
-    String? helper,
     TextInputType? keyboardType,
+    String? helper,
     String? Function(String?)? validator,
   }) {
     return TextFormField(
-      controller:
-          controller,
-      keyboardType:
-          keyboardType,
-      validator:
-          validator,
-      style:
-          const TextStyle(
-        fontFamily:
-            'Manrope',
-        fontSize:
-            13.5,
-        color:
-            heading,
+      controller: controller,
+      keyboardType: keyboardType,
+      validator: validator,
+      style: const TextStyle(
+        fontFamily: 'Manrope',
+        fontSize: 13,
+        fontWeight: FontWeight.w600,
+        color: heading,
       ),
-      decoration:
-          _decoration(
-        label,
-        hint,
-      ).copyWith(
-        helperText:
-            helper,
-      ),
+      decoration: _decoration(label, hint, helper: helper),
     );
   }
 
   InputDecoration _decoration(
     String label,
-    String hint,
-  ) {
+    String hint, {
+    String? helper,
+  }) {
     return InputDecoration(
-      labelText:
-          label,
-      hintText:
-          hint,
-      labelStyle:
-          const TextStyle(
-        fontFamily:
-            'Manrope',
-        fontSize:
-            12.5,
-        color:
-            body,
+      labelText: label,
+      hintText: hint,
+      helperText: helper,
+      labelStyle: const TextStyle(
+        fontFamily: 'Manrope',
+        fontSize: 12,
+        color: body,
       ),
-      hintStyle:
-          const TextStyle(
-        fontFamily:
-            'Manrope',
-        fontSize:
-            12,
-        color:
-            muted,
+      hintStyle: const TextStyle(
+        fontFamily: 'Manrope',
+        fontSize: 12,
+        color: muted,
       ),
-      filled:
-          true,
-      fillColor:
-          background,
-      contentPadding:
-          const EdgeInsets.symmetric(
-        horizontal:
-            14,
-        vertical:
-            14,
+      helperStyle: const TextStyle(
+        fontFamily: 'Manrope',
+        fontSize: 10.5,
+        color: muted,
       ),
-      enabledBorder:
-          OutlineInputBorder(
-        borderRadius:
-            BorderRadius.circular(
-          13,
-        ),
-        borderSide:
-            const BorderSide(
-          color:
-              border,
-        ),
+      filled: true,
+      fillColor: background,
+      contentPadding: const EdgeInsets.symmetric(
+        horizontal: 13,
+        vertical: 13,
       ),
-      focusedBorder:
-          OutlineInputBorder(
-        borderRadius:
-            BorderRadius.circular(
-          13,
-        ),
-        borderSide:
-            const BorderSide(
-          color:
-              primary,
-          width:
-              1.2,
-        ),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(13),
+        borderSide: const BorderSide(color: border),
       ),
-      errorBorder:
-          OutlineInputBorder(
-        borderRadius:
-            BorderRadius.circular(
-          13,
-        ),
-        borderSide:
-            BorderSide(
-          color:
-              Colors.red.shade300,
-        ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(13),
+        borderSide: const BorderSide(color: border),
       ),
-      focusedErrorBorder:
-          OutlineInputBorder(
-        borderRadius:
-            BorderRadius.circular(
-          13,
-        ),
-        borderSide:
-            BorderSide(
-          color:
-              Colors.red.shade600,
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(13),
+        borderSide: const BorderSide(color: primary, width: 1.3),
+      ),
+      errorBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(13),
+        borderSide: BorderSide(color: Colors.red.shade300),
+      ),
+      focusedErrorBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(13),
+        borderSide: BorderSide(color: Colors.red.shade600),
+      ),
+    );
+  }
+
+  Widget _datePickerField({
+    required String label,
+    required DateTime? value,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(13),
+      onTap: onTap,
+      child: InputDecorator(
+        decoration: _decoration(label, 'Select date'),
+        child: Row(
+          children: [
+            const Icon(Icons.calendar_today_outlined, size: 16, color: primary),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                _dateLabel(value),
+                style: TextStyle(
+                  fontFamily: 'Manrope',
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                  color: value == null ? muted : heading,
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
   }
 
-  String? _required(
-    String? value,
-  ) {
-    if (value == null ||
-        value.trim().isEmpty) {
-      return 'Required';
-    }
-
-    return null;
+  Widget _emptyBox(String message) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(top: 10),
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: border),
+      ),
+      child: Text(
+        message,
+        style: const TextStyle(
+          fontFamily: 'Manrope',
+          fontSize: 12,
+          color: body,
+        ),
+      ),
+    );
   }
 
-  String _modeLabel(
-    KmPricingMode mode,
-  ) {
-    switch (mode) {
-      case KmPricingMode.included:
-        return 'Included KM';
-      case KmPricingMode.perKm:
-        return 'Per KM';
-      case KmPricingMode.unlimited:
-        return 'Unlimited KM';
-      case KmPricingMode.package:
-        return 'KM Packages';
-      case KmPricingMode.slabs:
-        return 'KM Slabs';
-    }
+  Widget _infoText(String text) {
+    return Text(
+      text,
+      style: const TextStyle(
+        fontFamily: 'Manrope',
+        fontSize: 10.8,
+        height: 1.35,
+        color: muted,
+      ),
+    );
   }
 }
 
 class _EditPackageDraft {
-  final TextEditingController idController =
-      TextEditingController();
-
-  final TextEditingController nameController =
-      TextEditingController();
-
-  final TextEditingController kmController =
-      TextEditingController();
-
-  final TextEditingController hourlyController =
-      TextEditingController();
-
-  final TextEditingController dailyController =
-      TextEditingController();
-
-  final TextEditingController weekendController =
-      TextEditingController();
-
-  final TextEditingController weeklyController =
-      TextEditingController();
-
-  final TextEditingController monthlyController =
-      TextEditingController();
-
-  final TextEditingController extraKmController =
-      TextEditingController();
-
-  final TextEditingController minimumHoursController =
-      TextEditingController(text: '1');
-  final TextEditingController minimumDaysController =
-      TextEditingController(text: '1');
-  final TextEditingController minimumWeekendDaysController =
-      TextEditingController(text: '2');
-  final TextEditingController maximumWeekendDaysController =
-      TextEditingController(text: '2');
+  final idController = TextEditingController();
+  final nameController = TextEditingController();
+  final kmController = TextEditingController();
+  final hourlyController = TextEditingController();
+  final dailyController = TextEditingController();
+  final extraKmController = TextEditingController();
 
   bool unlimited = false;
   bool isActive = true;
-  final Set<KmPackageRentalType> supportedRentalTypes = {
-    KmPackageRentalType.hourly,
-    KmPackageRentalType.daily,
-    KmPackageRentalType.weekend,
-  };
 
   _EditPackageDraft();
 
-  _EditPackageDraft.fromPackage(
-    KmPricingPackage package,
-  ) {
-    idController.text =
-        package.id;
+  factory _EditPackageDraft.fromPackage(KmPricingPackage package) {
+    final draft = _EditPackageDraft();
+    draft.idController.text = package.id;
+    draft.nameController.text = package.name;
+    draft.kmController.text = package.includedKm?.toString() ?? '';
+    draft.hourlyController.text = _numberText(package.hourlyRate);
+    draft.dailyController.text = _numberText(package.dailyRate);
+    draft.extraKmController.text = _numberText(package.extraKmRate);
+    draft.unlimited = package.unlimitedKm;
+    draft.isActive = package.isActive;
+    return draft;
+  }
 
-    nameController.text =
-        package.name;
-
-    if (package.includedKm != null) {
-      kmController.text =
-          package.includedKm.toString();
-    }
-
-    hourlyController.text =
-        package.hourlyRate.toString();
-
-    dailyController.text =
-        package.dailyRate.toString();
-
-    weekendController.text =
-        package.weekendRate.toString();
-
-    weeklyController.text =
-        package.weeklyRate.toString();
-
-    monthlyController.text =
-        package.monthlyRate.toString();
-
-    extraKmController.text =
-        package.extraKmRate.toString();
-
-    minimumHoursController.text =
-        package.minimumBillingHours.toString();
-    minimumDaysController.text =
-        package.minimumBillingDays.toString();
-    minimumWeekendDaysController.text =
-        package.minimumWeekendDays.toString();
-    maximumWeekendDaysController.text =
-        package.maximumWeekendDays.toString();
-
-    isActive = package.isActive;
-    supportedRentalTypes
-      ..clear()
-      ..addAll(package.supportedRentalTypes);
-
-    unlimited =
-        package.unlimitedKm;
+  static String _numberText(double value) {
+    if (value == value.roundToDouble()) return value.toInt().toString();
+    return value.toString();
   }
 
   void dispose() {
@@ -2814,9 +1493,67 @@ class _EditPackageDraft {
     kmController.dispose();
     hourlyController.dispose();
     dailyController.dispose();
-    weekendController.dispose();
-    weeklyController.dispose();
-    monthlyController.dispose();
     extraKmController.dispose();
+  }
+}
+
+class _EditSpecialRateDraft {
+  final String id;
+  final nameController = TextEditingController();
+  final extraKmController = TextEditingController();
+  final Map<String, TextEditingController> hourlyControllers = {};
+  final Map<String, TextEditingController> dailyControllers = {};
+
+  DateTime? startDate;
+  DateTime? endDate;
+  bool isActive;
+
+  _EditSpecialRateDraft({
+    this.id = '',
+    this.startDate,
+    this.endDate,
+    this.isActive = true,
+  });
+
+  factory _EditSpecialRateDraft.fromSpecialRate(SpecialRate rate) {
+    final draft = _EditSpecialRateDraft(
+      id: rate.id,
+      startDate: rate.startDate,
+      endDate: rate.endDate,
+      isActive: rate.isActive,
+    );
+    draft.nameController.text = rate.name;
+    if (rate.extraKmRate != null) {
+      draft.extraKmController.text = rate.extraKmRate.toString();
+    }
+
+    for (final entry in rate.hourlyPrices.entries) {
+      final controller = TextEditingController();
+      controller.text = _numberText(entry.value);
+      draft.hourlyControllers[entry.key] = controller;
+    }
+    for (final entry in rate.dailyPrices.entries) {
+      final controller = TextEditingController();
+      controller.text = _numberText(entry.value);
+      draft.dailyControllers[entry.key] = controller;
+    }
+
+    return draft;
+  }
+
+  static String _numberText(double value) {
+    if (value == value.roundToDouble()) return value.toInt().toString();
+    return value.toString();
+  }
+
+  void dispose() {
+    nameController.dispose();
+    extraKmController.dispose();
+    for (final controller in hourlyControllers.values) {
+      controller.dispose();
+    }
+    for (final controller in dailyControllers.values) {
+      controller.dispose();
+    }
   }
 }

@@ -6,7 +6,6 @@ import '../../../cars/models/car.dart';
 import '../../../cars/services/car_service.dart';
 import '../../../pricing/models/pricing_profile.dart';
 import '../../../pricing/services/pricing_profile_service.dart';
-import '../../pricing/screens/admin_add_pricing_profile_screen.dart';
 
 class AdminAddCarScreen extends StatefulWidget {
   const AdminAddCarScreen({
@@ -72,11 +71,6 @@ class _AdminAddCarScreenState
   final TextEditingController
       _registrationController =
       TextEditingController();
-
-  final TextEditingController
-      _priceController =
-      TextEditingController();
-
   final TextEditingController
       _pricingProfileController =
       TextEditingController();
@@ -181,19 +175,6 @@ class _AdminAddCarScreenState
     }
   }
 
-  Future<void> _createPricingProfile() async {
-    final result = await Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => const AdminAddPricingProfileScreen(),
-      ),
-    );
-
-    if (result == true && mounted) {
-      await _loadPricingProfiles();
-    }
-  }
-
   Future<void> _selectPricingProfile() async {
     final selected = await showModalBottomSheet<PricingProfile>(
       context: context,
@@ -233,7 +214,7 @@ class _AdminAddCarScreenState
                 ),
                 const SizedBox(height: 5),
                 Text(
-                  'Select an existing tenant pricing profile for this vehicle.',
+                  'Select the reusable hourly/daily pricing profile for this vehicle.',
                   style: GoogleFonts.manrope(
                     fontSize: 11.5,
                     fontWeight: FontWeight.w500,
@@ -308,7 +289,7 @@ class _AdminAddCarScreenState
                                       ),
                                       const SizedBox(height: 3),
                                       Text(
-                                        '${profile.id} • ${profile.currency} • ${_formatMoney(profile.dailyRate)} / day',
+                                        _pricingProfileSummary(profile),
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
                                         style: GoogleFonts.manrope(
@@ -336,9 +317,9 @@ class _AdminAddCarScreenState
                 SizedBox(
                   width: double.infinity,
                   child: OutlinedButton.icon(
-                    onPressed: _createPricingProfile,
+                    onPressed: () => Navigator.pop(context),
                     icon: const Icon(Icons.add_rounded, size: 19),
-                    label: const Text('Create New Pricing Profile'),
+                    label: const Text('Manage Pricing Later'),
                     style: OutlinedButton.styleFrom(
                       foregroundColor: primary,
                       side: const BorderSide(color: primary),
@@ -360,7 +341,6 @@ class _AdminAddCarScreenState
       setState(() {
         _selectedPricingProfile = selected;
         _pricingProfileController.text = selected.id;
-        _priceController.text = selected.dailyRate.round().toString();
       });
     }
   }
@@ -399,6 +379,44 @@ class _AdminAddCarScreenState
     }
   }
 
+  /// Legacy Car.pricePerDay is retained for compatibility with the existing
+  /// Car model, but pricing is now owned by PricingProfile.
+  ///
+  /// The value is only a display/cache value for older parts of the app.
+  /// It is never used by the pricing engine.
+  double _profileDisplayDailyRate(PricingProfile profile) {
+    for (final package in profile.dailyPackages) {
+      if (!package.isActive) continue;
+      final rate = package.safeDailyRate;
+      if (rate > 0) return rate;
+    }
+
+    // If this profile is hourly-only, use its first active hourly rate as a
+    // compatibility fallback. The actual booking price still comes from the
+    // selected hourly package.
+    for (final package in profile.hourlyPackages) {
+      if (!package.isActive) continue;
+      final rate = package.safeHourlyRate;
+      if (rate > 0) return rate;
+    }
+
+    return 0;
+  }
+
+  String _pricingProfileSummary(PricingProfile profile) {
+    final hourly = profile.hourlyPackages.where((p) =>
+        p.isActive && p.safeHourlyRate > 0).length;
+    final daily = profile.dailyPackages.where((p) =>
+        p.isActive && p.safeDailyRate > 0).length;
+
+    final parts = <String>[];
+    if (hourly > 0) parts.add('$hourly hourly');
+    if (daily > 0) parts.add('$daily daily');
+
+    final mode = parts.isEmpty ? 'No active packages' : parts.join(' • ');
+    return '${profile.id} • ${profile.currency} • $mode';
+  }
+
   // ============================================================
   // DISPOSE
   // ============================================================
@@ -406,9 +424,7 @@ class _AdminAddCarScreenState
   @override
   void dispose() {
     _nameController.dispose();
-    _registrationController.dispose();
-    _priceController.dispose();
-    _pricingProfileController.dispose();
+    _registrationController.dispose();    _pricingProfileController.dispose();
     _descriptionController.dispose();
     _featuresController.dispose();
     _branchIdsController.dispose();
@@ -436,14 +452,12 @@ class _AdminAddCarScreenState
       return;
     }
 
-    if (_selectedPricingProfile == null ||
-        _pricingProfileController.text.trim().isEmpty) {
-      _showError(
-        'Please select a pricing profile or create a new one.',
-      );
-      return;
-    }
+    // Pricing is intentionally optional when creating a vehicle.
+    // A vehicle can be created first and connected to a pricing profile later
+    // from Edit Car. This avoids a circular dependency between vehicle setup
+    // and pricing setup.
 
+    final selectedProfile = _selectedPricingProfile;
     setState(() {
       _saving = true;
     });
@@ -459,12 +473,10 @@ class _AdminAddCarScreenState
         _branchIdsController.text,
       );
 
-      final pricePerDay =
-          int.tryParse(
-                _priceController.text
-                    .trim(),
-              ) ??
-              0;
+      final profile = selectedProfile;
+      final pricePerDay = profile == null
+          ? 0
+          : _profileDisplayDailyRate(profile).round();
 
       final sortOrder =
           int.tryParse(
@@ -489,11 +501,13 @@ class _AdminAddCarScreenState
 
         fuel: _selectedFuel,
 
+        // Optional during vehicle creation. Assign a profile later from
+        // Edit Car -> Pricing. Empty means this vehicle has no pricing yet.
         pricingProfileId:
-            _pricingProfileController
-                .text
-                .trim(),
+            _pricingProfileController.text.trim(),
 
+        // Compatibility/display value only. The pricing engine uses the
+        // selected PricingProfile and its packages instead.
         pricePerDay:
             pricePerDay,
 
@@ -549,7 +563,9 @@ class _AdminAddCarScreenState
           .showSnackBar(
         SnackBar(
           content: Text(
-            'Vehicle added successfully.',
+            _pricingProfileController.text.trim().isEmpty
+            ? 'Vehicle added. You can assign pricing later from Edit Car.'
+            : 'Vehicle added successfully.',
             style:
                 GoogleFonts.manrope(
               fontWeight:
@@ -728,9 +744,9 @@ class _AdminAddCarScreenState
               const SizedBox(height: 16),
 
               _buildSection(
-                title: 'Pricing',
+                title: 'Pricing (Optional)',
                 subtitle:
-                    'Connect this vehicle with its pricing profile.',
+                    'You can add a pricing profile now or assign one later from Edit Car.',
                 child:
                     _buildPricingSection(),
               ),
@@ -1089,46 +1105,58 @@ class _AdminAddCarScreenState
   // ============================================================
 
   Widget _buildPricingSection() {
+    final profile = _selectedPricingProfile;
+
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            Expanded(
-              child: _textField(
-                controller:
-                    _priceController,
-                label:
-                    'Display price / day',
-                hint: '2499',
-                icon:
-                    Icons.currency_rupee_rounded,
-                keyboardType:
-                    TextInputType.number,
-                requiredField: true,
-                prefixText: '${_currencySymbol()} ',
-              ),
-            ),
-
-            const SizedBox(width: 12),
-
-            Expanded(
-              child: _textField(
-                controller:
-                    _sortOrderController,
-                label: 'Sort order',
-                hint: '0',
-                icon:
-                    Icons.sort_rounded,
-                keyboardType:
-                    TextInputType.number,
-              ),
-            ),
-          ],
-        ),
-
-        const SizedBox(height: 14),
-
         _buildPricingProfileSelector(),
+        const SizedBox(height: 12),
+        if (profile != null)
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(13),
+            decoration: BoxDecoration(
+              color: softAccent,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: border),
+            ),
+            child: Row(
+              children: [
+                const Icon(
+                  Icons.payments_outlined,
+                  color: primary,
+                  size: 19,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'Pricing is controlled by this profile. '
+                    'Hourly/daily packages, KM limits, extra-KM rates, '
+                    'special dates and security deposit are configured there.',
+                    style: GoogleFonts.manrope(
+                      fontSize: 10.5,
+                      height: 1.45,
+                      fontWeight: FontWeight.w600,
+                      color: body,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          )
+        else
+          Text(
+            'Pricing is optional during vehicle creation. You can add or change '
+            'the pricing profile later from Edit Car. This keeps vehicle setup '
+            'independent from package setup.',
+            style: GoogleFonts.manrope(
+              fontSize: 10.5,
+              height: 1.45,
+              fontWeight: FontWeight.w500,
+              color: muted,
+            ),
+          ),
       ],
     );
   }
@@ -1188,7 +1216,7 @@ class _AdminAddCarScreenState
                 ? Text(
                     _pricingLoadError != null
                         ? 'Unable to load pricing profiles'
-                        : 'Select an existing pricing profile',
+                        : 'Optional — assign pricing later from Edit Car',
                     style: GoogleFonts.manrope(
                       fontSize: 12,
                       fontWeight: FontWeight.w500,
@@ -1212,7 +1240,7 @@ class _AdminAddCarScreenState
                       ),
                       const SizedBox(height: 3),
                       Text(
-                        '${profile.id} • ${profile.currency} • ${_formatMoney(profile.dailyRate)} / day',
+                        _pricingProfileSummary(profile),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: GoogleFonts.manrope(
@@ -1241,17 +1269,16 @@ class _AdminAddCarScreenState
                 ),
               ),
             ),
-            TextButton.icon(
-              onPressed: _isPricingLoading
-                  ? null
-                  : _createPricingProfile,
-              icon: const Icon(Icons.add_rounded, size: 17),
-              label: const Text('New'),
-              style: TextButton.styleFrom(
-                foregroundColor: primary,
-                padding: const EdgeInsets.symmetric(horizontal: 7),
+            if (!_isPricingLoading)
+              TextButton.icon(
+                onPressed: _selectPricingProfile,
+                icon: const Icon(Icons.edit_outlined, size: 17),
+                label: const Text('Select'),
+                style: TextButton.styleFrom(
+                  foregroundColor: primary,
+                  padding: const EdgeInsets.symmetric(horizontal: 7),
+                ),
               ),
-            ),
           ],
         ),
       ],
@@ -1545,16 +1572,6 @@ class _AdminAddCarScreenState
               if (value == null ||
                   value.trim().isEmpty) {
                 return '$label is required';
-              }
-
-              if (label ==
-                      'Display price / day' &&
-                  (int.tryParse(
-                        value.trim(),
-                      ) ??
-                      0) <=
-                      0) {
-                return 'Enter a valid price';
               }
 
               return null;

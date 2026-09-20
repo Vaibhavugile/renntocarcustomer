@@ -22,7 +22,6 @@ import '../../customers/screens/admin_add_customer_screen.dart';
 enum AdminRentalType {
   hourly,
   daily,
-  weekend,
 }
 
 /// Complete admin-side rental booking flow.
@@ -76,6 +75,10 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   bool _loadingCalendar = false;
   Car? _selectedCar;
   AdminAvailabilitySnapshot? _availabilitySnapshot;
+
+  // Every calendar load gets a generation number. Older async requests are
+  // ignored so a previous vehicle/month can never overwrite the current one.
+  int _availabilityRequestId = 0;
 
   // Month currently displayed by the premium availability calendar.
   DateTime _calendarMonth = DateTime(DateTime.now().year, DateTime.now().month, 1);
@@ -142,7 +145,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     );
   }
 
-  /// Daily/weekend bookings occupy the complete return date until 11:59:59.999 PM.
+  /// Daily bookings occupy the complete return date until 11:59:59.999 PM.
   /// Hourly bookings use the exact selected return time.
   DateTime get _returnDateTime {
     if (_rentalType == AdminRentalType.hourly) {
@@ -191,8 +194,6 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
         return 'Hourly';
       case AdminRentalType.daily:
         return 'Daily';
-      case AdminRentalType.weekend:
-        return 'Weekend';
       case null:
         return 'Select rental type';
     }
@@ -200,16 +201,12 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
 
   bool get _isHourly => _rentalType == AdminRentalType.hourly;
 
-  bool get _isWeekend => _rentalType == AdminRentalType.weekend;
-
   RentalType? get _pricingRentalType {
     switch (_rentalType) {
       case AdminRentalType.hourly:
         return RentalType.hourly;
       case AdminRentalType.daily:
         return RentalType.daily;
-      case AdminRentalType.weekend:
-        return RentalType.weekend;
       case null:
         return null;
     }
@@ -346,9 +343,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       saveText: 'Apply dates',
       helpText: _isHourly
           ? 'Select pickup and return dates'
-          : _isWeekend
-              ? 'Select weekend pickup and return dates'
-              : 'Select daily rental period',
+          : 'Select daily rental period',
       builder: _pickerTheme,
     );
 
@@ -360,18 +355,6 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     if (!returnDate.isAfter(pickup)) {
       _showError('Please select a return date after the pickup date.');
       return;
-    }
-
-    if (_isWeekend) {
-      var cursor = pickup;
-      while (!cursor.isAfter(returnDate)) {
-        if (cursor.weekday != DateTime.saturday &&
-            cursor.weekday != DateTime.sunday) {
-          _showError('Weekend rental can only cover Saturday/Sunday dates.');
-          return;
-        }
-        cursor = cursor.add(const Duration(days: 1));
-      }
     }
 
     if (_selectedCar != null && _rangeContainsBlockedDay(pickup, returnDate)) {
@@ -415,11 +398,6 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       selectableDayPredicate: (day) {
         final normalized = _dayOnly(day);
         if (_blockedFullDays.contains(normalized)) return false;
-        if (_isWeekend &&
-            normalized.weekday != DateTime.saturday &&
-            normalized.weekday != DateTime.sunday) {
-          return false;
-        }
         return true;
       },
       builder: _pickerTheme,
@@ -437,18 +415,6 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     if (_rangeContainsBlockedDay(pickup, returnDate)) {
       _showError('The selected period contains a booked or blocked day.');
       return;
-    }
-
-    if (_isWeekend) {
-      var cursor = pickup;
-      while (!cursor.isAfter(returnDate)) {
-        if (cursor.weekday != DateTime.saturday &&
-            cursor.weekday != DateTime.sunday) {
-          _showError('Weekend rental can only cover Saturday/Sunday dates.');
-          return;
-        }
-        cursor = cursor.add(const Duration(days: 1));
-      }
     }
 
     setState(() {
@@ -493,11 +459,6 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
         final normalized = _dayOnly(day);
         if (!normalized.isAfter(_pickupDate)) return false;
         if (_blockedFullDays.contains(normalized)) return false;
-        if (_isWeekend &&
-            normalized.weekday != DateTime.saturday &&
-            normalized.weekday != DateTime.sunday) {
-          return false;
-        }
         return true;
       },
       builder: _pickerTheme,
@@ -515,18 +476,6 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     if (_rangeContainsBlockedDay(_pickupDate, returnDate)) {
       _showError('The selected period contains a booked or blocked day.');
       return;
-    }
-
-    if (_isWeekend) {
-      var cursor = _dayOnly(_pickupDate);
-      while (!cursor.isAfter(returnDate)) {
-        if (cursor.weekday != DateTime.saturday &&
-            cursor.weekday != DateTime.sunday) {
-          _showError('Weekend rental can only cover Saturday/Sunday dates.');
-          return;
-        }
-        cursor = cursor.add(const Duration(days: 1));
-      }
     }
 
     setState(() {
@@ -598,23 +547,37 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     });
   }
 
-  bool _isSelectableCalendarDay(DateTime day, DateTime? start, DateTime? end) {
+  bool _isSelectableCalendarDay(
+    DateTime day,
+    DateTime? start,
+    DateTime? end,
+  ) {
     final normalized = _dayOnly(day);
-    if (_blockedFullDays.contains(normalized)) return false;
 
-    if (_isWeekend &&
-        normalized.weekday != DateTime.saturday &&
-        normalized.weekday != DateTime.sunday) {
+    // If the vehicle calendar has not loaded yet, do not let the picker
+    // assume that a day is available.
+    if (_selectedCar != null &&
+        (_loadingCalendar || _availabilitySnapshot == null)) {
       return false;
     }
+
+    if (_blockedFullDays.contains(normalized)) return false;
 
     return true;
   }
 
-  void _resetAfterDateChange({bool keepVehicle = false}) {
-    _availableCars = [];
+  void _invalidateAvailabilityCalendar() {
+    // Invalidate every in-flight calendar request.
+    _availabilityRequestId++;
+    _loadingCalendar = false;
     _availabilitySnapshot = null;
     _blockedFullDays.clear();
+  }
+
+  void _resetAfterDateChange({bool keepVehicle = false}) {
+    _invalidateAvailabilityCalendar();
+
+    _availableCars = [];
     if (!keepVehicle) _selectedCar = null;
     _selectedBranchId = null;
     _pricingProfile = null;
@@ -628,13 +591,25 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     final car = _selectedCar;
     if (car == null || !mounted) return;
 
-    final monthStart = DateTime(_calendarMonth.year, _calendarMonth.month, 1);
+    // Capture every piece of state that this request belongs to.
+    final requestId = ++_availabilityRequestId;
+    final carId = car.id;
+    final calendarMonth = DateTime(
+      _calendarMonth.year,
+      _calendarMonth.month,
+      1,
+    );
 
-    setState(() => _loadingCalendar = true);
+    setState(() {
+      _loadingCalendar = true;
+      _blockedFullDays.clear();
+      _availabilitySnapshot = null;
+    });
+
     try {
       final monthEnd = DateTime(
-        _calendarMonth.year,
-        _calendarMonth.month + 1,
+        calendarMonth.year,
+        calendarMonth.month + 1,
         0,
         23,
         59,
@@ -642,17 +617,72 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
         999,
       );
 
+      // AdminAvailabilityService reads operational availability from the
+      // Firestore server, not a potentially stale local cache.
       final snapshot = await _availabilityService.getAvailabilityForRange(
-        rangeStart: monthStart,
+        rangeStart: calendarMonth,
         rangeEnd: monthEnd,
         tenantId: _tenantId,
       );
 
+      // IMPORTANT:
+      // Do not allow an older vehicle/month request to update the UI after a
+      // newer request has already started.
+      if (!mounted || requestId != _availabilityRequestId) {
+        print(
+          '⚠️ IGNORING STALE CALENDAR RESPONSE '
+          '| request=$requestId '
+          '| current=$_availabilityRequestId '
+          '| car=$carId '
+          '| month=$calendarMonth',
+        );
+        return;
+      }
+
+      // The admin may have selected another vehicle while Firestore was
+      // loading. The old response must never be applied to the new vehicle.
+      if (_selectedCar?.id != carId) {
+        print(
+          '⚠️ IGNORING VEHICLE-MISMATCH CALENDAR RESPONSE '
+          '| request=$requestId '
+          '| responseCar=$carId '
+          '| currentCar=${_selectedCar?.id}',
+        );
+        return;
+      }
+
+      // The month can also change while the previous request is in flight.
+      final currentMonth = DateTime(
+        _calendarMonth.year,
+        _calendarMonth.month,
+        1,
+      );
+
+      if (currentMonth != calendarMonth) {
+        print(
+          '⚠️ IGNORING MONTH-MISMATCH CALENDAR RESPONSE '
+          '| request=$requestId '
+          '| responseMonth=$calendarMonth '
+          '| currentMonth=$currentMonth',
+        );
+        return;
+      }
+
       final blocked = <DateTime>{};
+
+      // Daily rentals need complete calendar-day availability. Hourly rentals
+      // still use the live snapshot for BOOKED indicators, while their exact
+      // time interval is checked again before continuing/creating the booking.
       if (!_isHourly) {
-        var cursor = monthStart;
+        var cursor = calendarMonth;
+
         while (!cursor.isAfter(monthEnd)) {
-          final dayStart = DateTime(cursor.year, cursor.month, cursor.day);
+          final dayStart = DateTime(
+            cursor.year,
+            cursor.month,
+            cursor.day,
+          );
+
           final dayEnd = DateTime(
             cursor.year,
             cursor.month,
@@ -662,38 +692,64 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
             59,
             999,
           );
-          final available = _availabilityService.isCarAvailableForRange(
+
+          final available =
+              _availabilityService.isCarAvailableForRange(
             car: car,
             start: dayStart,
             end: dayEnd,
             bookings: snapshot.bookings,
             blocks: snapshot.blocks,
           );
-          if (!available) blocked.add(dayStart);
+
+          if (!available) {
+            blocked.add(dayStart);
+          }
+
           cursor = cursor.add(const Duration(days: 1));
         }
       }
 
-      if (!mounted) return;
+      if (!mounted || requestId != _availabilityRequestId) return;
+
+      if (_selectedCar?.id != carId) return;
+
       setState(() {
         _blockedFullDays
           ..clear()
           ..addAll(blocked);
+
         _availabilitySnapshot = snapshot;
         _loadingCalendar = false;
       });
 
-      print('🔥 CALENDAR AVAILABILITY | car=${car.id} | blockedDays=${blocked.length}');
+      print(
+        '🔥 CALENDAR REFRESHED '
+        '| request=$requestId '
+        '| car=$carId '
+        '| month=$calendarMonth '
+        '| bookings=${snapshot.bookings.length} '
+        '| blocks=${snapshot.blocks.length} '
+        '| blockedDays=${blocked.length}',
+      );
     } catch (e, stackTrace) {
       print('❌ CALENDAR AVAILABILITY ERROR: $e');
       print(stackTrace);
-      if (mounted) setState(() => _loadingCalendar = false);
+
+      if (!mounted || requestId != _availabilityRequestId) return;
+
+      setState(() {
+        _loadingCalendar = false;
+        _availabilitySnapshot = null;
+        _blockedFullDays.clear();
+      });
     }
   }
 
   void _resetFromAvailability() {
+    _invalidateAvailabilityCalendar();
+
     _availableCars = [];
-    _availabilitySnapshot = null;
     _selectedCar = null;
     _selectedBranchId = null;
     _pricingProfile = null;
@@ -793,18 +849,6 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       return;
     }
 
-    if (_isWeekend) {
-      var cursor = _dayOnly(_pickupDate);
-      final endDay = _dayOnly(_returnDate);
-      while (!cursor.isAfter(endDay)) {
-        if (cursor.weekday != DateTime.saturday && cursor.weekday != DateTime.sunday) {
-          _showError('Weekend rental can only cover Saturday/Sunday dates.');
-          return;
-        }
-        cursor = cursor.add(const Duration(days: 1));
-      }
-    }
-
     setState(() {
       _loading = true;
       _error = null;
@@ -857,11 +901,15 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     FocusScope.of(context).unfocus();
 
     // This is the second stage: vehicle selection happens BEFORE rental type.
+    // Invalidate any previous vehicle's in-flight calendar request immediately.
+    _availabilityRequestId++;
+
     // The exact rental-type availability calendar is loaded only after type selection.
     setState(() {
       _selectedCar = car;
       _availabilitySnapshot = null;
       _blockedFullDays.clear();
+      _loadingCalendar = false;
       _selectedBranchId = null;
       _pricingProfile = null;
       _packages = [];
@@ -1095,6 +1143,12 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
         throw Exception('This vehicle has no pricing profile assigned.');
       }
 
+      // Refresh the tenant pricing config first so PricingEngine receives
+      // the same simplified pricing profile that was just loaded.
+      await PricingManager.instance.initialize(
+        tenantId: _tenantId,
+      );
+
       print('🔥 Calling PricingManager.loadPricingForCar...');
       print('🔥 tenantId = $_tenantId');
       print('🔥 pricingProfileId = ${car.pricingProfileId}');
@@ -1119,30 +1173,44 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
         throw Exception('Pricing is unavailable for this vehicle.');
       }
 
-      developer.log('profile.id = ${profile.id}', name: 'AdminNewBooking');
-      developer.log('profile.kmPricingMode = ${profile.kmPricingMode}', name: 'AdminNewBooking');
-      developer.log('profile.kmPackages.length = ${profile.kmPackages.length}', name: 'AdminNewBooking');
-      print('profile.id = ${profile.id}');
-      print('profile.kmPricingMode = ${profile.kmPricingMode}');
-      print('profile.kmPackages.length = ${profile.kmPackages.length}');
+      developer.log(
+        'profile.id = ${profile.id}',
+        name: 'AdminNewBooking',
+      );
 
-      for (final package in profile.kmPackages) {
-        print('PACKAGE => id=${package.id}, name=${package.name}, includedKm=${package.includedKm}, unlimitedKm=${package.unlimitedKm}, dailyRate=${package.dailyRate}, hourlyRate=${package.hourlyRate}, extraKmRate=${package.extraKmRate}');
-        developer.log(
-          'PACKAGE => id=${package.id}, name=${package.name}, includedKm=${package.includedKm}, unlimitedKm=${package.unlimitedKm}, dailyRate=${package.dailyRate}, hourlyRate=${package.hourlyRate}, extraKmRate=${package.extraKmRate}',
-          name: 'AdminNewBooking',
+      final rentalType = _pricingRentalType ?? RentalType.daily;
+      final packages = profile.packagesFor(rentalType);
+
+      developer.log(
+        'profile package count for ${rentalType.value} = ${packages.length}',
+        name: 'AdminNewBooking',
+      );
+      print('profile.id = ${profile.id}');
+      print(
+        'profile package count for ${rentalType.value} = ${packages.length}',
+      );
+
+      for (final package in packages) {
+        print(
+          'PACKAGE => id=${package.id}, '
+          'name=${package.name}, '
+          'includedKm=${package.includedKm}, '
+          'unlimitedKm=${package.unlimitedKm}, '
+          'dailyRate=${package.safeDailyRate}, '
+          'hourlyRate=${package.safeHourlyRate}, '
+          'extraKmRate=${package.safeExtraKmRate}',
         );
       }
 
-      // Diagnostic raw Firestore read. This is intentionally only for debugging
-      // the exact document and field shape when the parsed package list is empty.
-      if (profile.kmPackages.isEmpty) {
+      // Diagnostic raw Firestore read when the selected rental type has no
+      // packages. This reads the simplified package fields only.
+      if (packages.isEmpty) {
         developer.log(
-          'Parsed kmPackages is EMPTY. Reading raw Firestore document...',
+          'Parsed pricing packages are EMPTY. Reading raw Firestore document...',
           name: 'AdminNewBooking',
         );
 
-        print('Parsed kmPackages EMPTY. Reading raw Firestore document...');
+        print('Parsed pricing packages EMPTY. Reading raw Firestore document...');
         final rawDoc = await _firestore
             .collection('tenants')
             .doc(_tenantId)
@@ -1162,23 +1230,23 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
 
         final rawData = rawDoc.data();
         print('RAW pricing document keys = ${rawData?.keys.toList()}');
-        print('RAW kmPackages = ${rawData?['kmPackages']}');
-        print('RAW packages = ${rawData?['packages']}');
-        print('RAW kmPricingMode = ${rawData?['kmPricingMode']}');
+        print('RAW hourlyPackages = ${rawData?['hourlyPackages']}');
+        print('RAW dailyPackages = ${rawData?['dailyPackages']}');
+        print('RAW pricing package fields = ${rawData?['rentalTypePricing']}');
         developer.log(
           'RAW pricing document keys = ${rawData?.keys.toList()}',
           name: 'AdminNewBooking',
         );
         developer.log(
-          'RAW kmPackages = ${rawData?['kmPackages']}',
+          'RAW hourlyPackages = ${rawData?['hourlyPackages']}',
           name: 'AdminNewBooking',
         );
         developer.log(
-          'RAW packages = ${rawData?['packages']}',
+          'RAW dailyPackages = ${rawData?['dailyPackages']}',
           name: 'AdminNewBooking',
         );
         developer.log(
-          'RAW kmPricingMode = ${rawData?['kmPricingMode']}',
+          'RAW pricing package fields = ${rawData?['rentalTypePricing']}',
           name: 'AdminNewBooking',
         );
 
@@ -1189,28 +1257,25 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
         }
 
         throw Exception(
-          'Pricing profile exists, but PricingProfile.fromMap returned 0 KM packages. Check the DEBUG logs for RAW kmPackages field.',
+          'Pricing profile exists, but PricingProfile.fromMap returned 0 pricing packages. Check the DEBUG logs for RAW hourlyPackages/dailyPackages fields.',
         );
       }
 
-      final packages = profile.kmPackages;
       final typePackages = packages.where((package) {
+        if (!package.isActive) return false;
         switch (_rentalType) {
           case AdminRentalType.hourly:
-            return package.unlimitedKm || package.hourlyRate > 0;
+            return package.unlimitedKm || package.safeHourlyRate > 0;
           case AdminRentalType.daily:
-            return package.unlimitedKm || package.dailyRate > 0;
-          case AdminRentalType.weekend:
-            return package.unlimitedKm || package.weekendRate > 0;
+            return package.unlimitedKm || package.safeDailyRate > 0;
           case null:
             return true;
         }
       }).toList();
 
-      if (profile.kmPricingMode == KmPricingMode.package &&
-          packages.isEmpty) {
+      if (typePackages.isEmpty) {
         throw Exception(
-          'No KM packages were found in pricing profile "${profile.id}".',
+          'No active KM packages are available for ${_rentalTypeLabel.toLowerCase()} rental.',
         );
       }
 
@@ -1280,7 +1345,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
         returnDateTime: _returnDateTime,
         actualKm: 0,
         plannedKm: 0,
-        rentalType: _pricingRentalType!,
+        rentalType: _pricingRentalType ?? RentalType.daily,
         selectedKmPackageId: selectedPackage.id,
         selectedKm: selectedPackage.unlimitedKm
             ? null
@@ -1300,19 +1365,10 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   }
 
   double _packageDisplayRate(KmPricingPackage package) {
-    if (package.dailyRate > 0) {
-      return package.dailyRate;
+    if (_rentalType == AdminRentalType.hourly) {
+      return package.safeHourlyRate;
     }
-    if (package.hourlyRate > 0) {
-      return package.hourlyRate;
-    }
-    if (package.weekendRate > 0) {
-      return package.weekendRate;
-    }
-    if (package.weeklyRate > 0) {
-      return package.weeklyRate;
-    }
-    return package.monthlyRate;
+    return package.safeDailyRate;
   }
 
   double _editableAmount(double? overrideValue, double fallback) =>
@@ -1369,7 +1425,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   void _syncPricingOverrides(PricingResult result) {
     _adminRentalPrice = result.rentalPrice;
     _adminExtraKmCharge = result.extraKmCharge;
-    // Daily/weekend rentals are date-based. Their return date already occupies
+    // Daily rentals are date-based. Their return date already occupies
     // the complete selected day, so the 23:59:59.999 availability boundary
     // must never be interpreted as paid "extra hours".
     _adminExtraTimeCharge =
@@ -1645,7 +1701,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       kmPackageName: result.selectedKmPackageName,
       includedKm: result.includedKm,
       unlimitedKm: result.unlimitedKm,
-      extraKmRate: result.selectedKmPackageExtraKmRate ?? profile.extraKmRate,
+      extraKmRate: result.selectedKmPackageExtraKmRate ?? _selectedPackage?.safeExtraKmRate ?? 0,
       baseAmount: _effectiveRentalPrice,
       extraKmAmount: _effectiveExtraKmCharge,
       extraTimeAmount: _effectiveExtraTimeCharge,
@@ -1674,7 +1730,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       kmPackageName: result.selectedKmPackageName,
       includedKm: result.includedKm,
       unlimitedKm: result.unlimitedKm,
-      extraKmRate: result.selectedKmPackageExtraKmRate ?? profile.extraKmRate,
+      extraKmRate: result.selectedKmPackageExtraKmRate ?? _selectedPackage?.safeExtraKmRate ?? 0,
       pricingProfileId: result.pricingProfileId,
       baseAmount: _effectiveRentalPrice,
       extraKmAmount: _effectiveExtraKmCharge,
@@ -1770,6 +1826,15 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       _step -= 1;
     });
   }
+
+  @override
+  void dispose() {
+    // Prevent any in-flight availability response from being applied after
+    // this screen has been removed.
+    _availabilityRequestId++;
+    super.dispose();
+  }
+
 
   @override
   Widget build(BuildContext context) {
@@ -2019,12 +2084,6 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
         'subtitle': 'One or multiple calendar days',
         'icon': Icons.calendar_month_rounded,
       },
-      {
-        'type': AdminRentalType.weekend,
-        'title': 'Weekend',
-        'subtitle': 'Saturday / Sunday only',
-        'icon': Icons.weekend_rounded,
-      },
     ];
 
     return Column(
@@ -2049,10 +2108,15 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
                     _showError('Please select a vehicle first.');
                     return;
                   }
+                  // Changing rental type changes the availability semantics,
+                  // so an in-flight calendar response from the previous type is stale.
+                  _availabilityRequestId++;
+
                   setState(() {
                     _rentalType = type;
                     _blockedFullDays.clear();
                     _availabilitySnapshot = null;
+                    _loadingCalendar = false;
                     _selectedBranchId = null;
                     _pricingProfile = null;
                     _packages = [];
@@ -2144,11 +2208,6 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
                 Icons.date_range_rounded,
                 'Daily',
                 'Selected calendar dates are blocked through 11:59:59 PM on the return date.',
-              ),
-              _ruleRow(
-                Icons.weekend_rounded,
-                'Weekend',
-                'Only configured weekend days can be selected and blocked.',
               ),
             ],
           ),
@@ -2318,6 +2377,14 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   bool _bookingOverlapsDay(AvailabilityBooking booking, DateTime day) {
     if (!_bookingIsVisibleForCalendar(booking)) return false;
 
+    // The availability snapshot contains the tenant's bookings for the
+    // requested month. The calendar, however, belongs to ONE selected car.
+    // Never mark a day BOOKED because another vehicle has a booking.
+    final selectedCarId = _selectedCar?.id;
+    if (selectedCarId == null || booking.carId != selectedCarId) {
+      return false;
+    }
+
     final start = booking.pickupDateTime;
     final end = booking.returnDateTime;
     final dayStart = _dayOnly(day);
@@ -2384,11 +2451,6 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     if (normalized.isBefore(today)) return false;
     if (_loadingCalendar || _availabilitySnapshot == null) return false;
     if (_isDayBooked(normalized) || _isDayUnavailable(normalized)) return false;
-    if (_isWeekend &&
-        normalized.weekday != DateTime.saturday &&
-        normalized.weekday != DateTime.sunday) {
-      return false;
-    }
     return true;
   }
 
@@ -2465,10 +2527,15 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
 
     if (next.isBefore(minMonth) || next.isAfter(maxMonth)) return;
 
+    // Invalidate the previous month's request BEFORE changing the month.
+    // This prevents the old request from winning a race with the new one.
+    _availabilityRequestId++;
+
     setState(() {
       _calendarMonth = next;
       _blockedFullDays.clear();
       _availabilitySnapshot = null;
+      _loadingCalendar = true;
     });
 
     await _loadAvailabilityCalendar();
@@ -2793,9 +2860,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
           title: 'Vehicle-specific availability calendar',
           subtitle: _isHourly
               ? 'Now that the vehicle and rental type are selected, choose the exact pickup and return time. The vehicle is checked again for the exact interval.'
-              : _isWeekend
-                  ? 'Weekend mode allows Saturday/Sunday dates only. Each selected day is blocked from 12:00 AM to 11:59 PM.'
-                  : 'Daily mode supports multiple calendar days and blocks every selected date from 12:00 AM to 11:59 PM.',
+              : 'Daily mode supports multiple calendar days and blocks every selected date from 12:00 AM to 11:59 PM.',
         ),
         const SizedBox(height: 14),
         _sectionCard(
@@ -3055,11 +3120,9 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   List<KmPricingPackage> get _packagesForRentalType {
     switch (_rentalType) {
       case AdminRentalType.hourly:
-        return _packages.where((p) => p.unlimitedKm || p.hourlyRate > 0).toList();
+        return _packages.where((p) => p.unlimitedKm || p.safeHourlyRate > 0).toList();
       case AdminRentalType.daily:
-        return _packages.where((p) => p.unlimitedKm || p.dailyRate > 0).toList();
-      case AdminRentalType.weekend:
-        return _packages.where((p) => p.unlimitedKm || p.weekendRate > 0).toList();
+        return _packages.where((p) => p.unlimitedKm || p.safeDailyRate > 0).toList();
       case null:
         return _packages;
     }
@@ -3068,11 +3131,9 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   double _selectedPackageRate(KmPricingPackage package) {
     switch (_rentalType) {
       case AdminRentalType.hourly:
-        return package.hourlyRate;
+        return package.safeHourlyRate;
       case AdminRentalType.daily:
-        return package.dailyRate;
-      case AdminRentalType.weekend:
-        return package.weekendRate;
+        return package.safeDailyRate;
       case null:
         return _packageDisplayRate(package);
     }
@@ -3309,7 +3370,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
         else ...[
           _sectionCard(
             title: 'Admin pricing override',
-            subtitle: 'Edit this booking only. Daily/weekend rentals do not add extra-time charges from the calendar boundary.',
+            subtitle: 'Edit this booking only. Daily rentals do not add extra-time charges from the calendar boundary.',
             child: Column(
               children: [
                 _editablePriceField(label: 'Rental', value: _effectiveRentalPrice, field: 'rental'),

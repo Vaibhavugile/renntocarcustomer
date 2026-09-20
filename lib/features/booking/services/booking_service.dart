@@ -13,6 +13,8 @@ import '../../admin/availability/services/admin_availability_service.dart';
 /// - Every booking is tenant-scoped.
 /// - Customer reads are restricted to the authenticated Firebase UID.
 /// - Booking stores historical car/branch/customer/pricing snapshots.
+/// - Pricing supports only hourly and daily rentals; booking pricing is a
+///   historical snapshot and can be overridden at booking level.
 /// - Availability checks consider vehicle status, blocks and blocking bookings.
 ///
 /// NOTE:
@@ -148,12 +150,11 @@ class BookingService {
     );
   }
 
-  /// Availability check that understands hourly/daily/weekend rental
-  /// semantics.
+  /// Availability check for the simplified hourly/daily rental model.
   ///
   /// Hourly uses the exact timestamps.
-  /// Daily/weekend occupy the complete selected calendar days and therefore
-  /// end at 23:59:59.999999 on the selected return date.
+  /// Daily occupies the complete selected calendar days and therefore ends
+  /// at the end of the selected return date.
   Future<bool> isCarAvailableForRental({
     required String tenantId,
     required String carId,
@@ -363,21 +364,17 @@ class BookingService {
     const allowed = {
       'hourly',
       'daily',
-      'weekend',
     };
 
     if (!allowed.contains(rentalType)) {
       throw Exception(
-        'Invalid rental type. Use hourly, daily or weekend.',
+        'Invalid rental type. Use hourly or daily.',
       );
     }
 
-    if (booking.pricingVersion < 1) {
-      throw Exception(
-        'Invalid pricing version.',
-      );
-    }
-
+    // The simplified pricing model no longer requires an active pricing
+    // version. pricingVersion remains on Booking only as historical
+    // compatibility for old Firestore records.
     if (booking.pricingProfileId.trim().isEmpty) {
       throw Exception(
         'Pricing profile is required.',
@@ -393,8 +390,7 @@ class BookingService {
     final type =
         rentalType?.trim().toLowerCase();
 
-    if (type == 'daily' ||
-        type == 'weekend') {
+    if (type == 'daily') {
       final start = DateTime(
         pickupDateTime.year,
         pickupDateTime.month,

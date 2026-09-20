@@ -1,232 +1,263 @@
-enum KmPackageRentalType {
-  hourly,
-  daily,
-  weekend,
-  weekly,
-  monthly,
-}
-
+/// Simple KM package used by the rental pricing system.
+///
+/// One package represents a KM allowance and contains:
+///   - included KM
+///   - hourly price
+///   - daily price
+///   - extra KM price
+///
+/// Weekend / holiday / festival changes are NOT stored here.
+/// They belong to PricingProfile.specialRates.
+///
+/// Important:
+/// RentalType intentionally is NOT imported here. This keeps this model
+/// independent from PricingProfile and avoids circular dependencies.
+/// Rental-type helpers therefore accept String values such as "hourly" and
+/// "daily".
 class KmPricingPackage {
   final String id;
   final String name;
 
-  /// KM included in this package.
-  /// null = unlimited package.
+  /// null or unlimitedKm=true means unlimited KM.
+  ///
+  /// For daily rental, this amount is included PER RENTAL DAY.
+  /// For hourly rental, this amount is the included allowance for
+  /// the selected hourly package.
   final int? includedKm;
 
-  /// Whether this is an unlimited KM package.
   final bool unlimitedKm;
-
-  /// Whether this package is active and selectable.
   final bool isActive;
 
-  /// Rental types supported by this package.
-  ///
-  /// Empty means backward-compatible/default behavior:
-  /// hourly, daily, weekend, weekly and monthly can be considered.
-  final List<KmPackageRentalType> supportedRentalTypes;
-
-  // ---------------------------------------------------------------------------
-  // DURATION PRICES
-  // ---------------------------------------------------------------------------
-
+  /// Normal hourly package price.
   final double hourlyRate;
+
+  /// Normal daily package price.
   final double dailyRate;
-  final double weekendRate;
-  final double weeklyRate;
-  final double monthlyRate;
 
-  // ---------------------------------------------------------------------------
-  // BILLING RULES
-  // ---------------------------------------------------------------------------
-
-  /// Minimum billable hours when this package is used for hourly rental.
-  ///
-  /// Example:
-  /// actual = 3 hours
-  /// minimum = 5
-  /// billable = 5
-  final int minimumBillingHours;
-
-  /// Minimum billable days when this package is used for daily rental.
-  final int minimumBillingDays;
-
-  /// Minimum number of selected days for a weekend rental.
-  final int minimumWeekendDays;
-
-  /// Maximum number of selected days for a weekend rental.
-  ///
-  /// 0 = no maximum.
-  final int maximumWeekendDays;
-
-  // ---------------------------------------------------------------------------
-  // EXTRA KM
-  // ---------------------------------------------------------------------------
-
-  /// Amount charged for every KM above includedKm.
+  /// Extra KM charge after the included allowance.
   final double extraKmRate;
 
   const KmPricingPackage({
     required this.id,
     required this.name,
-    required this.includedKm,
-    required this.unlimitedKm,
+    this.includedKm,
+    this.unlimitedKm = false,
     this.isActive = true,
-    this.supportedRentalTypes = const [],
-    required this.hourlyRate,
-    required this.dailyRate,
-    required this.weekendRate,
-    required this.weeklyRate,
-    required this.monthlyRate,
-    this.minimumBillingHours = 1,
-    this.minimumBillingDays = 1,
-    this.minimumWeekendDays = 1,
-    this.maximumWeekendDays = 0,
-    required this.extraKmRate,
+    this.hourlyRate = 0,
+    this.dailyRate = 0,
+    this.extraKmRate = 0,
   });
 
   // ===========================================================================
-  // RENTAL TYPE HELPERS
+  // SAFE VALUES
   // ===========================================================================
 
-  bool supportsRentalType(KmPackageRentalType type) {
-    if (!isActive) {
-      return false;
+  /// A safe included-KM value.
+  ///
+  /// Unlimited packages intentionally return 0 because no extra KM should
+  /// ever be calculated for them.
+  int get safeIncludedKm {
+    if (unlimitedKm) {
+      return 0;
     }
 
-    // Empty list preserves compatibility with existing Firebase packages.
-    if (supportedRentalTypes.isEmpty) {
-      return true;
+    final value = includedKm ?? 0;
+    return value < 0 ? 0 : value;
+  }
+
+  /// A safe normal hourly price.
+  double get safeHourlyRate {
+    if (!hourlyRate.isFinite || hourlyRate < 0) {
+      return 0;
     }
-
-    return supportedRentalTypes.contains(type);
+    return hourlyRate;
   }
 
-  double rateFor(KmPackageRentalType type) {
-    switch (type) {
-      case KmPackageRentalType.hourly:
-        return hourlyRate;
-      case KmPackageRentalType.daily:
-        return dailyRate;
-      case KmPackageRentalType.weekend:
-        return weekendRate;
-      case KmPackageRentalType.weekly:
-        return weeklyRate;
-      case KmPackageRentalType.monthly:
-        return monthlyRate;
+  /// A safe normal daily price.
+  double get safeDailyRate {
+    if (!dailyRate.isFinite || dailyRate < 0) {
+      return 0;
     }
+    return dailyRate;
   }
 
-  bool hasRateFor(KmPackageRentalType type) {
-    return supportsRentalType(type) && rateFor(type) > 0;
-  }
-
-  int get safeMinimumBillingHours {
-    return minimumBillingHours > 0 ? minimumBillingHours : 1;
-  }
-
-  int get safeMinimumBillingDays {
-    return minimumBillingDays > 0 ? minimumBillingDays : 1;
-  }
-
-  int get safeMinimumWeekendDays {
-    return minimumWeekendDays > 0 ? minimumWeekendDays : 1;
-  }
-
-  int get safeMaximumWeekendDays {
-    return maximumWeekendDays > 0 ? maximumWeekendDays : 0;
-  }
-
-  int billableHourlyHours(int actualHours) {
-    final safeActualHours = actualHours < 0 ? 0 : actualHours;
-
-    return safeActualHours < safeMinimumBillingHours
-        ? safeMinimumBillingHours
-        : safeActualHours;
-  }
-
-  int billableDailyDays(int actualDays) {
-    final safeActualDays = actualDays < 0 ? 0 : actualDays;
-
-    return safeActualDays < safeMinimumBillingDays
-        ? safeMinimumBillingDays
-        : safeActualDays;
-  }
-
-  bool isWeekendDayCountAllowed(int days) {
-    if (days < safeMinimumWeekendDays) {
-      return false;
+  /// Extra KM is never negative or non-finite.
+  double get safeExtraKmRate {
+    if (!extraKmRate.isFinite || extraKmRate < 0) {
+      return 0;
     }
-
-    if (safeMaximumWeekendDays > 0 &&
-        days > safeMaximumWeekendDays) {
-      return false;
-    }
-
-    return true;
+    return extraKmRate;
   }
 
   // ===========================================================================
-  // FIREBASE → MODEL
+  // LEGACY DISPLAY-ONLY COMPATIBILITY GETTERS
+  // ===========================================================================
+  // Weekend / weekly / monthly are not supported by the new pricing engine.
+  // These zero-value getters keep older display code compiling during migration.
+  double get weekendRate => 0;
+  double get weeklyRate => 0;
+  double get monthlyRate => 0;
+
+  // ===========================================================================
+  // RENTAL TYPE SUPPORT
+  // ===========================================================================
+
+  /// Whether this package can be selected for hourly rental.
+  bool get supportsHourly =>
+      isActive && safeHourlyRate > 0;
+
+  /// Whether this package can be selected for daily rental.
+  bool get supportsDaily =>
+      isActive && safeDailyRate > 0;
+
+  /// Whether this package supports the requested rental type.
+  ///
+  /// Supported values:
+  ///   hourly
+  ///   daily
+  bool supportsRentalType(
+    String rentalType,
+  ) {
+    switch (rentalType.trim().toLowerCase()) {
+      case 'hourly':
+        return supportsHourly;
+
+      case 'daily':
+        return supportsDaily;
+
+      default:
+        return false;
+    }
+  }
+
+  /// Return the normal rate for a rental type.
+  ///
+  /// Unknown rental types return 0.
+  double rateFor(
+    String rentalType,
+  ) {
+    switch (rentalType.trim().toLowerCase()) {
+      case 'hourly':
+        return safeHourlyRate;
+
+      case 'daily':
+        return safeDailyRate;
+
+      default:
+        return 0;
+    }
+  }
+
+  /// Whether a usable normal rate exists.
+  bool hasRateFor(
+    String rentalType,
+  ) {
+    return isActive &&
+        rateFor(rentalType) > 0;
+  }
+
+  // ===========================================================================
+  // INCLUDED KM
+  // ===========================================================================
+
+  /// Calculate included KM for a daily booking.
+  ///
+  /// Example:
+  ///   package = 250 KM/day
+  ///   rental  = 4 days
+  ///   included = 1000 KM
+  int includedKmForDays(
+    int rentalDays,
+  ) {
+    if (unlimitedKm) {
+      return 0;
+    }
+
+    final days =
+        rentalDays < 1 ? 1 : rentalDays;
+
+    return safeIncludedKm * days;
+  }
+
+  /// Calculate extra KM from actual KM.
+  ///
+  /// For daily rental, pass the number of rental days so the package
+  /// allowance is multiplied by the number of days.
+  int extraKmFor({
+    required int actualKm,
+    int rentalDays = 1,
+    bool dailyRental = false,
+  }) {
+    if (unlimitedKm) {
+      return 0;
+    }
+
+    final actual =
+        actualKm < 0 ? 0 : actualKm;
+
+    final included = dailyRental
+        ? includedKmForDays(rentalDays)
+        : safeIncludedKm;
+
+    final extra =
+        actual - included;
+
+    return extra > 0 ? extra : 0;
+  }
+
+  /// Calculate the monetary charge for extra KM.
+  double extraKmChargeFor({
+    required int actualKm,
+    int rentalDays = 1,
+    bool dailyRental = false,
+  }) {
+    final extraKm = extraKmFor(
+      actualKm: actualKm,
+      rentalDays: rentalDays,
+      dailyRental: dailyRental,
+    );
+
+    return extraKm * safeExtraKmRate;
+  }
+
+  // ===========================================================================
+  // FIRESTORE -> MODEL
   // ===========================================================================
 
   factory KmPricingPackage.fromMap(
     String id,
     Map<String, dynamic> map,
   ) {
-    return KmPricingPackage(
-      id: id,
-      name: map['name']?.toString() ?? '',
-      includedKm: _toNullableInt(map['includedKm']),
-      unlimitedKm: _toBool(map['unlimitedKm'], false),
+    final normalizedId =
+        id.trim().isEmpty
+            ? 'km_package'
+            : id.trim();
 
+    return KmPricingPackage(
+      id: normalizedId,
+      name: _toStringValue(
+        map['name'],
+        normalizedId,
+      ),
+      includedKm: _toNullableInt(
+        map['includedKm'] ??
+            map['includedKmPerDay'] ??
+            map['km'],
+      ),
+      unlimitedKm: _toBool(
+        map['unlimitedKm'],
+        false,
+      ),
       isActive: _toBool(
         map['isActive'],
         true,
       ),
-
-      supportedRentalTypes:
-          _parseSupportedRentalTypes(
-        map['supportedRentalTypes'] ??
-            map['rentalTypes'],
-      ),
-
       hourlyRate: _toDouble(
         map['hourlyRate'],
       ),
       dailyRate: _toDouble(
         map['dailyRate'],
       ),
-      weekendRate: _toDouble(
-        map['weekendRate'],
-      ),
-      weeklyRate: _toDouble(
-        map['weeklyRate'],
-      ),
-      monthlyRate: _toDouble(
-        map['monthlyRate'],
-      ),
-
-      minimumBillingHours: _toInt(
-        map['minimumBillingHours'],
-        1,
-      ),
-
-      minimumBillingDays: _toInt(
-        map['minimumBillingDays'],
-        1,
-      ),
-
-      minimumWeekendDays: _toInt(
-        map['minimumWeekendDays'],
-        1,
-      ),
-
-      maximumWeekendDays: _toInt(
-        map['maximumWeekendDays'],
-        0,
-      ),
-
       extraKmRate: _toDouble(
         map['extraKmRate'],
       ),
@@ -234,7 +265,7 @@ class KmPricingPackage {
   }
 
   // ===========================================================================
-  // MODEL → FIREBASE
+  // MODEL -> FIRESTORE
   // ===========================================================================
 
   Map<String, dynamic> toMap() {
@@ -242,35 +273,10 @@ class KmPricingPackage {
       'name': name,
       'includedKm': includedKm,
       'unlimitedKm': unlimitedKm,
-
       'isActive': isActive,
-
-      'supportedRentalTypes':
-          supportedRentalTypes
-              .map(
-                (type) => type.name,
-              )
-              .toList(),
-
-      'hourlyRate': hourlyRate,
-      'dailyRate': dailyRate,
-      'weekendRate': weekendRate,
-      'weeklyRate': weeklyRate,
-      'monthlyRate': monthlyRate,
-
-      'minimumBillingHours':
-          safeMinimumBillingHours,
-
-      'minimumBillingDays':
-          safeMinimumBillingDays,
-
-      'minimumWeekendDays':
-          safeMinimumWeekendDays,
-
-      'maximumWeekendDays':
-          safeMaximumWeekendDays,
-
-      'extraKmRate': extraKmRate,
+      'hourlyRate': safeHourlyRate,
+      'dailyRate': safeDailyRate,
+      'extraKmRate': safeExtraKmRate,
     };
   }
 
@@ -285,86 +291,129 @@ class KmPricingPackage {
     bool clearIncludedKm = false,
     bool? unlimitedKm,
     bool? isActive,
-    List<KmPackageRentalType>? supportedRentalTypes,
     double? hourlyRate,
     double? dailyRate,
-    double? weekendRate,
-    double? weeklyRate,
-    double? monthlyRate,
-    int? minimumBillingHours,
-    int? minimumBillingDays,
-    int? minimumWeekendDays,
-    int? maximumWeekendDays,
     double? extraKmRate,
   }) {
     return KmPricingPackage(
       id: id ?? this.id,
       name: name ?? this.name,
-      includedKm:
-          clearIncludedKm
-              ? null
-              : includedKm ?? this.includedKm,
+      includedKm: clearIncludedKm
+          ? null
+          : (includedKm ?? this.includedKm),
       unlimitedKm:
           unlimitedKm ?? this.unlimitedKm,
       isActive:
           isActive ?? this.isActive,
-      supportedRentalTypes:
-          supportedRentalTypes ??
-              this.supportedRentalTypes,
       hourlyRate:
           hourlyRate ?? this.hourlyRate,
       dailyRate:
           dailyRate ?? this.dailyRate,
-      weekendRate:
-          weekendRate ?? this.weekendRate,
-      weeklyRate:
-          weeklyRate ?? this.weeklyRate,
-      monthlyRate:
-          monthlyRate ?? this.monthlyRate,
-      minimumBillingHours:
-          minimumBillingHours ??
-              this.minimumBillingHours,
-      minimumBillingDays:
-          minimumBillingDays ??
-              this.minimumBillingDays,
-      minimumWeekendDays:
-          minimumWeekendDays ??
-              this.minimumWeekendDays,
-      maximumWeekendDays:
-          maximumWeekendDays ??
-              this.maximumWeekendDays,
       extraKmRate:
           extraKmRate ?? this.extraKmRate,
     );
   }
 
   // ===========================================================================
-  // HELPERS
+  // VALIDATION
   // ===========================================================================
 
-  static double _toDouble(dynamic value) {
-    if (value is num) {
-      return value.toDouble();
+  /// Returns validation errors without throwing.
+  List<String> validate() {
+    final errors = <String>[];
+
+    if (id.trim().isEmpty) {
+      errors.add(
+        'KM package ID is required.',
+      );
     }
 
-    return double.tryParse(
-          value?.toString() ?? '',
-        ) ??
-        0;
+    if (name.trim().isEmpty) {
+      errors.add(
+        'KM package name is required.',
+      );
+    }
+
+    if (includedKm != null &&
+        includedKm! < 0) {
+      errors.add(
+        'Included KM cannot be negative.',
+      );
+    }
+
+    if (!hourlyRate.isFinite ||
+        hourlyRate < 0) {
+      errors.add(
+        'Hourly rate cannot be negative.',
+      );
+    }
+
+    if (!dailyRate.isFinite ||
+        dailyRate < 0) {
+      errors.add(
+        'Daily rate cannot be negative.',
+      );
+    }
+
+    if (!extraKmRate.isFinite ||
+        extraKmRate < 0) {
+      errors.add(
+        'Extra KM rate cannot be negative.',
+      );
+    }
+
+    if (isActive &&
+        !unlimitedKm &&
+        hourlyRate <= 0 &&
+        dailyRate <= 0) {
+      errors.add(
+        'An active KM package must have an hourly or daily rate.',
+      );
+    }
+
+    return List<String>.unmodifiable(
+      errors,
+    );
   }
 
-  static int _toInt(
+  bool get isValid =>
+      validate().isEmpty;
+
+  // ===========================================================================
+  // PARSING HELPERS
+  // ===========================================================================
+
+  static String _toStringValue(
     dynamic value,
-    int fallback,
+    String fallback,
   ) {
+    final text =
+        value?.toString().trim() ?? '';
+
+    return text.isEmpty
+        ? fallback
+        : text;
+  }
+
+  static double _toDouble(
+    dynamic value,
+  ) {
+    double result;
+
     if (value is num) {
-      return value.toInt();
+      result = value.toDouble();
+    } else {
+      result = double.tryParse(
+            value?.toString().trim() ?? '',
+          ) ??
+          0;
     }
 
-    return int.tryParse(
-          value?.toString() ?? '',
-        ) ??
-        fallback;
+    if (!result.isFinite) {
+      return 0;
+    }
+
+    return result;
   }
 
   static int? _toNullableInt(
@@ -378,9 +427,11 @@ class KmPricingPackage {
       return value.toInt();
     }
 
-    return int.tryParse(
-      value.toString(),
+    final parsed = int.tryParse(
+      value.toString().trim(),
     );
+
+    return parsed;
   }
 
   static bool _toBool(
@@ -396,7 +447,10 @@ class KmPricingPackage {
     }
 
     final normalized =
-        value?.toString().trim().toLowerCase();
+        value
+            ?.toString()
+            .trim()
+            .toLowerCase();
 
     if (normalized == 'true' ||
         normalized == '1' ||
@@ -413,61 +467,9 @@ class KmPricingPackage {
     return fallback;
   }
 
-  static List<KmPackageRentalType>
-      _parseSupportedRentalTypes(
-    dynamic value,
-  ) {
-    if (value is! List) {
-      return const [];
-    }
-
-    final result =
-        <KmPackageRentalType>[];
-
-    for (final item in value) {
-      final normalized =
-          item
-              .toString()
-              .trim()
-              .toLowerCase();
-
-      switch (normalized) {
-        case 'hourly':
-          result.add(
-            KmPackageRentalType.hourly,
-          );
-          break;
-
-        case 'daily':
-          result.add(
-            KmPackageRentalType.daily,
-          );
-          break;
-
-        case 'weekend':
-          result.add(
-            KmPackageRentalType.weekend,
-          );
-          break;
-
-        case 'weekly':
-          result.add(
-            KmPackageRentalType.weekly,
-          );
-          break;
-
-        case 'monthly':
-          result.add(
-            KmPackageRentalType.monthly,
-          );
-          break;
-      }
-    }
-
-    return List<KmPackageRentalType>.unmodifiable(
-      result,
-    );
-  }
+  // ===========================================================================
+  // DEBUG
+  // ===========================================================================
 
   @override
   String toString() {
@@ -477,12 +479,8 @@ class KmPricingPackage {
         'includedKm: $includedKm, '
         'unlimitedKm: $unlimitedKm, '
         'isActive: $isActive, '
-        'supportedRentalTypes: $supportedRentalTypes, '
         'hourlyRate: $hourlyRate, '
         'dailyRate: $dailyRate, '
-        'weekendRate: $weekendRate, '
-        'weeklyRate: $weeklyRate, '
-        'monthlyRate: $monthlyRate, '
         'extraKmRate: $extraKmRate'
         ')';
   }

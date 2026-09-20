@@ -1,3 +1,5 @@
+import 'km_pricing_package.dart';
+
 import 'pricing_profile.dart';
 import 'km_slab.dart';
 import 'rental_package.dart';
@@ -13,101 +15,58 @@ import 'cancellation_rule.dart';
 /// Firestore:
 ///   tenants/{tenantId}/pricing/{pricingDocumentId}
 ///
-/// Vehicle-specific pricing is stored separately:
+/// Vehicle pricing itself lives in PricingProfile:
 ///   tenants/{tenantId}/pricingProfiles/{pricingProfileId}
 ///
-/// PricingConfig is a configuration container only. It does not calculate
-/// booking totals. PricingEngine is the calculation authority.
+/// PricingConfig is configuration only. PricingEngine is responsible for
+/// calculating booking totals.
 ///
-/// Historical bookings must save their own pricingSnapshot. Updating this
-/// configuration must therefore never mutate an existing booking's price.
+/// Simplified rental model:
+///   - Hourly
+///   - Daily
+///   - KM packages
+///   - Special date rates
+///   - Security deposits
+///
+/// Historical bookings must store their own pricing snapshot. Updating this
+/// configuration must never change an existing booking.
 class PricingConfig {
   final String id;
 
-  // ---------------------------------------------------------------------------
-  // CORE PRICING
-  // ---------------------------------------------------------------------------
-
-  /// Multiple vehicle pricing profiles are supported.
-  ///
-  /// Example:
-  ///   pricing_creta
-  ///   pricing_seltos
-  ///   pricing_city
-  ///   pricing_fortuner
-  ///
-  /// Each Car points to one profile using pricingProfileId.
+  /// All pricing profiles loaded for this tenant.
   final List<PricingProfile> profiles;
 
-  // ---------------------------------------------------------------------------
-  // KM
-  // ---------------------------------------------------------------------------
-
+  /// Legacy/global KM slabs retained only for compatibility with existing
+  /// add-on/admin code. New vehicle pricing should use package includedKm.
   final List<KmSlab> kmSlabs;
 
-  // ---------------------------------------------------------------------------
-  // LEGACY / GLOBAL RENTAL PACKAGES
-  // ---------------------------------------------------------------------------
-
-  /// Retained for compatibility with the older pricing architecture.
+  /// Legacy/global rental packages retained for compatibility.
   ///
-  /// New vehicle pricing should normally use PricingProfile.kmPackages.
+  /// New rental pricing must use PricingProfile.hourlyPackages and
+  /// PricingProfile.dailyPackages.
   final List<RentalPackage> packages;
 
-  // ---------------------------------------------------------------------------
-  // EXTRA CHARGES
-  // ---------------------------------------------------------------------------
-
   final List<ExtraCharge> extraCharges;
-
-  // ---------------------------------------------------------------------------
-  // ADD-ONS
-  // ---------------------------------------------------------------------------
-
   final List<AddOn> addOns;
-
-  // ---------------------------------------------------------------------------
-  // PROTECTION
-  // ---------------------------------------------------------------------------
-
   final List<ProtectionPlan> protectionPlans;
-
-  // ---------------------------------------------------------------------------
-  // DISCOUNTS
-  // ---------------------------------------------------------------------------
-
   final List<DiscountRule> discounts;
-
-  // ---------------------------------------------------------------------------
-  // TAXES
-  // ---------------------------------------------------------------------------
-
   final List<TaxRule> taxes;
-
-  // ---------------------------------------------------------------------------
-  // CANCELLATION
-  // ---------------------------------------------------------------------------
-
   final List<CancellationRule> cancellationRules;
-
-  // ---------------------------------------------------------------------------
-  // STATUS
-  // ---------------------------------------------------------------------------
 
   final bool isActive;
 
   const PricingConfig({
     required this.id,
-    required this.profiles,
-    required this.kmSlabs,
-    required this.packages,
-    required this.extraCharges,
-    required this.addOns,
-    required this.protectionPlans,
-    required this.discounts,
-    required this.taxes,
-    required this.cancellationRules,
-    required this.isActive,
+    this.profiles = const [],
+    this.kmSlabs = const [],
+    this.packages = const [],
+    this.extraCharges = const [],
+    this.addOns = const [],
+    this.protectionPlans = const [],
+    this.discounts = const [],
+    this.taxes = const [],
+    this.cancellationRules = const [],
+    this.isActive = true,
   });
 
   // ===========================================================================
@@ -147,16 +106,16 @@ class PricingConfig {
     return profile;
   }
 
-  List<PricingProfile> get activeProfiles {
-    return List<PricingProfile>.unmodifiable(
-      profiles.where(
-        (profile) => profile.isActive,
-      ),
-    );
-  }
+  List<PricingProfile>
+      get activeProfiles =>
+          List<PricingProfile>.unmodifiable(
+            profiles.where(
+              (profile) => profile.isActive,
+            ),
+          );
 
   // ===========================================================================
-  // VEHICLE LOOKUPS
+  // VEHICLE / GROUP LOOKUPS
   // ===========================================================================
 
   PricingProfile? getProfileForVehicle(
@@ -193,11 +152,66 @@ class PricingConfig {
     return profile;
   }
 
+  PricingProfile? getProfileForPricingGroup(
+    String pricingGroupId,
+  ) {
+    final normalizedGroupId =
+        pricingGroupId.trim();
+
+    if (normalizedGroupId.isEmpty) {
+      return null;
+    }
+
+    for (final profile in profiles) {
+      if (profile.pricingGroupId ==
+          normalizedGroupId) {
+        return profile;
+      }
+    }
+
+    return null;
+  }
+
+  PricingProfile? getActiveProfileForPricingGroup(
+    String pricingGroupId,
+  ) {
+    final profile =
+        getProfileForPricingGroup(
+      pricingGroupId,
+    );
+
+    if (profile == null ||
+        !profile.isActive) {
+      return null;
+    }
+
+    return profile;
+  }
+
+  List<PricingProfile>
+      getProfilesForPricingGroup(
+    String pricingGroupId,
+  ) {
+    final normalized =
+        pricingGroupId.trim();
+
+    if (normalized.isEmpty) {
+      return const [];
+    }
+
+    return List<PricingProfile>.unmodifiable(
+      profiles.where(
+        (profile) =>
+            profile.pricingGroupId ==
+            normalized,
+      ),
+    );
+  }
+
   // ===========================================================================
   // RENTAL TYPE HELPERS
   // ===========================================================================
 
-  /// Returns profiles that support the selected rental type.
   List<PricingProfile>
       getProfilesForRentalType(
     RentalType type,
@@ -211,13 +225,13 @@ class PricingConfig {
     );
   }
 
-  /// Returns rental types supported by at least one active profile.
-  List<RentalType> get supportedRentalTypes {
+  /// Only hourly and daily exist in the simplified RentalType enum.
+  List<RentalType>
+      get supportedRentalTypes {
     final result =
         <RentalType>[];
 
-    for (final type
-        in RentalType.values) {
+    for (final type in RentalType.values) {
       if (profiles.any(
         (profile) =>
             profile.isActive &&
@@ -232,10 +246,6 @@ class PricingConfig {
     );
   }
 
-  /// Returns rental types available for a selected date/time range across all
-  /// active pricing profiles.
-  ///
-  /// This is useful for admin/customer UI before a vehicle has been selected.
   List<RentalType>
       availableRentalTypesForRange({
     required DateTime start,
@@ -248,8 +258,7 @@ class PricingConfig {
     final result =
         <RentalType>[];
 
-    for (final type
-        in RentalType.values) {
+    for (final type in RentalType.values) {
       final available =
           profiles.any(
         (profile) =>
@@ -273,46 +282,36 @@ class PricingConfig {
   }
 
   // ===========================================================================
-  // GLOBAL KM SLABS
+  // GLOBAL COMPATIBILITY DATA
   // ===========================================================================
 
-  List<KmSlab> get activeKmSlabs {
-    return List<KmSlab>.unmodifiable(
-      kmSlabs.where(
-        (slab) => slab.isActive,
-      ),
-    );
-  }
+  List<KmSlab> get activeKmSlabs =>
+      List<KmSlab>.unmodifiable(
+        kmSlabs.where(
+          (slab) => slab.isActive,
+        ),
+      );
 
-  // ===========================================================================
-  // GLOBAL PACKAGES
-  // ===========================================================================
-
-  List<RentalPackage> get activePackages {
-    return List<RentalPackage>.unmodifiable(
-      packages.where(
-        (package) => package.isActive,
-      ),
-    );
-  }
+  List<RentalPackage> get activePackages =>
+      List<RentalPackage>.unmodifiable(
+        packages.where(
+          (package) => package.isActive,
+        ),
+      );
 
   // ===========================================================================
   // ADD-ONS
   // ===========================================================================
 
-  List<AddOn> get activeAddOns {
-    return List<AddOn>.unmodifiable(
-      addOns.where(
-        (addOn) => addOn.isActive,
-      ),
-    );
-  }
+  List<AddOn> get activeAddOns =>
+      List<AddOn>.unmodifiable(
+        addOns.where(
+          (addOn) => addOn.isActive,
+        ),
+      );
 
-  AddOn? getAddOn(
-    String id,
-  ) {
-    final normalizedId =
-        id.trim();
+  AddOn? getAddOn(String id) {
+    final normalizedId = id.trim();
 
     if (normalizedId.isEmpty) {
       return null;
@@ -332,26 +331,23 @@ class PricingConfig {
   // ===========================================================================
 
   List<ProtectionPlan>
-      get activeProtectionPlans {
-    return List<ProtectionPlan>.unmodifiable(
-      protectionPlans.where(
-        (plan) => plan.isActive,
-      ),
-    );
-  }
+      get activeProtectionPlans =>
+          List<ProtectionPlan>.unmodifiable(
+            protectionPlans.where(
+              (plan) => plan.isActive,
+            ),
+          );
 
   ProtectionPlan? getProtectionPlan(
     String id,
   ) {
-    final normalizedId =
-        id.trim();
+    final normalizedId = id.trim();
 
     if (normalizedId.isEmpty) {
       return null;
     }
 
-    for (final plan
-        in protectionPlans) {
+    for (final plan in protectionPlans) {
       if (plan.id == normalizedId) {
         return plan;
       }
@@ -365,26 +361,24 @@ class PricingConfig {
   // ===========================================================================
 
   List<DiscountRule>
-      get activeDiscounts {
-    return List<DiscountRule>.unmodifiable(
-      discounts.where(
-        (discount) => discount.isActive,
-      ),
-    );
-  }
+      get activeDiscounts =>
+          List<DiscountRule>.unmodifiable(
+            discounts.where(
+              (discount) =>
+                  discount.isActive,
+            ),
+          );
 
   DiscountRule? getDiscount(
     String id,
   ) {
-    final normalizedId =
-        id.trim();
+    final normalizedId = id.trim();
 
     if (normalizedId.isEmpty) {
       return null;
     }
 
-    for (final discount
-        in discounts) {
+    for (final discount in discounts) {
       if (discount.id == normalizedId) {
         return discount;
       }
@@ -397,42 +391,39 @@ class PricingConfig {
   // TAXES
   // ===========================================================================
 
-  List<TaxRule> get activeTaxes {
-    return List<TaxRule>.unmodifiable(
-      taxes.where(
-        (tax) => tax.isActive,
-      ),
-    );
-  }
+  List<TaxRule> get activeTaxes =>
+      List<TaxRule>.unmodifiable(
+        taxes.where(
+          (tax) => tax.isActive,
+        ),
+      );
 
   // ===========================================================================
   // EXTRA CHARGES
   // ===========================================================================
 
   List<ExtraCharge>
-      get activeExtraCharges {
-    return List<ExtraCharge>.unmodifiable(
-      extraCharges.where(
-        (charge) => charge.isActive,
-      ),
-    );
-  }
+      get activeExtraCharges =>
+          List<ExtraCharge>.unmodifiable(
+            extraCharges.where(
+              (charge) => charge.isActive,
+            ),
+          );
 
   // ===========================================================================
   // CANCELLATION
   // ===========================================================================
 
   List<CancellationRule>
-      get activeCancellationRules {
-    return List<CancellationRule>.unmodifiable(
-      cancellationRules.where(
-        (rule) => rule.isActive,
-      ),
-    );
-  }
+      get activeCancellationRules =>
+          List<CancellationRule>.unmodifiable(
+            cancellationRules.where(
+              (rule) => rule.isActive,
+            ),
+          );
 
   // ===========================================================================
-  // FIRESTORE → MODEL
+  // FIRESTORE -> MODEL
   // ===========================================================================
 
   factory PricingConfig.fromMap(
@@ -441,7 +432,6 @@ class PricingConfig {
   ) {
     return PricingConfig(
       id: id,
-
       profiles:
           _parseList<PricingProfile>(
         map['profiles'],
@@ -453,7 +443,6 @@ class PricingConfig {
           );
         },
       ),
-
       kmSlabs:
           _parseList<KmSlab>(
         map['kmSlabs'],
@@ -465,7 +454,6 @@ class PricingConfig {
           );
         },
       ),
-
       packages:
           _parseList<RentalPackage>(
         map['packages'],
@@ -477,7 +465,6 @@ class PricingConfig {
           );
         },
       ),
-
       extraCharges:
           _parseList<ExtraCharge>(
         map['extraCharges'],
@@ -489,7 +476,6 @@ class PricingConfig {
           );
         },
       ),
-
       addOns:
           _parseList<AddOn>(
         map['addOns'],
@@ -501,7 +487,6 @@ class PricingConfig {
           );
         },
       ),
-
       protectionPlans:
           _parseList<ProtectionPlan>(
         map['protectionPlans'],
@@ -513,7 +498,6 @@ class PricingConfig {
           );
         },
       ),
-
       discounts:
           _parseList<DiscountRule>(
         map['discounts'],
@@ -525,7 +509,6 @@ class PricingConfig {
           );
         },
       ),
-
       taxes:
           _parseList<TaxRule>(
         map['taxes'],
@@ -537,7 +520,6 @@ class PricingConfig {
           );
         },
       ),
-
       cancellationRules:
           _parseList<CancellationRule>(
         map['cancellationRules'],
@@ -549,7 +531,6 @@ class PricingConfig {
           );
         },
       ),
-
       isActive:
           _toBool(
         map['isActive'],
@@ -559,7 +540,7 @@ class PricingConfig {
   }
 
   // ===========================================================================
-  // MODEL → FIRESTORE
+  // MODEL -> FIRESTORE
   // ===========================================================================
 
   Map<String, dynamic> toMap() {
@@ -573,6 +554,7 @@ class PricingConfig {
           )
           .toList(),
 
+      // Kept for existing non-pricing features.
       'kmSlabs': kmSlabs
           .map(
             (item) => {
@@ -582,6 +564,7 @@ class PricingConfig {
           )
           .toList(),
 
+      // Legacy compatibility only.
       'packages': packages
           .map(
             (item) => {
@@ -609,15 +592,14 @@ class PricingConfig {
           )
           .toList(),
 
-      'protectionPlans':
-          protectionPlans
-              .map(
-                (item) => {
-                  'id': item.id,
-                  ...item.toMap(),
-                },
-              )
-              .toList(),
+      'protectionPlans': protectionPlans
+          .map(
+            (item) => {
+              'id': item.id,
+              ...item.toMap(),
+            },
+          )
+          .toList(),
 
       'discounts': discounts
           .map(
@@ -670,23 +652,17 @@ class PricingConfig {
   }) {
     return PricingConfig(
       id: id ?? this.id,
-      profiles:
-          profiles ?? this.profiles,
-      kmSlabs:
-          kmSlabs ?? this.kmSlabs,
-      packages:
-          packages ?? this.packages,
+      profiles: profiles ?? this.profiles,
+      kmSlabs: kmSlabs ?? this.kmSlabs,
+      packages: packages ?? this.packages,
       extraCharges:
           extraCharges ?? this.extraCharges,
-      addOns:
-          addOns ?? this.addOns,
+      addOns: addOns ?? this.addOns,
       protectionPlans:
-          protectionPlans ??
-              this.protectionPlans,
+          protectionPlans ?? this.protectionPlans,
       discounts:
           discounts ?? this.discounts,
-      taxes:
-          taxes ?? this.taxes,
+      taxes: taxes ?? this.taxes,
       cancellationRules:
           cancellationRules ??
               this.cancellationRules,
@@ -701,7 +677,7 @@ class PricingConfig {
 
   /// Returns validation errors instead of throwing.
   ///
-  /// Useful for an admin pricing editor before saving.
+  /// Useful before an admin saves pricing configuration.
   List<String> validate() {
     final errors =
         <String>[];
@@ -739,11 +715,88 @@ class PricingConfig {
         );
       }
 
-      if (profile.pricingVersion < 1) {
+      if (profile.name.trim().isEmpty) {
         errors.add(
           'Pricing profile "$profileId" '
-          'has invalid pricingVersion.',
+          'has no name.',
         );
+      }
+
+      if (!profile.hourlyEnabled &&
+          !profile.dailyEnabled) {
+        errors.add(
+          'Pricing profile "$profileId" '
+          'has neither an hourly nor daily package.',
+        );
+      }
+
+      final packageIds =
+          <String>{};
+
+      for (final package
+          in <KmPricingPackage>[
+        ...profile.hourlyPackages,
+        ...profile.dailyPackages,
+      ]) {
+        if (!packageIds.add(
+          package.id,
+        )) {
+          // Same package can legitimately exist in both lists, so this is
+          // informationally not an error.
+          continue;
+        }
+
+        if (package.id.trim().isEmpty) {
+          errors.add(
+            'Pricing profile "$profileId" '
+            'contains a package with an empty ID.',
+          );
+        }
+
+        if (package.hourlyRate < 0 ||
+            package.dailyRate < 0 ||
+            package.extraKmRate < 0) {
+          errors.add(
+            'Pricing profile "$profileId" '
+            'contains a negative package price.',
+          );
+        }
+
+        if (!package.unlimitedKm &&
+            package.safeIncludedKm < 0) {
+          errors.add(
+            'Pricing profile "$profileId" '
+            'contains invalid included KM.',
+          );
+        }
+      }
+
+      final specialRateIds =
+          <String>{};
+
+      for (final rate
+          in profile.specialRates) {
+        if (rate.id.trim().isEmpty) {
+          errors.add(
+            'Pricing profile "$profileId" '
+            'contains a special rate with an empty ID.',
+          );
+        } else if (!specialRateIds.add(
+          rate.id,
+        )) {
+          errors.add(
+            'Duplicate special rate ID '
+            '"${rate.id}" in profile "$profileId".',
+          );
+        }
+
+        if (rate.endDate
+            .isBefore(rate.startDate)) {
+          errors.add(
+            'Special rate "${rate.id}" '
+            'has an end date before its start date.',
+          );
+        }
       }
     }
 
@@ -785,12 +838,11 @@ class PricingConfig {
     );
   }
 
-  bool get isValid {
-    return validate().isEmpty;
-  }
+  bool get isValid =>
+      validate().isEmpty;
 
   // ===========================================================================
-  // LIST PARSER
+  // PARSER
   // ===========================================================================
 
   static List<T> _parseList<T>(
@@ -800,31 +852,28 @@ class PricingConfig {
       int index,
     ) parser,
   ) {
-    if (value is! List) {
+    if (value is! Iterable) {
       return <T>[];
     }
 
     final result =
         <T>[];
 
-    for (
-      int index = 0;
-      index < value.length;
-      index++
-    ) {
-      final item =
-          value[index];
+    var index = 0;
 
-      if (item is Map) {
+    for (final rawItem in value) {
+      if (rawItem is Map) {
         result.add(
           parser(
             Map<String, dynamic>.from(
-              item,
+              rawItem,
             ),
             index,
           ),
         );
       }
+
+      index++;
     }
 
     return result;
