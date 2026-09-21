@@ -1,3 +1,4 @@
+import 'dart:developer' as developer;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -8,6 +9,7 @@ import '../../branches/screens/admin_branches_screen.dart';
 import '../../availability/screens/admin_availability_screen.dart';
 import '../../customers/screens/admin_customers_screen.dart';
 import '../../availability/screens/admin_new_booking_screen.dart';
+import '../../booking/screens/admin_bookings_screen.dart';
 import '../../pricing/screens/admin_pricing_profiles_screen.dart';
 
 class AdminDashboardScreen extends StatefulWidget {
@@ -607,24 +609,75 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     );
   }
 
-  void _openBookings() {
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(
-          content: Text(
-            'Bookings management screen will be connected next.',
-            style: GoogleFonts.manrope(
-              color: Colors.white,
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          backgroundColor: heading,
-          behavior: SnackBarBehavior.floating,
-          margin: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+  Future<void> _openBookings({bool closeDrawerFirst = false}) async {
+    developer.log(
+      'BOOKINGS CLICKED | tenant=$tenantId | closeDrawerFirst=$closeDrawerFirst',
+      name: 'ADMIN_DASHBOARD',
+    );
+
+    if (closeDrawerFirst && mounted) {
+      Navigator.of(context).pop();
+      await Future<void>.delayed(const Duration(milliseconds: 180));
+    }
+
+    if (!mounted) return;
+
+    developer.log(
+      'PUSHING AdminBookingsScreen',
+      name: 'ADMIN_DASHBOARD',
+    );
+
+    try {
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) {
+            developer.log(
+              'BUILDING AdminBookingsScreen',
+              name: 'ADMIN_DASHBOARD',
+            );
+            return const AdminBookingsScreen();
+          },
         ),
       );
+
+      developer.log(
+        'RETURNED FROM AdminBookingsScreen',
+        name: 'ADMIN_DASHBOARD',
+      );
+
+      if (!mounted) return;
+      await _loadDashboard(refresh: true);
+    } catch (e, stackTrace) {
+      developer.log(
+        'Bookings navigation failed',
+        name: 'ADMIN_DASHBOARD',
+        error: e,
+        stackTrace: stackTrace,
+      );
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            backgroundColor: heading,
+            behavior: SnackBarBehavior.floating,
+            margin: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+            ),
+            content: Text(
+              'Unable to open bookings: ${_cleanError(e)}',
+              style: GoogleFonts.manrope(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        );
+    }
   }
 
   Widget _buildRecentBookings() {
@@ -677,7 +730,13 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     }
 
     return Column(
-      children: _recentBookings.map(_bookingCard).toList(),
+      children: _recentBookings.map((booking) {
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => _openBookings(),
+          child: _bookingCard(booking),
+        );
+      }).toList(),
     );
   }
 
@@ -977,7 +1036,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                   _drawerItem(
                     icon: Icons.calendar_month_rounded,
                     title: 'Bookings',
-                    onTap: _openBookings,
+                    onTap: () => _openBookings(closeDrawerFirst: true),
                   ),
                   _drawerItem(
                     icon: Icons.people_alt_outlined,

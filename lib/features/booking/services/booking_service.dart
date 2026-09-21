@@ -42,6 +42,12 @@ class BookingService {
           .doc(tenantId)
           .collection('bookings');
 
+  CollectionReference<Map<String, dynamic>> _payments(
+    String tenantId,
+    String bookingId,
+  ) =>
+      _bookings(tenantId).doc(bookingId).collection('payments');
+
   CollectionReference<Map<String, dynamic>> _cars(
     String tenantId,
   ) =>
@@ -244,6 +250,7 @@ class BookingService {
   Future<Booking> createBooking({
     required String tenantId,
     required Booking booking,
+    PaymentTransaction? initialPayment,
   }) async {
     final user = _requireUser();
 
@@ -341,7 +348,41 @@ class BookingService {
     data['pickupBranchId'] = enriched.pickupBranchId;
     data['returnBranchId'] = enriched.returnBranchId;
 
-    await reference.set(data);
+    final payment = _prepareInitialPayment(
+      tenantId: tenantId,
+      booking: enriched,
+      payment: initialPayment,
+      defaultSource: PaymentSource.customer,
+      defaultRecordedBy: user.uid,
+      defaultRecordedByRole: 'customer',
+    );
+
+    final batch = _firestore.batch();
+    batch.set(reference, data);
+
+    if (payment != null) {
+      final paymentRef = _payments(tenantId, reference.id).doc();
+      batch.set(
+        paymentRef,
+        payment.copyWith(
+          paymentId: paymentRef.id,
+          bookingId: reference.id,
+          tenantId: tenantId,
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
+        ).toMap()
+          ..['createdAt'] = FieldValue.serverTimestamp()
+          ..['updatedAt'] = FieldValue.serverTimestamp(),
+      );
+
+      final summary = _paymentSummaryForInitialTransaction(
+        booking: enriched,
+        transaction: payment,
+      );
+      batch.update(reference, summary);
+    }
+
+    await batch.commit();
 
     final saved = await reference.get();
 
@@ -455,6 +496,7 @@ class BookingService {
   Future<Booking> createBookingForAdmin({
     required String tenantId,
     required Booking booking,
+    PaymentTransaction? initialPayment,
   }) async {
     final adminUser = _requireUser();
 
@@ -584,7 +626,41 @@ class BookingService {
     data['pickupBranchId'] = enriched.pickupBranchId;
     data['returnBranchId'] = enriched.returnBranchId;
 
-    await reference.set(data);
+    final payment = _prepareInitialPayment(
+      tenantId: tenantId,
+      booking: enriched,
+      payment: initialPayment,
+      defaultSource: PaymentSource.admin,
+      defaultRecordedBy: adminUser.uid,
+      defaultRecordedByRole: 'admin',
+    );
+
+    final batch = _firestore.batch();
+    batch.set(reference, data);
+
+    if (payment != null) {
+      final paymentRef = _payments(tenantId, reference.id).doc();
+      batch.set(
+        paymentRef,
+        payment.copyWith(
+          paymentId: paymentRef.id,
+          bookingId: reference.id,
+          tenantId: tenantId,
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
+        ).toMap()
+          ..['createdAt'] = FieldValue.serverTimestamp()
+          ..['updatedAt'] = FieldValue.serverTimestamp(),
+      );
+
+      final summary = _paymentSummaryForInitialTransaction(
+        booking: enriched,
+        transaction: payment,
+      );
+      batch.update(reference, summary);
+    }
+
+    await batch.commit();
 
     final saved = await reference.get();
 
@@ -595,6 +671,604 @@ class BookingService {
     return Booking.fromMap(
       saved.id,
       saved.data()!,
+    );
+  }
+
+
+  // ============================================================
+  // PAYMENT LEDGER
+  // ============================================================
+
+  /// Adds a verified/manual payment to the booking payment ledger and
+  /// atomically updates the booking payment summary.
+  ///
+  /// For Razorpay, call this only after the Razorpay payment/signature has
+  /// been verified by the application's trusted payment flow.
+  Future<PaymentTransaction> addPaymentForAdmin({
+    required String tenantId,
+    required String bookingId,
+    required double amount,
+    required PaymentMethodType method,
+    String? transactionReference,
+    String? gateway,
+    String? razorpayOrderId,
+    String? razorpayPaymentId,
+    String? razorpaySignature,
+    String? gatewayTransactionId,
+    String? gatewayStatus,
+    String? gatewayMethod,
+    String? note,
+    DateTime? paymentDate,
+    String currency = 'INR',
+  }) async {
+    final admin = await _requireTenantAdmin(tenantId: tenantId);
+    final bookingRef = _bookings(tenantId).doc(bookingId);
+    final paymentRef = _payments(tenantId, bookingId).doc();
+
+    return _recordPayment(
+      tenantId: tenantId,
+      bookingRef: bookingRef,
+      paymentRef: paymentRef,
+      amount: amount,
+      method: method,
+      source: PaymentSource.admin,
+      transactionReference: transactionReference,
+      gateway: gateway,
+      razorpayOrderId: razorpayOrderId,
+      razorpayPaymentId: razorpayPaymentId,
+      razorpaySignature: razorpaySignature,
+      gatewayTransactionId: gatewayTransactionId,
+      gatewayStatus: gatewayStatus,
+      gatewayMethod: gatewayMethod,
+      note: note,
+      paymentDate: paymentDate,
+      currency: currency,
+      recordedBy: _auth.currentUser!.uid,
+      recordedByRole: 'admin',
+    );
+  }
+
+  /// Records a customer/Razorpay payment after it has been verified.
+  ///
+  /// This is deliberately separate from the UI Razorpay SDK. The SDK/payment
+  /// verification layer should validate the gateway result first, then call
+  /// this method.
+  Future<PaymentTransaction> addVerifiedCustomerPayment({
+    required String tenantId,
+    required String bookingId,
+    required double amount,
+    required PaymentMethodType method,
+    String? transactionReference,
+    String? gateway,
+    String? razorpayOrderId,
+    String? razorpayPaymentId,
+    String? razorpaySignature,
+    String? gatewayTransactionId,
+    String? gatewayStatus,
+    String? gatewayMethod,
+    String? note,
+    DateTime? paymentDate,
+    String currency = 'INR',
+  }) async {
+    final user = _requireUser();
+    final bookingRef = _bookings(tenantId).doc(bookingId);
+    final doc = await bookingRef.get();
+
+    if (!doc.exists || doc.data() == null) {
+      throw Exception('Booking not found.');
+    }
+
+    final booking = Booking.fromMap(doc.id, doc.data()!);
+    _validateTenant(booking, tenantId);
+    _validateCustomer(booking, user.uid);
+
+    return _recordPayment(
+      tenantId: tenantId,
+      bookingRef: bookingRef,
+      paymentRef: _payments(tenantId, bookingId).doc(),
+      amount: amount,
+      method: method,
+      source: PaymentSource.customer,
+      transactionReference: transactionReference,
+      gateway: gateway,
+      razorpayOrderId: razorpayOrderId,
+      razorpayPaymentId: razorpayPaymentId,
+      razorpaySignature: razorpaySignature,
+      gatewayTransactionId: gatewayTransactionId,
+      gatewayStatus: gatewayStatus,
+      gatewayMethod: gatewayMethod,
+      note: note,
+      paymentDate: paymentDate,
+      currency: currency,
+      recordedBy: user.uid,
+      recordedByRole: 'customer',
+    );
+  }
+
+  Future<PaymentTransaction> _recordPayment({
+    required String tenantId,
+    required DocumentReference<Map<String, dynamic>> bookingRef,
+    required DocumentReference<Map<String, dynamic>> paymentRef,
+    required double amount,
+    required PaymentMethodType method,
+    required PaymentSource source,
+    required String? transactionReference,
+    required String? gateway,
+    required String? razorpayOrderId,
+    required String? razorpayPaymentId,
+    required String? razorpaySignature,
+    required String? gatewayTransactionId,
+    required String? gatewayStatus,
+    required String? gatewayMethod,
+    required String? note,
+    required DateTime? paymentDate,
+    required String currency,
+    required String? recordedBy,
+    required String? recordedByRole,
+  }) async {
+    if (amount <= 0) {
+      throw Exception('Payment amount must be greater than zero.');
+    }
+
+    final bookingDoc = await bookingRef.get();
+    if (!bookingDoc.exists || bookingDoc.data() == null) {
+      throw Exception('Booking not found.');
+    }
+
+    final booking = Booking.fromMap(
+      bookingDoc.id,
+      bookingDoc.data()!,
+    );
+    _validateTenant(booking, tenantId);
+
+    if (booking.isFinished) {
+      throw Exception('Payments cannot be added to a finished booking.');
+    }
+
+    if (method == PaymentMethodType.razorpay &&
+        (razorpayPaymentId == null ||
+            razorpayPaymentId.trim().isEmpty)) {
+      throw Exception(
+        'Razorpay payment ID is required for a Razorpay payment.',
+      );
+    }
+
+    final currentBalance = booking.balanceAmount;
+    if (amount > currentBalance + 0.009) {
+      throw Exception(
+        'Payment amount exceeds the outstanding booking balance.',
+      );
+    }
+
+    // Prevent duplicate Razorpay payment capture.
+    if (razorpayPaymentId != null &&
+        razorpayPaymentId.trim().isNotEmpty) {
+      final duplicate = await _payments(tenantId, booking.bookingId)
+          .where(
+            'razorpayPaymentId',
+            isEqualTo: razorpayPaymentId.trim(),
+          )
+          .limit(1)
+          .get();
+
+      if (duplicate.docs.isNotEmpty) {
+        throw Exception('This Razorpay payment has already been recorded.');
+      }
+    }
+
+    final transaction = PaymentTransaction(
+      paymentId: paymentRef.id,
+      tenantId: tenantId,
+      bookingId: booking.bookingId,
+      customerId: booking.customerId,
+      amount: amount,
+      currency: currency,
+      status: PaymentTransactionStatus.paid,
+      method: method,
+      source: source,
+      transactionReference: transactionReference,
+      gateway: gateway,
+      razorpayOrderId: razorpayOrderId,
+      razorpayPaymentId: razorpayPaymentId,
+      razorpaySignature: razorpaySignature,
+      gatewayTransactionId: gatewayTransactionId,
+      gatewayStatus: gatewayStatus,
+      gatewayMethod: gatewayMethod,
+      customerName: booking.customerName,
+      customerPhone: booking.customerPhone,
+      customerEmail: booking.customerEmail,
+      recordedBy: recordedBy,
+      recordedByRole: recordedByRole,
+      note: note,
+      paymentDate: paymentDate ?? DateTime.now(),
+      createdAt: DateTime.now(),
+      updatedAt: DateTime.now(),
+    );
+
+    final batch = _firestore.batch();
+    batch.set(
+      paymentRef,
+      transaction.toMap()
+        ..['createdAt'] = FieldValue.serverTimestamp()
+        ..['updatedAt'] = FieldValue.serverTimestamp()
+        ..['paymentDate'] = Timestamp.fromDate(
+          transaction.paymentDate ?? DateTime.now(),
+        ),
+    );
+
+    batch.update(
+      bookingRef,
+      _paymentSummaryAfterTransaction(
+        booking: booking,
+        transaction: transaction,
+      ),
+    );
+
+    await batch.commit();
+
+    return transaction;
+  }
+
+  /// Returns all payment transactions for a booking, newest first.
+  Future<List<PaymentTransaction>> getBookingPaymentsForAdmin({
+    required String tenantId,
+    required String bookingId,
+  }) async {
+    await _requireTenantAdmin(tenantId: tenantId);
+
+    final booking = await getBookingForAdmin(
+      tenantId: tenantId,
+      bookingId: bookingId,
+    );
+
+    if (booking == null) {
+      throw Exception('Booking not found.');
+    }
+
+    final snapshot = await _payments(tenantId, bookingId)
+        .orderBy('paymentDate', descending: true)
+        .get();
+
+    return snapshot.docs
+        .map(
+          (doc) => PaymentTransaction.fromMap(
+            doc.id,
+            doc.data(),
+          ),
+        )
+        .toList();
+  }
+
+  /// Reads one payment transaction.
+  Future<PaymentTransaction?> getPaymentForAdmin({
+    required String tenantId,
+    required String bookingId,
+    required String paymentId,
+  }) async {
+    await _requireTenantAdmin(tenantId: tenantId);
+
+    final booking = await getBookingForAdmin(
+      tenantId: tenantId,
+      bookingId: bookingId,
+    );
+
+    if (booking == null) {
+      throw Exception('Booking not found.');
+    }
+
+    final doc = await _payments(tenantId, bookingId)
+        .doc(paymentId)
+        .get();
+
+    if (!doc.exists || doc.data() == null) {
+      return null;
+    }
+
+    return PaymentTransaction.fromMap(
+      doc.id,
+      doc.data()!,
+    );
+  }
+
+  /// Records a refund as a separate immutable ledger transaction.
+  Future<PaymentTransaction> refundPaymentForAdmin({
+    required String tenantId,
+    required String bookingId,
+    required double amount,
+    String? originalPaymentId,
+    PaymentMethodType method = PaymentMethodType.razorpay,
+    String? transactionReference,
+    String? gateway,
+    String? razorpayPaymentId,
+    String? gatewayTransactionId,
+    String? note,
+    DateTime? paymentDate,
+    String currency = 'INR',
+  }) async {
+    await _requireTenantAdmin(tenantId: tenantId);
+
+    if (amount <= 0) {
+      throw Exception('Refund amount must be greater than zero.');
+    }
+
+    final bookingRef = _bookings(tenantId).doc(bookingId);
+    final bookingDoc = await bookingRef.get();
+
+    if (!bookingDoc.exists || bookingDoc.data() == null) {
+      throw Exception('Booking not found.');
+    }
+
+    final booking = Booking.fromMap(
+      bookingDoc.id,
+      bookingDoc.data()!,
+    );
+    _validateTenant(booking, tenantId);
+
+    final refundableAmount =
+        booking.paidAmount - booking.refundAmount;
+
+    if (amount > refundableAmount + 0.009) {
+      throw Exception(
+        'Refund amount exceeds the refundable paid amount.',
+      );
+    }
+
+    final paymentRef = _payments(tenantId, bookingId).doc();
+
+    final transaction = PaymentTransaction(
+      paymentId: paymentRef.id,
+      tenantId: tenantId,
+      bookingId: bookingId,
+      customerId: booking.customerId,
+      amount: amount,
+      currency: currency,
+      status: PaymentTransactionStatus.refunded,
+      method: method,
+      source: PaymentSource.admin,
+      transactionReference: transactionReference,
+      gateway: gateway,
+      razorpayPaymentId: razorpayPaymentId,
+      gatewayTransactionId: gatewayTransactionId,
+      customerName: booking.customerName,
+      customerPhone: booking.customerPhone,
+      customerEmail: booking.customerEmail,
+      recordedBy: _auth.currentUser!.uid,
+      recordedByRole: 'admin',
+      note: note,
+      originalPaymentId: originalPaymentId,
+      refundAmount: amount,
+      paymentDate: paymentDate ?? DateTime.now(),
+      createdAt: DateTime.now(),
+      updatedAt: DateTime.now(),
+    );
+
+    final batch = _firestore.batch();
+
+    batch.set(
+      paymentRef,
+      transaction.toMap()
+        ..['createdAt'] = FieldValue.serverTimestamp()
+        ..['updatedAt'] = FieldValue.serverTimestamp()
+        ..['paymentDate'] = Timestamp.fromDate(
+          transaction.paymentDate ?? DateTime.now(),
+        ),
+    );
+
+    batch.update(
+      bookingRef,
+      _paymentSummaryAfterTransaction(
+        booking: booking,
+        transaction: transaction,
+      ),
+    );
+
+    await batch.commit();
+
+    return transaction;
+  }
+
+  /// Recalculates booking payment summary from the ledger.
+  ///
+  /// Useful for reconciliation/admin repair tools.
+  Future<Booking> recalculateBookingPaymentSummary({
+    required String tenantId,
+    required String bookingId,
+  }) async {
+    await _requireTenantAdmin(tenantId: tenantId);
+
+    final bookingRef = _bookings(tenantId).doc(bookingId);
+    final bookingDoc = await bookingRef.get();
+
+    if (!bookingDoc.exists || bookingDoc.data() == null) {
+      throw Exception('Booking not found.');
+    }
+
+    final booking = Booking.fromMap(
+      bookingDoc.id,
+      bookingDoc.data()!,
+    );
+    _validateTenant(booking, tenantId);
+
+    final snapshot = await _payments(tenantId, bookingId).get();
+
+    double paid = 0;
+    double refunded = 0;
+
+    for (final doc in snapshot.docs) {
+      final transaction = PaymentTransaction.fromMap(
+        doc.id,
+        doc.data(),
+      );
+
+      if (transaction.isSuccessful && !transaction.isRefund) {
+        paid += transaction.amount;
+      }
+
+      if (transaction.isRefund) {
+        refunded += transaction.refundAmount > 0
+            ? transaction.refundAmount
+            : transaction.amount;
+      }
+    }
+
+    final status = _paymentStatusForAmounts(
+      totalAmount: booking.totalAmount,
+      paidAmount: paid,
+      refundAmount: refunded,
+    );
+
+    await bookingRef.update({
+      'paidAmount': paid,
+      'refundAmount': refunded,
+      'paymentStatus': _paymentStatusToString(status),
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+
+    final updated = await bookingRef.get();
+    return Booking.fromMap(updated.id, updated.data()!);
+  }
+
+  Map<String, dynamic> _paymentSummaryForInitialTransaction({
+    required Booking booking,
+    required PaymentTransaction transaction,
+  }) {
+    final paid = transaction.isRefund ? 0 : transaction.amount;
+    final refunded = transaction.isRefund
+        ? (transaction.refundAmount > 0
+            ? transaction.refundAmount
+            : transaction.amount)
+        : 0;
+
+    return {
+      'paidAmount': paid,
+      'refundAmount': refunded,
+      'paymentStatus': _paymentStatusToString(
+        _paymentStatusForAmounts(
+          totalAmount: booking.totalAmount,
+          paidAmount: paid,
+          refundAmount: refunded,
+        ),
+      ),
+      'paymentId': transaction.razorpayPaymentId ??
+          transaction.transactionReference ??
+          transaction.paymentId,
+      'paymentOrderId': transaction.razorpayOrderId,
+      'paymentTransactionId':
+          transaction.gatewayTransactionId ??
+              transaction.transactionReference,
+      'paymentMethod':
+          _paymentMethodTypeToString(transaction.method),
+      'updatedAt': FieldValue.serverTimestamp(),
+    };
+  }
+
+  Map<String, dynamic> _paymentSummaryAfterTransaction({
+    required Booking booking,
+    required PaymentTransaction transaction,
+  }) {
+    final paid = booking.paidAmount +
+        (transaction.isRefund ? 0 : transaction.amount);
+
+    final refunded = booking.refundAmount +
+        (transaction.isRefund
+            ? (transaction.refundAmount > 0
+                ? transaction.refundAmount
+                : transaction.amount)
+            : 0);
+
+    return {
+      'paidAmount': paid,
+      'refundAmount': refunded,
+      'paymentStatus': _paymentStatusToString(
+        _paymentStatusForAmounts(
+          totalAmount: booking.totalAmount,
+          paidAmount: paid,
+          refundAmount: refunded,
+        ),
+      ),
+      // Keep the latest transaction visible on the booking summary.
+      'paymentId': transaction.razorpayPaymentId ??
+          transaction.transactionReference ??
+          transaction.paymentId,
+      'paymentOrderId': transaction.razorpayOrderId,
+      'paymentTransactionId':
+          transaction.gatewayTransactionId ??
+              transaction.transactionReference,
+      'paymentMethod':
+          _paymentMethodTypeToString(transaction.method),
+      'updatedAt': FieldValue.serverTimestamp(),
+    };
+  }
+
+  PaymentStatus _paymentStatusForAmounts({
+    required double totalAmount,
+    required double paidAmount,
+    required double refundAmount,
+  }) {
+    final effectivePaid = paidAmount - refundAmount;
+
+    if (effectivePaid <= 0.009) {
+      return refundAmount > 0.009
+          ? PaymentStatus.refunded
+          : PaymentStatus.pending;
+    }
+
+    if (effectivePaid + 0.009 >= totalAmount) {
+      return PaymentStatus.paid;
+    }
+
+    return PaymentStatus.partiallyPaid;
+  }
+
+  PaymentTransaction? _prepareInitialPayment({
+    required String tenantId,
+    required Booking booking,
+    required PaymentTransaction? payment,
+    required PaymentSource defaultSource,
+    required String defaultRecordedBy,
+    required String defaultRecordedByRole,
+  }) {
+    if (payment == null) return null;
+
+    if (payment.amount <= 0) {
+      throw Exception('Initial payment amount must be greater than zero.');
+    }
+
+    if (payment.amount > booking.totalAmount + 0.009) {
+      throw Exception(
+        'Initial payment cannot exceed the booking total.',
+      );
+    }
+
+    if (payment.method == PaymentMethodType.razorpay &&
+        (payment.razorpayPaymentId == null ||
+            payment.razorpayPaymentId!.trim().isEmpty)) {
+      throw Exception(
+        'Razorpay payment ID is required for the initial Razorpay payment.',
+      );
+    }
+
+    return payment.copyWith(
+      tenantId: tenantId,
+      bookingId: booking.bookingId,
+      customerId: booking.customerId,
+      source: payment.source,
+      recordedBy:
+          payment.recordedBy ?? defaultRecordedBy,
+      recordedByRole:
+          payment.recordedByRole ?? defaultRecordedByRole,
+      customerName: payment.customerName.isEmpty
+          ? booking.customerName
+          : payment.customerName,
+      customerPhone: payment.customerPhone.isEmpty
+          ? booking.customerPhone
+          : payment.customerPhone,
+      customerEmail: payment.customerEmail.isEmpty
+          ? booking.customerEmail
+          : payment.customerEmail,
+      paymentDate: payment.paymentDate ?? DateTime.now(),
+      createdAt: DateTime.now(),
+      updatedAt: DateTime.now(),
     );
   }
 
@@ -856,6 +1530,13 @@ class BookingService {
 
     final carData = carDoc.data()!;
 
+    // Always capture the current registration number in the historical
+    // booking snapshot. This is important because the registration number
+    // belongs to the physical vehicle and should be visible on the booking
+    // even if the current car document is edited later.
+    final registrationNumber =
+        carData['registrationNumber']?.toString().trim() ?? '';
+
     carSnapshot ??= BookingCarSnapshot(
       carId: booking.carId,
       name: carData['name']?.toString() ?? '',
@@ -869,6 +1550,7 @@ class BookingService {
           booking.pricingProfileId.isNotEmpty
               ? booking.pricingProfileId
               : carData['pricingProfileId']?.toString() ?? '',
+      registrationNumber: registrationNumber,
     );
 
     // Pickup branch snapshot.
@@ -1564,6 +2246,23 @@ class BookingService {
   // ============================================================
   // HELPERS
   // ============================================================
+
+  String _paymentStatusToString(PaymentStatus status) {
+    switch (status) {
+      case PaymentStatus.pending:
+        return 'pending';
+      case PaymentStatus.partiallyPaid:
+        return 'partially_paid';
+      case PaymentStatus.paid:
+        return 'paid';
+      case PaymentStatus.failed:
+        return 'failed';
+      case PaymentStatus.refunded:
+        return 'refunded';
+      case PaymentStatus.partiallyRefunded:
+        return 'partially_refunded';
+    }
+  }
 
   String _statusToString(BookingStatus status) {
     switch (status) {

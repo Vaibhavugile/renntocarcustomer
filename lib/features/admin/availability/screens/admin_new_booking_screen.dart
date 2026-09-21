@@ -101,6 +101,16 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   String _customerSearch = '';
   String _paymentMethod = 'cash';
   double _paidAmount = 0;
+
+  // Initial payment / gateway audit details.
+  String _transactionReference = '';
+  String _razorpayOrderId = '';
+  String _razorpayPaymentId = '';
+  String _razorpaySignature = '';
+  String _gatewayTransactionId = '';
+  String _gatewayStatus = '';
+  String _gatewayMethod = '';
+
   String _bookingNote = '';
   String _depositMethod = 'cash';
   double _depositAmount = 0;
@@ -1598,6 +1608,71 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     }
   }
 
+  PaymentMethodType _initialPaymentMethodType() {
+    switch (_paymentMethod) {
+      case 'cash':
+        return PaymentMethodType.cash;
+      case 'upi':
+        return PaymentMethodType.upi;
+      case 'card':
+        return PaymentMethodType.card;
+      case 'online':
+        return PaymentMethodType.razorpay;
+      default:
+        return PaymentMethodType.other;
+    }
+  }
+
+  PaymentTransaction? _buildInitialPaymentTransaction({
+    required Customer customer,
+    required double amount,
+  }) {
+    if (amount <= 0) return null;
+
+    final method = _initialPaymentMethodType();
+    final isRazorpay = method == PaymentMethodType.razorpay;
+
+    return PaymentTransaction(
+      paymentId: _firestore.collection('_payment_ids').doc().id,
+      tenantId: _tenantId,
+      bookingId: '',
+      customerId: customer.customerId,
+      amount: amount,
+      currency: 'INR',
+      status: PaymentTransactionStatus.paid,
+      method: method,
+      source: PaymentSource.admin,
+      transactionReference:
+          _transactionReference.trim().isEmpty ? null : _transactionReference.trim(),
+      gateway: isRazorpay ? 'razorpay' : null,
+      razorpayOrderId:
+          isRazorpay && _razorpayOrderId.trim().isNotEmpty
+              ? _razorpayOrderId.trim()
+              : null,
+      razorpayPaymentId:
+          isRazorpay && _razorpayPaymentId.trim().isNotEmpty
+              ? _razorpayPaymentId.trim()
+              : null,
+      razorpaySignature:
+          isRazorpay && _razorpaySignature.trim().isNotEmpty
+              ? _razorpaySignature.trim()
+              : null,
+      gatewayTransactionId:
+          _gatewayTransactionId.trim().isEmpty ? null : _gatewayTransactionId.trim(),
+      gatewayStatus:
+          _gatewayStatus.trim().isEmpty ? null : _gatewayStatus.trim(),
+      gatewayMethod:
+          _gatewayMethod.trim().isEmpty ? null : _gatewayMethod.trim(),
+      customerName: customer.fullName,
+      customerPhone: customer.phone,
+      customerEmail: customer.email,
+      recordedBy: FirebaseAuth.instance.currentUser?.uid,
+      recordedByRole: 'admin',
+      note: _bookingNote.trim().isEmpty ? null : _bookingNote.trim(),
+      paymentDate: DateTime.now(),
+    );
+  }
+
   Future<void> _createBooking() async {
     print('🔥 CREATE BOOKING CALLED | type=$_rentalTypeLabel | customer=${_selectedCustomer?.customerId} | car=${_selectedCar?.id} | pickup=$_pickupDateTime | return=$_returnDateTime | total=${_pricingResult?.total}');
     final customer = _selectedCustomer;
@@ -1692,6 +1767,22 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
         ? PaymentStatus.paid
         : (_paidAmount > 0 ? PaymentStatus.partiallyPaid : PaymentStatus.pending);
 
+    if (_paymentMethod == 'online' && _paidAmount > 0) {
+      if (_razorpayOrderId.trim().isEmpty ||
+          _razorpayPaymentId.trim().isEmpty ||
+          _razorpaySignature.trim().isEmpty) {
+        _showError(
+          'Razorpay Order ID, Payment ID and Signature are required for an online payment.',
+        );
+        return;
+      }
+    }
+
+    final initialPayment = _buildInitialPaymentTransaction(
+      customer: customer,
+      amount: _paidAmount,
+    );
+
     final pricingSnapshot = BookingPricingSnapshot(
       pricingProfileId: result.pricingProfileId,
       rentalType: result.rentalType,
@@ -1740,7 +1831,8 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       discountAmount: _effectiveDiscountAmount,
       taxAmount: _effectiveTaxAmount,
       securityDeposit: depositAmount,
-      totalAmount: _effectiveTripTotal,
+      // totalAmount is the full receivable for this booking, including a monetary security deposit.
+      totalAmount: _effectiveAmountPayable,
       pricing: pricingSnapshot,
       paidAmount: _paidAmount,
       refundAmount: 0,
@@ -1772,6 +1864,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       final created = await _bookingService.createBookingForAdmin(
         tenantId: _tenantId,
         booking: booking,
+        initialPayment: initialPayment,
       );
 
       if (!mounted) return;
@@ -3477,7 +3570,8 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
           const SizedBox(height: 14),
           _sectionCard(
             title: 'Payment collection',
-            subtitle: 'Choose how much the admin is collecting now. Monetary deposit is added separately; asset deposit is ₹0.',
+            subtitle:
+                'Record the amount collected during booking. If payment is online, keep the gateway references with the booking ledger.',
             child: Column(
               children: [
                 DropdownButtonFormField<String>(
@@ -3487,18 +3581,86 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
                     DropdownMenuItem(value: 'cash', child: Text('Cash')),
                     DropdownMenuItem(value: 'upi', child: Text('UPI')),
                     DropdownMenuItem(value: 'card', child: Text('Card')),
-                    DropdownMenuItem(value: 'online', child: Text('Online')),
+                    DropdownMenuItem(value: 'online', child: Text('Razorpay / Online')),
                     DropdownMenuItem(value: 'pending', child: Text('Pay later / Pending')),
                   ],
-                  onChanged: (value) => setState(() => _paymentMethod = value ?? 'cash'),
+                  onChanged: (value) => setState(
+                    () => _paymentMethod = value ?? 'cash',
+                  ),
                 ),
                 const SizedBox(height: 10),
                 TextFormField(
-                  initialValue: _paidAmount == 0 ? '' : _paidAmount.toStringAsFixed(2),
-                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  initialValue:
+                      _paidAmount == 0 ? '' : _paidAmount.toStringAsFixed(2),
+                  keyboardType:
+                      const TextInputType.numberWithOptions(decimal: true),
                   decoration: _inputDecoration('Amount collected now'),
-                  onChanged: (value) => _paidAmount = double.tryParse(value) ?? 0,
+                  onChanged: (value) =>
+                      _paidAmount = double.tryParse(value) ?? 0,
                 ),
+                if (_paymentMethod == 'online') ...[
+                  const SizedBox(height: 14),
+                  _paymentAuditHeader(),
+                  const SizedBox(height: 10),
+                  TextFormField(
+                    decoration:
+                        _inputDecoration('Razorpay Order ID *'),
+                    onChanged: (value) => _razorpayOrderId = value.trim(),
+                  ),
+                  const SizedBox(height: 9),
+                  TextFormField(
+                    decoration:
+                        _inputDecoration('Razorpay Payment ID *'),
+                    onChanged: (value) => _razorpayPaymentId = value.trim(),
+                  ),
+                  const SizedBox(height: 9),
+                  TextFormField(
+                    decoration:
+                        _inputDecoration('Razorpay Signature *'),
+                    onChanged: (value) => _razorpaySignature = value.trim(),
+                  ),
+                  const SizedBox(height: 9),
+                  TextFormField(
+                    decoration:
+                        _inputDecoration('Gateway transaction ID'),
+                    onChanged: (value) => _gatewayTransactionId = value.trim(),
+                  ),
+                  const SizedBox(height: 9),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextFormField(
+                          decoration: _inputDecoration('Gateway status'),
+                          onChanged: (value) => _gatewayStatus = value.trim(),
+                        ),
+                      ),
+                      const SizedBox(width: 9),
+                      Expanded(
+                        child: TextFormField(
+                          decoration: _inputDecoration('Gateway method'),
+                          onChanged: (value) => _gatewayMethod = value.trim(),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 9),
+                  TextFormField(
+                    decoration: _inputDecoration(
+                      'Transaction reference (optional)',
+                    ),
+                    onChanged: (value) =>
+                        _transactionReference = value.trim(),
+                  ),
+                ] else if (_paidAmount > 0) ...[
+                  const SizedBox(height: 9),
+                  TextFormField(
+                    decoration: _inputDecoration(
+                      'Transaction / receipt reference (optional)',
+                    ),
+                    onChanged: (value) =>
+                        _transactionReference = value.trim(),
+                  ),
+                ],
                 const SizedBox(height: 10),
                 TextFormField(
                   initialValue: _bookingNote,
@@ -3538,39 +3700,565 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     final customer = _selectedCustomer!;
     final car = _selectedCar!;
     final branch = _selectedBranch!;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _heroCard(icon: Icons.fact_check_rounded, title: 'Final booking review', subtitle: 'Everything is checked once more before the booking is written to Firebase.'),
-        const SizedBox(height: 14),
-        _reviewCard('Rental type & period', [
-          _rentalTypeLabel,
-          '${_formatDateTime(_pickupDateTime)} → ${_formatDateTime(_returnDateTime)}',
-          _durationText(result),
-          if (!_isHourly) 'Availability block ends at 11:59 PM on ${_formatDate(_returnDate)}',
-        ]),
-        _reviewCard('Vehicle', [car.name, car.registrationNumber.isEmpty ? '${car.type} • ${car.transmission}' : car.registrationNumber]),
-        _reviewCard('Pickup branch', [branch['name']?.toString() ?? 'Branch', branch['address']?.toString() ?? '']),
-        _reviewCard('Customer', [customer.fullName, customer.phone, customer.email]),
-        _reviewCard('KM package', [result.selectedKmPackageName ?? 'Default pricing', result.unlimitedKm ? 'Unlimited KM' : '${result.includedKm ?? 0} KM included']),
-        _reviewCard('Payment', [_paymentMethod.toUpperCase(), 'Collected: ${_money(_paidAmount)}', 'Trip Total: ${_money(_effectiveTripTotal)}', 'Security Deposit: ${_money(_effectiveDepositAmount)}', 'Amount Payable: ${_money(_effectiveAmountPayable)}']),
-        const SizedBox(height: 6),
-        Container(
-          padding: const EdgeInsets.all(18),
-          decoration: BoxDecoration(color: softAccent, borderRadius: BorderRadius.circular(20), border: Border.all(color: primary.withOpacity(.18))),
-          child: Row(children: [
-            const Icon(Icons.payments_rounded, color: primary, size: 25),
-            const SizedBox(width: 11),
-            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('Amount payable', style: GoogleFonts.manrope(color: body, fontSize: 11, fontWeight: FontWeight.w700)),
-              const SizedBox(height: 3),
-              Text(_money(_effectiveAmountPayable), style: GoogleFonts.manrope(color: heading, fontSize: 24, fontWeight: FontWeight.w900)),
-            ])),
-          ]),
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final wide = constraints.maxWidth >= 760;
+
+        final snapshot = Column(
+          children: [
+            _reviewSection(
+              icon: Icons.route_rounded,
+              title: 'Rental details',
+              accent: const Color(0xFF2563EB),
+              children: [
+                _reviewMetric('Rental type', _rentalTypeLabel),
+                _reviewMetric(
+                  'Pickup',
+                  _formatDateTime(_pickupDateTime),
+                ),
+                _reviewMetric(
+                  'Return',
+                  _formatDateTime(_returnDateTime),
+                ),
+                _reviewMetric('Duration', _durationText(result)),
+              ],
+            ),
+            const SizedBox(height: 12),
+            _reviewSection(
+              icon: Icons.directions_car_filled_rounded,
+              title: 'Vehicle',
+              accent: primary,
+              children: [
+                _reviewIdentityRow(
+                  icon: Icons.directions_car_rounded,
+                  title: car.name,
+                  subtitle: car.registrationNumber.isEmpty
+                      ? '${car.type} • ${car.transmission}'
+                      : car.registrationNumber,
+                ),
+                const SizedBox(height: 10),
+                _reviewMetric(
+                  'KM package',
+                  result.selectedKmPackageName ?? 'Default pricing',
+                ),
+                _reviewMetric(
+                  'Included KM',
+                  result.unlimitedKm
+                      ? 'Unlimited KM'
+                      : '${result.includedKm ?? 0} KM',
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            _reviewSection(
+              icon: Icons.location_on_rounded,
+              title: 'Pickup & customer',
+              accent: const Color(0xFF7C3AED),
+              children: [
+                _reviewIdentityRow(
+                  icon: Icons.storefront_rounded,
+                  title: branch['name']?.toString() ?? 'Branch',
+                  subtitle: branch['address']?.toString() ?? '',
+                ),
+                const SizedBox(height: 10),
+                _reviewIdentityRow(
+                  icon: Icons.person_rounded,
+                  title: customer.fullName,
+                  subtitle:
+                      '${customer.phone}${customer.email.trim().isEmpty ? '' : ' • ${customer.email}'}',
+                ),
+              ],
+            ),
+          ],
+        );
+
+        final payment = _buildPremiumReviewPayment();
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _premiumReviewHero(),
+            const SizedBox(height: 16),
+            if (wide)
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(flex: 6, child: snapshot),
+                  const SizedBox(width: 14),
+                  Expanded(flex: 5, child: payment),
+                ],
+              )
+            else ...[
+              snapshot,
+              const SizedBox(height: 14),
+              payment,
+            ],
+            const SizedBox(height: 14),
+            _reviewConfirmationBar(),
+            const SizedBox(height: 16),
+            _primaryButton(
+              _creatingBooking ? 'Creating booking…' : 'Confirm & Create Booking',
+              Icons.check_circle_rounded,
+              _creatingBooking ? () {} : _createBooking,
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _premiumReviewHero() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFF0F766E), Color(0xFF115E59)],
         ),
-        const SizedBox(height: 18),
-        _primaryButton('Confirm & Create Booking', Icons.check_circle_rounded, _createBooking),
+        borderRadius: BorderRadius.circular(26),
+        boxShadow: [
+          BoxShadow(
+            color: primary.withOpacity(.16),
+            blurRadius: 26,
+            offset: const Offset(0, 12),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 54,
+            height: 54,
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(.14),
+              borderRadius: BorderRadius.circular(17),
+            ),
+            child: const Icon(
+              Icons.fact_check_rounded,
+              color: Colors.white,
+              size: 27,
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Ready to create booking',
+                  style: GoogleFonts.manrope(
+                    color: Colors.white,
+                    fontSize: 19,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  'Review the vehicle, customer, rental period and payment before the booking is saved.',
+                  style: GoogleFonts.manrope(
+                    color: Colors.white.withOpacity(.76),
+                    fontSize: 11,
+                    height: 1.45,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 10),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(.12),
+              borderRadius: BorderRadius.circular(99),
+            ),
+            child: Text(
+              'FINAL',
+              style: GoogleFonts.manrope(
+                color: Colors.white,
+                fontSize: 9,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 1.2,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _reviewSection({
+    required IconData icon,
+    required String title,
+    required Color accent,
+    required List<Widget> children,
+  }) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(17),
+      decoration: BoxDecoration(
+        color: card,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: border),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x05000000),
+            blurRadius: 15,
+            offset: Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: accent.withOpacity(.10),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(icon, color: accent, size: 20),
+              ),
+              const SizedBox(width: 10),
+              Text(
+                title,
+                style: GoogleFonts.manrope(
+                  color: heading,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          ...children,
+        ],
+      ),
+    );
+  }
+
+  Widget _reviewMetric(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 92,
+            child: Text(
+              label,
+              style: GoogleFonts.manrope(
+                color: muted,
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              textAlign: TextAlign.right,
+              style: GoogleFonts.manrope(
+                color: heading,
+                fontSize: 11.5,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _reviewIdentityRow({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+  }) {
+    return Row(
+      children: [
+        Container(
+          width: 34,
+          height: 34,
+          decoration: BoxDecoration(
+            color: background,
+            borderRadius: BorderRadius.circular(11),
+          ),
+          child: Icon(icon, color: primary, size: 17),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: GoogleFonts.manrope(
+                  color: heading,
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              if (subtitle.trim().isNotEmpty) ...[
+                const SizedBox(height: 2),
+                Text(
+                  subtitle,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.manrope(
+                    color: body,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
       ],
+    );
+  }
+
+  Widget _buildPremiumReviewPayment() {
+    final payable = _effectiveAmountPayable;
+    final collected = _paidAmount.clamp(0, payable).toDouble();
+    final balance = (payable - collected).clamp(0, double.infinity).toDouble();
+    final progress =
+        payable <= 0 ? 0.0 : (collected / payable).clamp(0.0, 1.0);
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(19),
+      decoration: BoxDecoration(
+        color: card,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: border),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x07000000),
+            blurRadius: 18,
+            offset: Offset(0, 7),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: softAccent,
+                  borderRadius: BorderRadius.circular(13),
+                ),
+                child: const Icon(
+                  Icons.account_balance_wallet_rounded,
+                  color: primary,
+                  size: 21,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Payment summary',
+                      style: GoogleFonts.manrope(
+                        color: heading,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      _paymentMethod == 'online'
+                          ? 'Razorpay / Online'
+                          : _paymentMethod == 'pending'
+                              ? 'Pay later / Pending'
+                              : _paymentMethod.toUpperCase(),
+                      style: GoogleFonts.manrope(
+                        color: muted,
+                        fontSize: 9.5,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              _paymentStatusPill(collected, payable),
+            ],
+          ),
+          const SizedBox(height: 17),
+          _priceLine('Trip total', _effectiveTripTotal),
+          if (_effectiveDepositAmount > 0)
+            _priceLine('Security deposit', _effectiveDepositAmount),
+          const Divider(height: 20, color: border),
+          _priceLine('Total payable', payable, strong: true),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'Collected now',
+                  style: GoogleFonts.manrope(
+                    color: body,
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              Text(
+                _money(collected),
+                style: GoogleFonts.manrope(
+                  color: primary,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 9),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(99),
+            child: LinearProgressIndicator(
+              minHeight: 7,
+              value: progress,
+              backgroundColor: background,
+              valueColor: const AlwaysStoppedAnimation<Color>(primary),
+            ),
+          ),
+          const SizedBox(height: 9),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  balance <= .009 ? 'Fully collected' : 'Balance due',
+                  style: GoogleFonts.manrope(
+                    color: balance <= .009 ? primary : body,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              Text(
+                _money(balance),
+                style: GoogleFonts.manrope(
+                  color: balance <= .009 ? primary : heading,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ],
+          ),
+          if (_paymentMethod == 'online') ...[
+            const SizedBox(height: 15),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: background,
+                borderRadius: BorderRadius.circular(15),
+                border: Border.all(color: border),
+              ),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.verified_rounded,
+                    color: primary,
+                    size: 17,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _razorpayPaymentId.trim().isEmpty
+                          ? 'Razorpay payment details are still required.'
+                          : 'Razorpay payment ID captured for the payment ledger.',
+                      style: GoogleFonts.manrope(
+                        color: body,
+                        fontSize: 9.5,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _paymentStatusPill(double collected, double payable) {
+    final paid = payable > 0 && collected + .009 >= payable;
+    final partial = collected > .009 && !paid;
+    final label = paid
+        ? 'PAID'
+        : partial
+            ? 'PARTIAL'
+            : 'PENDING';
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+      decoration: BoxDecoration(
+        color: paid
+            ? const Color(0xFFE8F7EE)
+            : partial
+                ? const Color(0xFFFFF4D8)
+                : const Color(0xFFF1F4F3),
+        borderRadius: BorderRadius.circular(99),
+      ),
+      child: Text(
+        label,
+        style: GoogleFonts.manrope(
+          color: paid
+              ? const Color(0xFF16803A)
+              : partial
+                  ? const Color(0xFF9A6700)
+                  : muted,
+          fontSize: 8.5,
+          fontWeight: FontWeight.w900,
+          letterSpacing: .6,
+        ),
+      ),
+    );
+  }
+
+  Widget _reviewConfirmationBar() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF0FDF9),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: primary.withOpacity(.12)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.shield_outlined, color: primary, size: 19),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Text(
+              'Final availability will be checked again on the server before Firebase creates this booking.',
+              style: GoogleFonts.manrope(
+                color: body,
+                fontSize: 9.5,
+                height: 1.4,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -3587,6 +4275,35 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
           child: Text(line, style: GoogleFonts.manrope(color: heading, fontSize: 12, fontWeight: FontWeight.w700)),
         )),
       ]),
+    );
+  }
+
+  Widget _paymentAuditHeader() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF0FDF9),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: primary.withOpacity(.12)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.receipt_long_rounded, color: primary, size: 18),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Gateway details are saved with this booking for payment history and future accounting reports.',
+              style: GoogleFonts.manrope(
+                color: body,
+                fontSize: 9.5,
+                height: 1.35,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 

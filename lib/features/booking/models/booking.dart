@@ -55,6 +55,7 @@ class BookingCarSnapshot {
   final String fuel;
   final String image;
   final String pricingProfileId;
+  final String registrationNumber;
 
   const BookingCarSnapshot({
     required this.carId,
@@ -65,6 +66,7 @@ class BookingCarSnapshot {
     required this.fuel,
     required this.image,
     required this.pricingProfileId,
+    this.registrationNumber = '',
   });
 
   factory BookingCarSnapshot.fromMap(Map<String, dynamic> map) {
@@ -78,6 +80,8 @@ class BookingCarSnapshot {
       image: map['image']?.toString() ?? '',
       pricingProfileId:
           map['pricingProfileId']?.toString() ?? '',
+      registrationNumber:
+          map['registrationNumber']?.toString() ?? '',
     );
   }
 
@@ -91,6 +95,7 @@ class BookingCarSnapshot {
       'fuel': fuel,
       'image': image,
       'pricingProfileId': pricingProfileId,
+      'registrationNumber': registrationNumber,
     };
   }
 }
@@ -247,6 +252,101 @@ class BookingPricingSnapshot {
     };
   }
 }
+
+
+// ============================================================
+// PAYMENT TRANSACTION / LEDGER
+// ============================================================
+enum PaymentSource { customer, admin, system }
+enum PaymentMethodType { razorpay, cash, upi, card, bankTransfer, other }
+enum PaymentTransactionStatus { pending, authorized, paid, failed, refunded, partiallyRefunded, cancelled }
+
+/// Individual immutable payment/refund transaction for accounting history.
+/// Firestore: tenants/{tenantId}/bookings/{bookingId}/payments/{paymentId}
+class PaymentTransaction {
+  final String paymentId;
+  final String tenantId;
+  final String bookingId;
+  final String customerId;
+  final double amount;
+  final String currency;
+  final PaymentTransactionStatus status;
+  final PaymentMethodType method;
+  final PaymentSource source;
+  final String? transactionReference;
+  final String? gateway;
+  final String? razorpayOrderId;
+  final String? razorpayPaymentId;
+  final String? razorpaySignature;
+  final String? gatewayTransactionId;
+  final String? gatewayStatus;
+  final String? gatewayMethod;
+  final String customerName;
+  final String customerPhone;
+  final String customerEmail;
+  final String? recordedBy;
+  final String? recordedByRole;
+  final String? note;
+  final String? originalPaymentId;
+  final double refundAmount;
+  final DateTime? paymentDate;
+  final DateTime? createdAt;
+  final DateTime? updatedAt;
+
+  const PaymentTransaction({
+    required this.paymentId, required this.tenantId, required this.bookingId,
+    required this.customerId, required this.amount, this.currency = 'INR',
+    required this.status, required this.method, required this.source,
+    this.transactionReference, this.gateway, this.razorpayOrderId,
+    this.razorpayPaymentId, this.razorpaySignature, this.gatewayTransactionId,
+    this.gatewayStatus, this.gatewayMethod, this.customerName = '',
+    this.customerPhone = '', this.customerEmail = '', this.recordedBy,
+    this.recordedByRole, this.note, this.originalPaymentId, this.refundAmount = 0,
+    this.paymentDate, this.createdAt, this.updatedAt,
+  });
+
+  bool get isSuccessful => status == PaymentTransactionStatus.paid || status == PaymentTransactionStatus.authorized;
+  bool get isRefund => status == PaymentTransactionStatus.refunded || status == PaymentTransactionStatus.partiallyRefunded || refundAmount > 0;
+  bool get isRazorpay => method == PaymentMethodType.razorpay || gateway?.trim().toLowerCase() == 'razorpay';
+
+  factory PaymentTransaction.fromMap(String id, Map<String, dynamic> map) => PaymentTransaction(
+    paymentId: id, tenantId: map['tenantId']?.toString() ?? '', bookingId: map['bookingId']?.toString() ?? '',
+    customerId: map['customerId']?.toString() ?? '', amount: _toDouble(map['amount']),
+    currency: map['currency']?.toString() ?? 'INR', status: _paymentTransactionStatusFromString(map['status']?.toString()),
+    method: _paymentMethodTypeFromString(map['method']?.toString()), source: _paymentSourceFromString(map['source']?.toString()),
+    transactionReference: map['transactionReference']?.toString(), gateway: map['gateway']?.toString(),
+    razorpayOrderId: map['razorpayOrderId']?.toString(), razorpayPaymentId: map['razorpayPaymentId']?.toString(),
+    razorpaySignature: map['razorpaySignature']?.toString(), gatewayTransactionId: map['gatewayTransactionId']?.toString(),
+    gatewayStatus: map['gatewayStatus']?.toString(), gatewayMethod: map['gatewayMethod']?.toString(),
+    customerName: map['customerName']?.toString() ?? '', customerPhone: map['customerPhone']?.toString() ?? '',
+    customerEmail: map['customerEmail']?.toString() ?? '', recordedBy: map['recordedBy']?.toString(),
+    recordedByRole: map['recordedByRole']?.toString(), note: map['note']?.toString(),
+    originalPaymentId: map['originalPaymentId']?.toString(), refundAmount: _toDouble(map['refundAmount']),
+    paymentDate: _dateTimeFromValue(map['paymentDate']), createdAt: _dateTimeFromValue(map['createdAt']), updatedAt: _dateTimeFromValue(map['updatedAt']),
+  );
+
+  Map<String, dynamic> toMap() => {
+    'paymentId': paymentId, 'tenantId': tenantId, 'bookingId': bookingId, 'customerId': customerId,
+    'amount': amount, 'currency': currency, 'status': _paymentTransactionStatusToString(status),
+    'method': _paymentMethodTypeToString(method), 'source': _paymentSourceToString(source),
+    'transactionReference': transactionReference, 'gateway': gateway, 'razorpayOrderId': razorpayOrderId,
+    'razorpayPaymentId': razorpayPaymentId, 'razorpaySignature': razorpaySignature,
+    'gatewayTransactionId': gatewayTransactionId, 'gatewayStatus': gatewayStatus, 'gatewayMethod': gatewayMethod,
+    'customerName': customerName, 'customerPhone': customerPhone, 'customerEmail': customerEmail,
+    'recordedBy': recordedBy, 'recordedByRole': recordedByRole, 'note': note, 'originalPaymentId': originalPaymentId,
+    'refundAmount': refundAmount, 'paymentDate': paymentDate == null ? null : Timestamp.fromDate(paymentDate!),
+    'createdAt': createdAt == null ? null : Timestamp.fromDate(createdAt!), 'updatedAt': updatedAt == null ? null : Timestamp.fromDate(updatedAt!),
+  };
+}
+
+PaymentTransactionStatus _paymentTransactionStatusFromString(String? v) {
+  switch (v) { case 'authorized': return PaymentTransactionStatus.authorized; case 'paid': case 'captured': return PaymentTransactionStatus.paid; case 'failed': return PaymentTransactionStatus.failed; case 'refunded': return PaymentTransactionStatus.refunded; case 'partially_refunded': return PaymentTransactionStatus.partiallyRefunded; case 'cancelled': case 'canceled': return PaymentTransactionStatus.cancelled; default: return PaymentTransactionStatus.pending; }
+}
+String _paymentTransactionStatusToString(PaymentTransactionStatus v) => switch (v) { PaymentTransactionStatus.pending => 'pending', PaymentTransactionStatus.authorized => 'authorized', PaymentTransactionStatus.paid => 'paid', PaymentTransactionStatus.failed => 'failed', PaymentTransactionStatus.refunded => 'refunded', PaymentTransactionStatus.partiallyRefunded => 'partially_refunded', PaymentTransactionStatus.cancelled => 'cancelled' };
+PaymentMethodType _paymentMethodTypeFromString(String? v) { switch (v?.trim().toLowerCase()) { case 'razorpay': return PaymentMethodType.razorpay; case 'cash': return PaymentMethodType.cash; case 'upi': return PaymentMethodType.upi; case 'card': return PaymentMethodType.card; case 'bank_transfer': case 'banktransfer': case 'bank transfer': return PaymentMethodType.bankTransfer; default: return PaymentMethodType.other; } }
+String _paymentMethodTypeToString(PaymentMethodType v) => switch (v) { PaymentMethodType.razorpay => 'razorpay', PaymentMethodType.cash => 'cash', PaymentMethodType.upi => 'upi', PaymentMethodType.card => 'card', PaymentMethodType.bankTransfer => 'bank_transfer', PaymentMethodType.other => 'other' };
+PaymentSource _paymentSourceFromString(String? v) => switch (v?.trim().toLowerCase()) { 'admin' => PaymentSource.admin, 'system' => PaymentSource.system, _ => PaymentSource.customer };
+String _paymentSourceToString(PaymentSource v) => switch (v) { PaymentSource.customer => 'customer', PaymentSource.admin => 'admin', PaymentSource.system => 'system' };
 
 class Booking {
   // ============================================================
