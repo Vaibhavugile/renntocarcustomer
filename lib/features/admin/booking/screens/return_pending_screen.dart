@@ -168,6 +168,7 @@ class _ReturnPendingScreenState extends State<ReturnPendingScreen> {
         damagesFound: result.damagesFound,
         fuelLevel: result.fuelLevel,
         notes: result.notes,
+        fuelCharge: result.fuelCharge,
         damageCharge: result.damageCharge,
         lateCharge: result.lateCharge,
         otherCharge: result.otherCharge,
@@ -374,8 +375,35 @@ class _ReturnPreviewSheet extends StatelessWidget {
 }
 
 class ReturnInspectionResult {
-  final int endingOdometer; final double extraKmCharge; final List<String> photoUrls; final List<String> damagePhotoUrls; final List<String> damagesFound; final String fuelLevel; final String notes; final double damageCharge; final double lateCharge; final double otherCharge; final double securityDepositAdjustment; final String? customerAcknowledgement;
-  const ReturnInspectionResult({required this.endingOdometer, required this.extraKmCharge, required this.photoUrls, required this.damagePhotoUrls, required this.damagesFound, required this.fuelLevel, required this.notes, required this.damageCharge, required this.lateCharge, required this.otherCharge, required this.securityDepositAdjustment, required this.customerAcknowledgement});
+  final int endingOdometer;
+  final double extraKmCharge;
+  final double fuelCharge;
+  final List<String> photoUrls;
+  final List<String> damagePhotoUrls;
+  final List<String> damagesFound;
+  final String fuelLevel;
+  final String notes;
+  final double damageCharge;
+  final double lateCharge;
+  final double otherCharge;
+  final double securityDepositAdjustment;
+  final String? customerAcknowledgement;
+
+  const ReturnInspectionResult({
+    required this.endingOdometer,
+    required this.extraKmCharge,
+    required this.fuelCharge,
+    required this.photoUrls,
+    required this.damagePhotoUrls,
+    required this.damagesFound,
+    required this.fuelLevel,
+    required this.notes,
+    required this.damageCharge,
+    required this.lateCharge,
+    required this.otherCharge,
+    required this.securityDepositAdjustment,
+    required this.customerAcknowledgement,
+  });
 }
 
 
@@ -1366,6 +1394,7 @@ class _ReturnInspectionDialogState extends State<ReturnInspectionDialog> {
         ReturnInspectionResult(
           endingOdometer: ending,
           extraKmCharge: _calculatedExtraKmCharge,
+          fuelCharge: charges[0],
           photoUrls: returnUrls,
           damagePhotoUrls: damageUrls,
           damagesFound: _damages.text

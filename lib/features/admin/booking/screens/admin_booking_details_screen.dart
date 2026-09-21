@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../../../core/config/app_config.dart';
 import '../../../booking/models/booking.dart';
@@ -85,6 +86,7 @@ class _AdminBookingDetailsScreenState
   String? _error;
 
   List<PaymentTransaction> _paymentTransactions = <PaymentTransaction>[];
+  List<Map<String, dynamic>> _auditLogs = <Map<String, dynamic>>[];
   DateTime? _lastVerifiedAt;
   int _loadGeneration = 0;
 
@@ -132,6 +134,10 @@ class _AdminBookingDetailsScreenState
           tenantId: _tenantId,
           bookingId: _booking.bookingId,
         ),
+        _bookingService.getBookingAuditLogsForAdmin(
+          tenantId: _tenantId,
+          bookingId: _booking.bookingId,
+        ),
       ]);
 
       if (!mounted || generation != _loadGeneration) return;
@@ -140,6 +146,8 @@ class _AdminBookingDetailsScreenState
       final customer = results[1] as Customer?;
       final raw = results[2] as Map<String, dynamic>?;
       final payments = results[3] as List<PaymentTransaction>;
+      final auditLogs =
+          results[4] as List<Map<String, dynamic>>;
 
       if (freshBooking == null) {
         throw Exception('Booking not found.');
@@ -155,6 +163,7 @@ class _AdminBookingDetailsScreenState
         _customer = customer;
         _customerRaw = raw;
         _paymentTransactions = payments;
+        _auditLogs = auditLogs;
         _loading = false;
         _refreshing = false;
         _lastVerifiedAt = DateTime.now();
@@ -1011,6 +1020,206 @@ class _AdminBookingDetailsScreenState
     );
   }
 
+
+  String get _customerPhoneForContact {
+    final raw = _booking.customerPhone.trim().isNotEmpty
+        ? _booking.customerPhone.trim()
+        : (_customer?.phone ?? '').trim();
+    return raw;
+  }
+
+  String _whatsAppNumber(String value) {
+    var digits = value.replaceAll(RegExp(r'[^0-9]'), '');
+    if (digits.length == 10) digits = '91$digits';
+    if (digits.startsWith('00')) digits = digits.substring(2);
+    return digits;
+  }
+
+  Future<void> _callCustomer() async {
+    final phone = _customerPhoneForContact;
+    if (phone.isEmpty) {
+      _showMessage('Customer phone number is not available.', error: true);
+      return;
+    }
+
+    final uri = Uri(scheme: 'tel', path: phone);
+    if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+      if (mounted) {
+        _showMessage('Unable to open the phone dialer.', error: true);
+      }
+    }
+  }
+
+  Future<void> _whatsAppCustomer() async {
+    final number = _whatsAppNumber(_customerPhoneForContact);
+    if (number.isEmpty) {
+      _showMessage('Customer phone number is not available.', error: true);
+      return;
+    }
+
+    final uri = Uri.parse(
+      'https://wa.me/$number?text=${Uri.encodeComponent(
+        'Hi ${_booking.customerName.isEmpty ? 'there' : _booking.customerName}, regarding your car rental booking ${_booking.bookingId}.',
+      )}',
+    );
+
+    if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+      if (mounted) {
+        _showMessage('Unable to open WhatsApp.', error: true);
+      }
+    }
+  }
+
+  Future<void> _editBookingAmounts() async {
+    if (_actionBusy) return;
+
+    final result = await showDialog<Map<String, double>>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _BookingAmountsEditDialog(booking: _booking),
+    );
+
+    if (result == null || !mounted) return;
+
+    final changed = <String, double>{};
+    final current = <String, double>{
+      'baseAmount': _booking.baseAmount,
+      'extraKmAmount': _booking.extraKmAmount,
+      'extraTimeAmount': _booking.extraTimeAmount,
+      'addOnsAmount': _booking.addOnsAmount,
+      'protectionAmount': _booking.protectionAmount,
+      'taxAmount': _booking.taxAmount,
+      'discountAmount': _booking.discountAmount,
+      'securityDeposit': _booking.securityDeposit,
+      'totalAmount': _booking.totalAmount,
+    };
+
+    for (final entry in result.entries) {
+      if ((entry.value - (current[entry.key] ?? 0)).abs() > 0.009) {
+        changed[entry.key] = entry.value;
+      }
+    }
+
+    if (changed.isEmpty) {
+      _showMessage('No amount changes were made.');
+      return;
+    }
+
+    final reasonController = TextEditingController();
+    final reason = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: card,
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+        ),
+        title: _text('Reason for amount change', size: 18, weight: FontWeight.w900),
+        content: TextField(
+          controller: reasonController,
+          maxLines: 3,
+          decoration: InputDecoration(
+            hintText: 'Example: Corrected rental rate / admin adjustment',
+            filled: true,
+            fillColor: background,
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(14),
+              borderSide: const BorderSide(color: border),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: _text('Cancel', color: muted, weight: FontWeight.w800),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(
+              context,
+              reasonController.text.trim().isEmpty
+                  ? 'Admin updated booking amounts'
+                  : reasonController.text.trim(),
+            ),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: primary,
+              elevation: 0,
+            ),
+            child: _text(
+              'Save Changes',
+              color: Colors.white,
+              weight: FontWeight.w900,
+            ),
+          ),
+        ],
+      ),
+    );
+    reasonController.dispose();
+
+    if (reason == null || !mounted) return;
+
+    setState(() => _actionBusy = true);
+    try {
+      await _bookingService.updateBookingAmountsForAdmin(
+        tenantId: _tenantId,
+        bookingId: _booking.bookingId,
+        amounts: result,
+        reason: reason,
+      );
+
+      await _loadAll(showLoader: false);
+
+      if (!mounted) return;
+      _showMessage('Booking amounts updated and audit log created.');
+    } catch (e) {
+      if (!mounted) return;
+      _showMessage(_cleanError(e.toString()), error: true);
+    } finally {
+      if (mounted) setState(() => _actionBusy = false);
+    }
+  }
+
+  Future<void> _viewInspection(String type) async {
+    if (_actionBusy) return;
+
+    try {
+      final data = await _bookingService.getInspectionDataForAdmin(
+        tenantId: _tenantId,
+        bookingId: _booking.bookingId,
+      );
+
+      if (!mounted) return;
+
+      final key = type == 'pickup'
+          ? 'pickupInspection'
+          : 'returnInspection';
+
+      final raw = data?[key];
+      if (raw is! Map || raw.isEmpty) {
+        _showMessage(
+          type == 'pickup'
+              ? 'Pickup inspection has not been recorded yet.'
+              : 'Return inspection has not been recorded yet.',
+          error: true,
+        );
+        return;
+      }
+
+      await showDialog<void>(
+        context: context,
+        builder: (_) => _InspectionViewDialog(
+          title: type == 'pickup'
+              ? 'Pickup Pending Inspection'
+              : 'Return Pending Inspection',
+          data: Map<String, dynamic>.from(raw),
+          isPickup: type == 'pickup',
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      _showMessage(_cleanError(e.toString()), error: true);
+    }
+  }
+
   PreferredSizeWidget _appBar() {
     return AppBar(
       backgroundColor: card,
@@ -1093,6 +1302,8 @@ class _AdminBookingDetailsScreenState
                   const SizedBox(height: 16),
                   _pricingCard(),
                   const SizedBox(height: 16),
+                  _auditCard(),
+                  const SizedBox(height: 16),
                   _paymentCard(),
                   const SizedBox(height: 16),
                   _branchCard(),
@@ -1140,6 +1351,8 @@ class _AdminBookingDetailsScreenState
         _scheduleCard(),
         const SizedBox(height: 14),
         _pricingCard(),
+        const SizedBox(height: 14),
+        _auditCard(),
         const SizedBox(height: 14),
         _paymentCard(),
         const SizedBox(height: 14),
@@ -1255,6 +1468,8 @@ class _AdminBookingDetailsScreenState
                     color: _booking.hasBalance ? danger : success,
                     weight: FontWeight.w800,
                   ),
+                  const SizedBox(height: 12),
+                  _contactActions(),
                 ],
               );
 
@@ -1324,6 +1539,63 @@ class _AdminBookingDetailsScreenState
           ),
         ),
       ),
+    );
+  }
+
+
+  Widget _contactActions() {
+    final phone = _customerPhoneForContact;
+    final hasPhone = phone.trim().isNotEmpty;
+
+    Widget action({
+      required String label,
+      required IconData icon,
+      required Color color,
+      required VoidCallback? onPressed,
+    }) {
+      return Expanded(
+        child: OutlinedButton.icon(
+          onPressed: onPressed,
+          icon: Icon(icon, size: 17, color: onPressed == null ? muted : color),
+          label: _text(
+            label,
+            size: 11,
+            color: onPressed == null ? muted : color,
+            weight: FontWeight.w900,
+          ),
+          style: OutlinedButton.styleFrom(
+            foregroundColor: color,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+            side: BorderSide(
+              color: onPressed == null ? border : color.withOpacity(.28),
+            ),
+            backgroundColor: onPressed == null
+                ? background
+                : color.withOpacity(.055),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Row(
+      children: [
+        action(
+          label: 'WhatsApp',
+          icon: Icons.chat_rounded,
+          color: const Color(0xFF25D366),
+          onPressed: hasPhone ? _whatsAppCustomer : null,
+        ),
+        const SizedBox(width: 8),
+        action(
+          label: 'Call Customer',
+          icon: Icons.call_rounded,
+          color: success,
+          onPressed: hasPhone ? _callCustomer : null,
+        ),
+      ],
     );
   }
 
@@ -1502,6 +1774,24 @@ class _AdminBookingDetailsScreenState
 
   List<Widget> _actionButtons() {
     final result = <Widget>[];
+
+    result.add(
+      _outlineAction(
+        'View Pickup Pending Inspection',
+        Icons.fact_check_outlined,
+        blue,
+        _actionBusy ? null : () => _viewInspection('pickup'),
+      ),
+    );
+
+    result.add(
+      _outlineAction(
+        'View Return Pending Inspection',
+        Icons.assignment_return_outlined,
+        purple,
+        _actionBusy ? null : () => _viewInspection('return'),
+      ),
+    );
 
     if (_canConfirm) {
       result.add(
@@ -2003,10 +2293,21 @@ class _AdminBookingDetailsScreenState
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _sectionTitle(
-          'Pricing Breakdown',
-          'Historical pricing snapshot',
-          Icons.receipt_long_rounded,
+        Row(
+          children: [
+            Expanded(
+              child: _sectionTitle(
+                'Pricing Breakdown',
+                'Historical pricing snapshot',
+                Icons.receipt_long_rounded,
+              ),
+            ),
+            IconButton(
+              tooltip: 'Edit all amounts',
+              onPressed: _actionBusy ? null : _editBookingAmounts,
+              icon: const Icon(Icons.edit_rounded, color: primary, size: 20),
+            ),
+          ],
         ),
         const SizedBox(height: 14),
 
@@ -2422,6 +2723,166 @@ class _AdminBookingDetailsScreenState
   // ============================================================
   // BRANCHES
   // ============================================================
+
+
+  Widget _auditCard() {
+    return _card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _sectionTitle(
+            'Admin Audit Log',
+            'Amount changes and administrative actions',
+            Icons.history_rounded,
+          ),
+          const SizedBox(height: 14),
+          if (_auditLogs.isEmpty)
+            _text(
+              'No audit entries yet.',
+              size: 11,
+              color: muted,
+              weight: FontWeight.w700,
+            )
+          else
+            ..._auditLogs.take(10).map((log) {
+              final created = _auditDate(log['createdAt']);
+              final adminName =
+                  (log['adminName'] ?? log['adminEmail'] ?? log['adminId'] ?? 'Admin')
+                      .toString();
+              final reason = (log['reason'] ?? '').toString();
+
+              final before =
+                  log['before'] is Map ? Map<String, dynamic>.from(log['before']) : null;
+              final after =
+                  log['after'] is Map ? Map<String, dynamic>.from(log['after']) : null;
+
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(13),
+                  decoration: BoxDecoration(
+                    color: background,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: border),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(
+                            Icons.admin_panel_settings_rounded,
+                            size: 17,
+                            color: primary,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: _text(
+                              adminName,
+                              size: 11,
+                              weight: FontWeight.w900,
+                            ),
+                          ),
+                          _text(
+                            created,
+                            size: 9,
+                            color: muted,
+                            weight: FontWeight.w700,
+                          ),
+                        ],
+                      ),
+                      if (reason.isNotEmpty) ...[
+                        const SizedBox(height: 6),
+                        _text(
+                          reason,
+                          size: 10,
+                          color: body,
+                          weight: FontWeight.w700,
+                        ),
+                      ],
+                      if (before != null && after != null) ...[
+                        const SizedBox(height: 9),
+                        _auditAmountChanges(before, after),
+                      ],
+                    ],
+                  ),
+                ),
+              );
+            }),
+        ],
+      ),
+    );
+  }
+
+  Widget _auditAmountChanges(
+    Map<String, dynamic> before,
+    Map<String, dynamic> after,
+  ) {
+    const fields = <String, String>{
+      'baseAmount': 'Base',
+      'extraKmAmount': 'Extra KM',
+      'extraTimeAmount': 'Extra time',
+      'addOnsAmount': 'Add-ons',
+      'protectionAmount': 'Protection',
+      'taxAmount': 'Tax',
+      'discountAmount': 'Discount',
+      'securityDeposit': 'Security deposit',
+      'totalAmount': 'Total',
+      'balanceAmount': 'Balance',
+      'paymentStatus': 'Status',
+    };
+
+    final rows = <Widget>[];
+
+    for (final entry in fields.entries) {
+      final oldValue = before[entry.key];
+      final newValue = after[entry.key];
+      if (oldValue?.toString() == newValue?.toString()) continue;
+
+      rows.add(
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 2),
+          child: Row(
+            children: [
+              Expanded(
+                child: _text(
+                  entry.value,
+                  size: 9.5,
+                  color: muted,
+                  weight: FontWeight.w700,
+                ),
+              ),
+              _text(
+                '${_auditValue(oldValue)} → ${_auditValue(newValue)}',
+                size: 9.5,
+                color: heading,
+                weight: FontWeight.w900,
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Column(children: rows);
+  }
+
+  String _auditValue(dynamic value) {
+    if (value is num) return _money(value.toDouble());
+    if (value == null) return '—';
+    return value.toString();
+  }
+
+  String _auditDate(dynamic value) {
+    if (value is Timestamp) {
+      return DateFormat('dd MMM yyyy, hh:mm a').format(value.toDate());
+    }
+    if (value is DateTime) {
+      return DateFormat('dd MMM yyyy, hh:mm a').format(value);
+    }
+    return 'Pending time';
+  }
 
   Widget _branchCard() {
     final pickup = _booking.pickupBranch;
@@ -3498,11 +3959,990 @@ class _AdminBookingDetailsScreenState
         return purple;
     }
   }
+
+}
+
+class _BookingAmountsEditDialog extends StatefulWidget {
+  const _BookingAmountsEditDialog({required this.booking});
+
+  final Booking booking;
+
+  @override
+  State<_BookingAmountsEditDialog> createState() =>
+      _BookingAmountsEditDialogState();
+}
+
+class _BookingAmountsEditDialogState
+    extends State<_BookingAmountsEditDialog> {
+  final Map<String, TextEditingController> _controllers = {};
+  String? _error;
+
+  static const fields = <String, String>{
+    'baseAmount': 'Base rental',
+    'extraKmAmount': 'Extra KM',
+    'extraTimeAmount': 'Extra time',
+    'addOnsAmount': 'Add-ons',
+    'protectionAmount': 'Protection',
+    'taxAmount': 'Tax',
+    'discountAmount': 'Discount',
+    'securityDeposit': 'Security deposit',
+    'totalAmount': 'Total booking value',
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    final values = <String, double>{
+      'baseAmount': widget.booking.baseAmount,
+      'extraKmAmount': widget.booking.extraKmAmount,
+      'extraTimeAmount': widget.booking.extraTimeAmount,
+      'addOnsAmount': widget.booking.addOnsAmount,
+      'protectionAmount': widget.booking.protectionAmount,
+      'taxAmount': widget.booking.taxAmount,
+      'discountAmount': widget.booking.discountAmount,
+      'securityDeposit': widget.booking.securityDeposit,
+      'totalAmount': widget.booking.totalAmount,
+    };
+
+    for (final entry in values.entries) {
+      _controllers[entry.key] =
+          TextEditingController(text: entry.value.toStringAsFixed(2));
+    }
+  }
+
+  @override
+  void dispose() {
+    for (final controller in _controllers.values) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
+  void _submit() {
+    final values = <String, double>{};
+
+    for (final key in fields.keys) {
+      final value = double.tryParse(_controllers[key]!.text.trim());
+      if (value == null || !value.isFinite || value < 0) {
+        setState(() => _error = '${fields[key]} must be a valid amount.');
+        return;
+      }
+      values[key] = value;
+    }
+
+    Navigator.of(context).pop(values);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: Colors.white,
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(24),
+      ),
+      title: const Text(
+        'Edit Booking Amounts',
+        style: TextStyle(fontWeight: FontWeight.w900),
+      ),
+      content: SizedBox(
+        width: 520,
+        child: SingleChildScrollView(
+          child: Column(
+            children: [
+              ...fields.entries.map(
+                (entry) => Padding(
+                  padding: const EdgeInsets.only(bottom: 11),
+                  child: TextField(
+                    controller: _controllers[entry.key],
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: InputDecoration(
+                      labelText: entry.value,
+                      prefixText: '₹ ',
+                      filled: true,
+                      fillColor: const Color(0xFFF7F9FC),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(13),
+                        borderSide: const BorderSide(color: border),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              if (_error != null)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    _error!,
+                    style: const TextStyle(
+                      color: danger,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        ElevatedButton(
+          onPressed: _submit,
+          style: ElevatedButton.styleFrom(
+            backgroundColor: primary,
+            foregroundColor: Colors.white,
+            elevation: 0,
+          ),
+          child: const Text(
+            'Continue',
+            style: TextStyle(fontWeight: FontWeight.w900),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _InspectionViewDialog extends StatelessWidget {
+  const _InspectionViewDialog({
+    required this.title,
+    required this.data,
+    required this.isPickup,
+  });
+
+  final String title;
+  final Map<String, dynamic> data;
+  final bool isPickup;
+
+  static const Color background = Color(0xFFF6F8FB);
+  static const Color heading = Color(0xFF18212F);
+  static const Color body = Color(0xFF425066);
+  static const Color muted = Color(0xFF758195);
+  static const Color border = Color(0xFFE7EBF1);
+  static const Color primary = Color(0xFF315CF6);
+  static const Color success = Color(0xFF16A34A);
+  static const Color warning = Color(0xFFF59E0B);
+  static const Color danger = Color(0xFFEF4444);
+  static const Color purple = Color(0xFF8B5CF6);
+
+  String _value(String key, [String fallback = '—']) {
+    final value = data[key];
+    if (value == null || value.toString().trim().isEmpty) return fallback;
+    return value.toString();
+  }
+
+  List<String> _list(String key) {
+    final raw = data[key];
+    if (raw is Iterable) {
+      return raw
+          .map((e) => e?.toString().trim() ?? '')
+          .where((e) => e.isNotEmpty)
+          .toList();
+    }
+    return const <String>[];
+  }
+
+  String _inspectedBy() {
+    final name = _value('inspectedByName', '');
+    if (name.isNotEmpty) return name;
+    return _value('inspectedBy');
+  }
+
+  String _inspectedAt() {
+    final raw = data['inspectedAt'] ?? data['completedAt'];
+    if (raw == null) return '—';
+    try {
+      DateTime? date;
+      if (raw is Timestamp) {
+        date = raw.toDate();
+      } else if (raw is DateTime) {
+        date = raw;
+      } else {
+        date = DateTime.tryParse(raw.toString());
+      }
+      if (date == null) return raw.toString();
+      return DateFormat('dd MMM yyyy, hh:mm a').format(date.toLocal());
+    } catch (_) {
+      return raw.toString();
+    }
+  }
+
+  double _number(String key) {
+    final raw = data[key];
+    if (raw is num) return raw.toDouble();
+    return double.tryParse(raw?.toString() ?? '') ?? 0;
+  }
+
+  String _money(double value) =>
+      '₹${value.toStringAsFixed(2)}';
+
+  @override
+  Widget build(BuildContext context) {
+    final photos = _list('photoUrls');
+    final damagePhotos = _list('damagePhotoUrls');
+    final damages = _list('damagesFound').isNotEmpty
+        ? _list('damagesFound')
+        : _list('existingDamage');
+
+    final additionalCharges =
+        _number('extraKmCharge') +
+        _number('fuelCharge') +
+        _number('damageCharge') +
+        _number('lateCharge') +
+        _number('otherCharge');
+
+    final starting = _value(
+      'startingOdometer',
+      _value('odometerStart'),
+    );
+    final ending = _value(
+      'endingOdometer',
+      _value('odometerEnd'),
+    );
+
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      insetPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 18),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 980, maxHeight: 900),
+        child: Material(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(26),
+          clipBehavior: Clip.antiAlias,
+          child: Column(
+            children: [
+              _header(context, photos.length + damagePhotos.length),
+              Expanded(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(22, 18, 22, 24),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _summary(
+                        starting: starting,
+                        ending: ending,
+                        additionalCharges: additionalCharges,
+                      ),
+                      const SizedBox(height: 18),
+                      _section(
+                        icon: Icons.directions_car_filled_rounded,
+                        title: isPickup
+                            ? 'Pickup vehicle condition evidence'
+                            : 'Return vehicle condition evidence',
+                        subtitle: isPickup
+                            ? 'Photos captured before the vehicle becomes Active.'
+                            : 'Photos captured during the physical return inspection.',
+                        color: isPickup ? primary : purple,
+                        child: photos.isEmpty
+                            ? _emptyEvidence('No general vehicle photos recorded.')
+                            : _gallery(context, photos, 'Vehicle Photos'),
+                      ),
+                      const SizedBox(height: 16),
+                      _section(
+                        icon: Icons.warning_amber_rounded,
+                        title: 'Damage / existing-condition evidence',
+                        subtitle: isPickup
+                            ? 'Existing damage documented at handover.'
+                            : 'Damage documented at vehicle return.',
+                        color: damagePhotos.isNotEmpty ? danger : muted,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (damages.isNotEmpty) ...[
+                              Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                children: damages
+                                    .map(
+                                      (item) => Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 10,
+                                          vertical: 7,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: danger.withOpacity(.07),
+                                          borderRadius: BorderRadius.circular(10),
+                                          border: Border.all(
+                                            color: danger.withOpacity(.16),
+                                          ),
+                                        ),
+                                        child: Text(
+                                          item,
+                                          style: const TextStyle(
+                                            color: danger,
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w800,
+                                          ),
+                                        ),
+                                      ),
+                                    )
+                                    .toList(),
+                              ),
+                              const SizedBox(height: 12),
+                            ],
+                            damagePhotos.isEmpty
+                                ? _emptyEvidence('No damage photos recorded.')
+                                : _gallery(context, damagePhotos, 'Damage Photos'),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      _section(
+                        icon: Icons.fact_check_rounded,
+                        title: 'Inspection details',
+                        subtitle: 'Operational measurements and inspection record.',
+                        color: isPickup ? primary : purple,
+                        child: _detailGrid(
+                          [
+                            _detail('Starting odometer', starting),
+                            if (!isPickup || ending != '—')
+                              _detail('Ending odometer', ending),
+                            if (!isPickup)
+                              _detail('Actual KM', _value('actualKm')),
+                            _detail('Included KM', _value('includedKm')),
+                            if (!isPickup)
+                              _detail('Extra KM', _value('extraKm')),
+                            _detail('Fuel level', _value('fuelLevel')),
+                            _detail('Inspected by', _inspectedBy()),
+                            _detail('Inspected at', _inspectedAt()),
+                          ],
+                        ),
+                      ),
+                      if (!isPickup) ...[
+                        const SizedBox(height: 16),
+                        _section(
+                          icon: Icons.payments_rounded,
+                          title: 'Return charges',
+                          subtitle: 'Customer-billable charges captured during return.',
+                          color: warning,
+                          child: _detailGrid(
+                            [
+                              _detail('Extra KM charge', _money(_number('extraKmCharge'))),
+                              _detail('Fuel charge', _money(_number('fuelCharge'))),
+                              _detail('Damage charge', _money(_number('damageCharge'))),
+                              _detail('Late charge', _money(_number('lateCharge'))),
+                              _detail('Other charge', _money(_number('otherCharge'))),
+                              _detail('Additional charges', _money(additionalCharges)),
+                              _detail(
+                                'Security deposit adjustment',
+                                _money(_number('securityDepositAdjustment')),
+                                valueColor: purple,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: 16),
+                      _section(
+                        icon: Icons.notes_rounded,
+                        title: 'Notes & acknowledgement',
+                        subtitle: 'Additional inspection information stored with the booking.',
+                        color: muted,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            _longText('Inspection notes', _value('notes', 'No notes recorded.')),
+                            const SizedBox(height: 12),
+                            _longText(
+                              'Customer acknowledgement',
+                              _value(
+                                'customerAcknowledgement',
+                                'No customer acknowledgement recorded.',
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.fromLTRB(18, 12, 18, 14),
+                decoration: const BoxDecoration(
+                  color: Colors.white,
+                  border: Border(top: BorderSide(color: border)),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        isPickup
+                            ? 'Pickup evidence is read-only from Booking Details.'
+                            : 'Return evidence is read-only from Booking Details.',
+                        style: const TextStyle(
+                          color: muted,
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    ElevatedButton.icon(
+                      onPressed: () => Navigator.pop(context),
+                      icon: const Icon(Icons.close_rounded, size: 17),
+                      label: const Text('Close'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: heading,
+                        foregroundColor: Colors.white,
+                        elevation: 0,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 18,
+                          vertical: 12,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _header(BuildContext context, int imageCount) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(22, 18, 14, 18),
+      decoration: const BoxDecoration(
+        color: heading,
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(.10),
+              borderRadius: BorderRadius.circular(13),
+            ),
+            child: Icon(
+              isPickup ? Icons.fact_check_rounded : Icons.assignment_return_rounded,
+              color: Colors.white,
+              size: 22,
+            ),
+          ),
+          const SizedBox(width: 13),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  '$imageCount evidence photo${imageCount == 1 ? '' : 's'} • Read-only operational record',
+                  style: TextStyle(
+                    color: Colors.white.withOpacity(.70),
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            tooltip: 'Close',
+            onPressed: () => Navigator.pop(context),
+            icon: const Icon(Icons.close_rounded, color: Colors.white),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _summary({
+    required String starting,
+    required String ending,
+    required double additionalCharges,
+  }) {
+    final items = <Widget>[
+      _metric(
+        'START ODOMETER',
+        starting,
+        Icons.speed_rounded,
+        primary,
+      ),
+    ];
+
+    if (!isPickup) {
+      items.addAll([
+        _metric('END ODOMETER', ending, Icons.speed_rounded, purple),
+        _metric('ACTUAL KM', _value('actualKm'), Icons.route_rounded, success),
+        _metric('EXTRA KM', _value('extraKm'), Icons.add_road_rounded, warning),
+        _metric(
+          'ADDITIONAL CHARGES',
+          _money(additionalCharges),
+          Icons.payments_rounded,
+          danger,
+        ),
+      ]);
+    }
+
+    return Wrap(
+      spacing: 10,
+      runSpacing: 10,
+      children: items,
+    );
+  }
+
+  Widget _metric(String label, String value, IconData icon, Color color) {
+    return Container(
+      width: 165,
+      padding: const EdgeInsets.all(13),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(15),
+        border: Border.all(color: border),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, size: 18, color: color),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: muted,
+                    fontSize: 8.5,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: .6,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  value,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: heading,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _section({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required Color color,
+    required Widget child,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 34,
+                height: 34,
+                decoration: BoxDecoration(
+                  color: color.withOpacity(.09),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(icon, color: color, size: 18),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        color: heading,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      style: const TextStyle(
+                        color: muted,
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          child,
+        ],
+      ),
+    );
+  }
+
+  Widget _gallery(BuildContext context, List<String> urls, String label) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '$label • ${urls.length}',
+          style: const TextStyle(
+            color: body,
+            fontSize: 10.5,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+        const SizedBox(height: 10),
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final width = constraints.maxWidth >= 700
+                ? 158.0
+                : constraints.maxWidth >= 450
+                    ? 135.0
+                    : 112.0;
+            return Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: List.generate(
+                urls.length,
+                (index) => GestureDetector(
+                  onTap: () => _openImage(context, urls, index),
+                  child: Container(
+                    width: width,
+                    height: width * .72,
+                    clipBehavior: Clip.antiAlias,
+                    decoration: BoxDecoration(
+                      color: background,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: border),
+                    ),
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        Image.network(
+                          urls[index],
+                          fit: BoxFit.cover,
+                          loadingBuilder: (context, child, progress) {
+                            if (progress == null) return child;
+                            return const Center(
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            );
+                          },
+                          errorBuilder: (_, __, ___) => const Center(
+                            child: Icon(
+                              Icons.broken_image_outlined,
+                              color: muted,
+                              size: 28,
+                            ),
+                          ),
+                        ),
+                        Positioned(
+                          right: 7,
+                          bottom: 7,
+                          child: Container(
+                            padding: const EdgeInsets.all(6),
+                            decoration: BoxDecoration(
+                              color: Colors.black.withOpacity(.55),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: const Icon(
+                              Icons.zoom_in_rounded,
+                              color: Colors.white,
+                              size: 15,
+                            ),
+                          ),
+                        ),
+                        Positioned(
+                          left: 7,
+                          top: 7,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 7,
+                              vertical: 4,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.black.withOpacity(.52),
+                              borderRadius: BorderRadius.circular(7),
+                            ),
+                            child: Text(
+                              '${index + 1}/${urls.length}',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 9,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+      ],
+    );
+  }
+
+  Widget _detailGrid(List<Widget> items) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final columns = constraints.maxWidth >= 650 ? 2 : 1;
+        final width = (constraints.maxWidth - (columns - 1) * 10) / columns;
+        return Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: items
+              .map((item) => SizedBox(width: width, child: item))
+              .toList(),
+        );
+      },
+    );
+  }
+
+  Widget _detail(
+    String label,
+    String value, {
+    Color valueColor = heading,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: border),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              style: const TextStyle(
+                color: muted,
+                fontSize: 10.5,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Flexible(
+            child: Text(
+              value,
+              textAlign: TextAlign.right,
+              style: TextStyle(
+                color: valueColor,
+                fontSize: 11,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+
+  Widget _longText(String label, String value) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(13),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(13),
+        border: Border.all(color: border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(
+              color: muted,
+              fontSize: 10,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            value,
+            style: const TextStyle(
+              color: body,
+              fontSize: 12,
+              height: 1.45,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _emptyEvidence(String text) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 14),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(13),
+        border: Border.all(color: border),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.image_not_supported_outlined, color: muted, size: 20),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Text(
+              text,
+              style: const TextStyle(
+                color: muted,
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _openImage(BuildContext context, List<String> urls, int initialIndex) {
+    showDialog<void>(
+      context: context,
+      barrierColor: Colors.black.withOpacity(.92),
+      builder: (_) => _InspectionImageViewer(
+        urls: urls,
+        initialIndex: initialIndex,
+      ),
+    );
+  }
+}
+
+class _InspectionImageViewer extends StatefulWidget {
+  const _InspectionImageViewer({
+    required this.urls,
+    required this.initialIndex,
+  });
+
+  final List<String> urls;
+  final int initialIndex;
+
+  @override
+  State<_InspectionImageViewer> createState() => _InspectionImageViewerState();
+}
+
+class _InspectionImageViewerState extends State<_InspectionImageViewer> {
+  late final PageController _controller;
+  late int _index;
+
+  @override
+  void initState() {
+    super.initState();
+    _index = widget.initialIndex;
+    _controller = PageController(initialPage: widget.initialIndex);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: Stack(
+        children: [
+          PageView.builder(
+            controller: _controller,
+            itemCount: widget.urls.length,
+            onPageChanged: (value) => setState(() => _index = value),
+            itemBuilder: (_, index) => InteractiveViewer(
+              minScale: .7,
+              maxScale: 4,
+              child: Center(
+                child: Image.network(
+                  widget.urls[index],
+                  fit: BoxFit.contain,
+                  errorBuilder: (_, __, ___) => const Icon(
+                    Icons.broken_image_outlined,
+                    color: Colors.white70,
+                    size: 70,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          Positioned(
+            top: 18,
+            left: 18,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(.55),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Text(
+                '${_index + 1}/${widget.urls.length}',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ),
+          ),
+          Positioned(
+            top: 10,
+            right: 10,
+            child: IconButton(
+              onPressed: () => Navigator.pop(context),
+              icon: const Icon(Icons.close_rounded, color: Colors.white, size: 30),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 // ================================================================
 // SAFE PAYMENT ENTRY DIALOG
 // ================================================================
 
-}
 class _PaymentEntryDialog extends StatefulWidget {
   const _PaymentEntryDialog({
     required this.maxAmount,

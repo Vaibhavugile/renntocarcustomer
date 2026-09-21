@@ -2521,6 +2521,7 @@ class BookingService {
     List<String> damagesFound = const [],
     String fuelLevel = '',
     String notes = '',
+    double fuelCharge = 0,
     double damageCharge = 0,
     double lateCharge = 0,
     double otherCharge = 0,
@@ -2535,10 +2536,10 @@ class BookingService {
     }
 
     if (extraKmCharge < 0 ||
+        fuelCharge < 0 ||
         damageCharge < 0 ||
         lateCharge < 0 ||
-        otherCharge < 0 ||
-        securityDepositAdjustment < 0) {
+        otherCharge < 0) {
       throw Exception('Return charges cannot be negative.');
     }
 
@@ -2593,6 +2594,29 @@ class BookingService {
 
     final now = returnAt ?? DateTime.now();
 
+    // Only real customer-billable return charges increase rental total.
+    // Security-deposit adjustment is tracked separately and is NOT added
+    // to totalAmount.
+    final finalAdditionalCharges =
+        extraKmCharge + fuelCharge + damageCharge + lateCharge + otherCharge;
+
+    final newTotalAmount = booking.totalAmount + finalAdditionalCharges;
+
+    if (newTotalAmount < 0) {
+      throw Exception('Calculated booking total cannot be negative.');
+    }
+
+    final effectivePaid = booking.paidAmount - booking.refundAmount;
+
+    final newPaymentStatus = _paymentStatusForAmounts(
+      totalAmount: newTotalAmount,
+      paidAmount: booking.paidAmount,
+      refundAmount: booking.refundAmount,
+    );
+
+    final existingExtraCharges =
+        (doc.data()!['extraCharges'] as num?)?.toDouble() ?? 0.0;
+
     final returnInspection = <String, dynamic>{
       'startingOdometer': startingOdometer,
       'endingOdometer': endingOdometer,
@@ -2600,26 +2624,22 @@ class BookingService {
       'includedKm': safeIncludedKm,
       'extraKm': extraKm,
       'extraKmCharge': extraKmCharge,
+      'fuelCharge': fuelCharge,
+      'damageCharge': damageCharge,
+      'lateCharge': lateCharge,
+      'otherCharge': otherCharge,
+      'additionalCharges': finalAdditionalCharges,
+      'securityDepositAdjustment': securityDepositAdjustment,
       'photoUrls': List<String>.from(photoUrls),
       'damagePhotoUrls': List<String>.from(damagePhotoUrls),
       'damagesFound': List<String>.from(damagesFound),
       'fuelLevel': fuelLevel.trim(),
       'notes': notes.trim(),
-      'damageCharge': damageCharge,
-      'lateCharge': lateCharge,
-      'otherCharge': otherCharge,
-      'securityDepositAdjustment': securityDepositAdjustment,
       'customerAcknowledgement': customerAcknowledgement,
       'inspectedBy': _auth.currentUser!.uid,
       'inspectedByRole': 'admin',
       'inspectedAt': Timestamp.fromDate(now),
     };
-
-    final existingExtraCharges =
-        (doc.data()!['extraCharges'] as num?)?.toDouble() ?? 0.0;
-
-    final finalExtraCharges =
-        extraKmCharge + damageCharge + lateCharge + otherCharge;
 
     await reference.update({
       'status': 'completed',
@@ -2631,11 +2651,27 @@ class BookingService {
       'includedKm': safeIncludedKm,
       'extraKm': extraKm,
       'extraKmCharge': extraKmCharge,
+      'fuelCharge': fuelCharge,
       'damageCharge': damageCharge,
       'lateCharge': lateCharge,
       'otherCharge': otherCharge,
       'securityDepositAdjustment': securityDepositAdjustment,
-      'extraCharges': existingExtraCharges + finalExtraCharges,
+
+      // Historical/operational additional-charge total.
+      'extraCharges': existingExtraCharges + finalAdditionalCharges,
+
+      // IMPORTANT:
+      // Return charges are added to the existing booking total.
+      'totalAmount': newTotalAmount,
+
+      // Recalculate payment status against the NEW total immediately.
+      'paidAmount': booking.paidAmount,
+      'refundAmount': booking.refundAmount,
+      'paymentStatus': _paymentStatusToString(newPaymentStatus),
+
+      // Useful explicit balance snapshot for admin/reporting.
+      'balanceAmount': (newTotalAmount - effectivePaid).clamp(0.0, double.infinity),
+
       'lastActionBy': _auth.currentUser!.uid,
       'lastActionByRole': 'admin',
       'updatedAt': FieldValue.serverTimestamp(),
@@ -2650,6 +2686,161 @@ class BookingService {
   }
 
   /// Reads the pickup/return operational snapshot for an admin screen.
+
+  /// Updates booking pricing/total from the admin details screen and writes
+  /// an immutable audit entry containing the admin identity and before/after
+  /// values.
+  Future<Booking> updateBookingAmountsForAdmin({
+    required String tenantId,
+    required String bookingId,
+    required Map<String, double> amounts,
+    String reason = 'Admin updated booking amounts',
+  }) async {
+    final adminData = await _requireTenantAdmin(tenantId: tenantId);
+    final adminUser = _requireUser();
+
+    final reference = _bookings(tenantId).doc(bookingId);
+    final doc = await reference.get();
+
+    if (!doc.exists || doc.data() == null) {
+      throw Exception('Booking not found.');
+    }
+
+    final booking = Booking.fromMap(doc.id, doc.data()!);
+    _validateTenant(booking, tenantId);
+
+    const editableFields = <String>[
+      'baseAmount',
+      'extraKmAmount',
+      'extraTimeAmount',
+      'addOnsAmount',
+      'protectionAmount',
+      'taxAmount',
+      'discountAmount',
+      'securityDeposit',
+      'totalAmount',
+    ];
+
+    for (final field in editableFields) {
+      final value = amounts[field];
+      if (value == null || !value.isFinite || value < 0) {
+        throw Exception('$field must be a valid non-negative amount.');
+      }
+    }
+
+    final oldValues = <String, dynamic>{
+      'baseAmount': booking.baseAmount,
+      'extraKmAmount': booking.extraKmAmount,
+      'extraTimeAmount': booking.extraTimeAmount,
+      'addOnsAmount': booking.addOnsAmount,
+      'protectionAmount': booking.protectionAmount,
+      'taxAmount': booking.taxAmount,
+      'discountAmount': booking.discountAmount,
+      'securityDeposit': booking.securityDeposit,
+      'totalAmount': booking.totalAmount,
+      'paidAmount': booking.paidAmount,
+      'refundAmount': booking.refundAmount,
+      'balanceAmount': booking.balanceAmount,
+      'paymentStatus': _paymentStatusToString(booking.paymentStatus),
+    };
+
+    final paid = booking.paidAmount;
+    final refunded = booking.refundAmount;
+    final total = amounts['totalAmount']!;
+    final effectivePaid = paid - refunded;
+
+    final String paymentStatus;
+    if (effectivePaid <= 0.009) {
+      paymentStatus = refunded > 0.009 ? 'refunded' : 'pending';
+    } else if (effectivePaid + 0.009 >= total) {
+      paymentStatus = 'paid';
+    } else {
+      paymentStatus = 'partially_paid';
+    }
+
+    final balance =
+        (total - paid + refunded).clamp(0.0, double.infinity).toDouble();
+
+    final update = <String, dynamic>{
+      for (final field in editableFields) field: amounts[field],
+      'balanceAmount': balance,
+      'paymentStatus': paymentStatus,
+      'lastActionBy': adminUser.uid,
+      'lastActionByRole': 'admin',
+      'lastActionByName': (adminData['displayName'] ??
+              adminData['fullName'] ??
+              adminData['name'] ??
+              adminData['email'] ??
+              adminUser.email ??
+              adminUser.uid)
+          .toString()
+          .trim(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    };
+
+    final adminName = update['lastActionByName'].toString();
+
+    final auditRef = reference.collection('auditLogs').doc();
+    final batch = _firestore.batch();
+
+    batch.update(reference, update);
+
+    batch.set(auditRef, {
+      'auditId': auditRef.id,
+      'tenantId': tenantId,
+      'bookingId': bookingId,
+      'action': 'booking_amounts_updated',
+      'actionLabel': 'Booking amounts updated',
+      'reason': reason.trim().isEmpty
+          ? 'Admin updated booking amounts'
+          : reason.trim(),
+      'adminId': adminUser.uid,
+      'adminName': adminName,
+      'adminEmail': adminUser.email,
+      'adminRole': 'admin',
+      'before': oldValues,
+      'after': {
+        ...amounts,
+        'paidAmount': paid,
+        'refundAmount': refunded,
+        'balanceAmount': balance,
+        'paymentStatus': paymentStatus,
+      },
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+
+    await batch.commit();
+
+    final saved = await reference.get();
+    if (!saved.exists || saved.data() == null) {
+      throw Exception('Unable to save booking amount changes.');
+    }
+
+    return Booking.fromMap(saved.id, saved.data()!);
+  }
+
+  Future<List<Map<String, dynamic>>> getBookingAuditLogsForAdmin({
+    required String tenantId,
+    required String bookingId,
+    int limit = 50,
+  }) async {
+    await _requireTenantAdmin(tenantId: tenantId);
+
+    final snapshot = await _bookings(tenantId)
+        .doc(bookingId)
+        .collection('auditLogs')
+        .orderBy('createdAt', descending: true)
+        .limit(limit.clamp(1, 100))
+        .get();
+
+    return snapshot.docs
+        .map((doc) => {
+              'id': doc.id,
+              ...doc.data(),
+            })
+        .toList();
+  }
+
   Future<Map<String, dynamic>?> getInspectionDataForAdmin({
     required String tenantId,
     required String bookingId,
@@ -2673,6 +2864,7 @@ class BookingService {
       'includedKm': doc.data()!['includedKm'],
       'extraKm': doc.data()!['extraKm'],
       'extraKmCharge': doc.data()!['extraKmCharge'],
+      'fuelCharge': doc.data()!['fuelCharge'],
       'damageCharge': doc.data()!['damageCharge'],
       'lateCharge': doc.data()!['lateCharge'],
       'otherCharge': doc.data()!['otherCharge'],
