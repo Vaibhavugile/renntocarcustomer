@@ -303,6 +303,10 @@ class PaymentTransaction {
   final DateTime? paymentDate;
   final DateTime? createdAt;
   final DateTime? updatedAt;
+  final String? editedBy;
+  final String? editedByRole;
+  final String? editedByName;
+  final DateTime? editedAt;
 
   const PaymentTransaction({
     required this.paymentId, required this.tenantId, required this.bookingId,
@@ -314,6 +318,7 @@ class PaymentTransaction {
     this.customerPhone = '', this.customerEmail = '', this.recordedBy,
     this.recordedByRole, this.note, this.originalPaymentId, this.refundAmount = 0,
     this.paymentDate, this.createdAt, this.updatedAt,
+    this.editedBy, this.editedByRole, this.editedByName, this.editedAt,
   });
 
   bool get isSuccessful => status == PaymentTransactionStatus.paid || status == PaymentTransactionStatus.authorized;
@@ -334,6 +339,8 @@ class PaymentTransaction {
     recordedByRole: map['recordedByRole']?.toString(), note: map['note']?.toString(),
     originalPaymentId: map['originalPaymentId']?.toString(), refundAmount: _toDouble(map['refundAmount']),
     paymentDate: _dateTimeFromValue(map['paymentDate']), createdAt: _dateTimeFromValue(map['createdAt']), updatedAt: _dateTimeFromValue(map['updatedAt']),
+    editedBy: map['editedBy']?.toString(), editedByRole: map['editedByRole']?.toString(),
+    editedByName: map['editedByName']?.toString(), editedAt: _dateTimeFromValue(map['editedAt']),
   );
 
   Map<String, dynamic> toMap() => {
@@ -347,6 +354,8 @@ class PaymentTransaction {
     'recordedBy': recordedBy, 'recordedByRole': recordedByRole, 'note': note, 'originalPaymentId': originalPaymentId,
     'refundAmount': refundAmount, 'paymentDate': paymentDate == null ? null : Timestamp.fromDate(paymentDate!),
     'createdAt': createdAt == null ? null : Timestamp.fromDate(createdAt!), 'updatedAt': updatedAt == null ? null : Timestamp.fromDate(updatedAt!),
+    'editedBy': editedBy, 'editedByRole': editedByRole, 'editedByName': editedByName,
+    'editedAt': editedAt == null ? null : Timestamp.fromDate(editedAt!),
   };
 }
 

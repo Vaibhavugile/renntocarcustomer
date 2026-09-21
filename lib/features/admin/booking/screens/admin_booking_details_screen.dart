@@ -8,6 +8,8 @@ import '../../../booking/models/booking.dart';
 import '../../../booking/services/booking_service.dart';
 import '../../../customer/models/customer.dart';
 import '../../../customer/services/customer_service.dart';
+import 'pickup_pending_screen.dart';
+import 'return_pending_screen.dart';
 
 /// Premium admin Booking 360° details screen.
 ///
@@ -391,16 +393,16 @@ class _AdminBookingDetailsScreenState
       _booking.status == BookingStatus.confirmed ||
       _booking.status == BookingStatus.pickupPending;
 
-  bool get _canStartPickup =>
-      (_booking.status == BookingStatus.confirmed ||
-          _booking.status == BookingStatus.pickupPending) &&
-      _pickupDue &&
-      _kycVerified;
+  bool get _canPreparePickup =>
+      _booking.status == BookingStatus.confirmed && _pickupDue;
+
+  bool get _canOpenPickupPending =>
+      _booking.status == BookingStatus.pickupPending;
 
   bool get _canStartReturn =>
       _booking.status == BookingStatus.active;
 
-  bool get _canCompleteReturn =>
+  bool get _canOpenReturnPending =>
       _booking.status == BookingStatus.returnPending;
 
   bool get _isTerminal =>
@@ -422,79 +424,136 @@ class _AdminBookingDetailsScreenState
     );
   }
 
-  Future<void> _startPickup() async {
-    if (!_kycVerified) {
-      _showMessage(
-        'Customer KYC must be verified before physical vehicle handover.',
-        error: true,
-      );
-      return;
-    }
-
-    if (!_canStartPickup) {
-      _showMessage(
-        _booking.status == BookingStatus.confirmed
-            ? 'Pickup is not due yet.'
-            : 'This booking is not ready for pickup.',
-        error: true,
-      );
-      return;
-    }
+  Future<void> _preparePickup() async {
+    if (!_canPreparePickup) return;
 
     final confirmed = await _confirm(
-      title: 'Start vehicle handover?',
+      title: 'Move booking to Pickup Pending?',
       message:
-          'This records the physical pickup time and moves the booking to Active.',
-      confirmText: 'Start Pickup',
-      color: primary,
+          'This will move the booking into the Pickup Pending operational queue. '
+          'The vehicle will NOT be marked Active yet. Physical handover must be '
+          'completed from the Pickup Pending screen.',
+      confirmText: 'Open Pickup Pending',
+      color: blue,
     );
 
-    if (!confirmed) return;
+    if (!confirmed || !mounted) return;
 
-    await _runAction(
-      successMessage: 'Pickup started. Booking is now Active.',
-      action: () => _bookingService.markPickupStartedForAdmin(
+    if (_actionBusy) return;
+    setState(() => _actionBusy = true);
+
+    try {
+      await _revalidateBookingBeforeAction();
+
+      if (_booking.status != BookingStatus.confirmed) {
+        throw Exception('Booking changed state. Refresh and try again.');
+      }
+
+      if (!_pickupDue) {
+        throw Exception('Pickup is not due yet.');
+      }
+
+      await _bookingService.updateBookingStatusForAdmin(
         tenantId: _tenantId,
         bookingId: _booking.bookingId,
+        status: BookingStatus.pickupPending,
+      );
+
+      await _loadAll(showLoader: false);
+
+      if (!mounted) return;
+      await _openPickupPendingScreen();
+
+      if (!mounted) return;
+      await _loadAll(showLoader: false);
+    } catch (e) {
+      if (!mounted) return;
+      _showMessage(_cleanError(e.toString()), error: true);
+    } finally {
+      if (mounted) setState(() => _actionBusy = false);
+    }
+  }
+
+  Future<void> _openPickupPendingScreen() async {
+    if (!mounted) return;
+
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => const PickupPendingScreen(),
       ),
     );
+
+    if (!mounted) return;
+    await _loadAll(showLoader: false);
   }
 
   Future<void> _startReturn() async {
     if (!_canStartReturn) return;
 
     final confirmed = await _confirm(
-      title: 'Start return process?',
+      title: 'Move booking to Return Pending?',
       message:
-          'The vehicle has not been marked as returned yet. This only moves the booking to Return Pending so inspection can be completed.',
-      confirmText: 'Start Return',
+          'This will move the active rental into Return Pending. '
+          'The vehicle will not be marked Completed until the physical return '
+          'inspection is completed from the Return Pending screen.',
+      confirmText: 'Open Return Pending',
       color: purple,
     );
 
-    if (!confirmed) return;
+    if (!confirmed || !mounted) return;
 
-    await _runAction(
-      successMessage: 'Booking moved to Return Pending.',
-      action: () => _bookingService.markReturnStartedForAdmin(
+    if (_actionBusy) return;
+    setState(() => _actionBusy = true);
+
+    try {
+      await _revalidateBookingBeforeAction();
+
+      if (_booking.status != BookingStatus.active) {
+        throw Exception('Booking changed state. Refresh and try again.');
+      }
+
+      await _bookingService.markReturnStartedForAdmin(
         tenantId: _tenantId,
         bookingId: _booking.bookingId,
-      ),
-    );
+      );
+
+      await _loadAll(showLoader: false);
+
+      if (!mounted) return;
+      await _openReturnPendingScreen();
+
+      if (!mounted) return;
+      await _loadAll(showLoader: false);
+    } catch (e) {
+      if (!mounted) return;
+      _showMessage(_cleanError(e.toString()), error: true);
+    } finally {
+      if (mounted) setState(() => _actionBusy = false);
+    }
   }
 
-  Future<void> _completeReturn() async {
-    if (!_canCompleteReturn) return;
+  Future<void> _openReturnPendingScreen() async {
+    if (!mounted) return;
 
-    final result = await _showReturnInspectionDialog();
-    if (result == null) return;
-
-    await _runAction(
-      successMessage: 'Return completed successfully.',
-      action: () => _bookingService.markReturnCompletedForAdmin(
-        tenantId: _tenantId,
-        bookingId: _booking.bookingId,
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => const ReturnPendingScreen(),
       ),
     );
+
+    if (!mounted) return;
+    await _loadAll(showLoader: false);
+  }
+
+  Future<void> _openCurrentOperationalScreen() async {
+    if (_booking.status == BookingStatus.pickupPending) {
+      await _openPickupPendingScreen();
+      return;
+    }
+
+    if (_booking.status == BookingStatus.returnPending) {
+      await _openReturnPendingScreen();
+    }
   }
 
   Future<void> _cancelBooking() async {
@@ -635,6 +694,62 @@ class _AdminBookingDetailsScreenState
     }
   }
 
+  Future<void> _editPayment(PaymentTransaction transaction) async {
+    if (_actionBusy) return;
+
+    final result = await _showEditPaymentDialog(transaction);
+    if (result == null) return;
+
+    final confirmed = await _confirm(
+      title: 'Save payment changes?',
+      message:
+          'The existing transaction will be updated and the previous values will be kept in its audit history.',
+      confirmText: 'Save Changes',
+      color: primary,
+    );
+    if (!confirmed) return;
+
+    setState(() => _actionBusy = true);
+
+    try {
+      await _revalidateBookingBeforeAction();
+
+      await _bookingService.updatePaymentForAdmin(
+        tenantId: _tenantId,
+        bookingId: _booking.bookingId,
+        paymentId: transaction.paymentId,
+        amount: result['amount'] as double,
+        method: result['method'] as PaymentMethodType,
+        transactionReference: result['reference'] as String?,
+        note: result['note'] as String?,
+        razorpayPaymentId: result['razorpayPaymentId'] as String?,
+        gatewayTransactionId: result['gatewayTransactionId'] as String?,
+        paymentDate: result['paymentDate'] as DateTime?,
+      );
+
+      await _loadAll(showLoader: false);
+
+      if (!mounted) return;
+      _showMessage('Payment details updated and audit information recorded.');
+    } catch (e) {
+      if (!mounted) return;
+      _showMessage(_cleanError(e.toString()), error: true);
+    } finally {
+      if (mounted) setState(() => _actionBusy = false);
+    }
+  }
+
+  Future<Map<String, dynamic>?> _showEditPaymentDialog(
+    PaymentTransaction transaction,
+  ) async {
+    return showDialog<Map<String, dynamic>>(
+      context: context,
+      useRootNavigator: true,
+      barrierDismissible: false,
+      builder: (_) => _PaymentEditDialog(transaction: transaction),
+    );
+  }
+
   Future<void> _refundPayment() async {
     if (_actionBusy || _booking.paidAmount <= _booking.refundAmount + 0.009) {
       return;
@@ -701,141 +816,20 @@ class _AdminBookingDetailsScreenState
     required String actionLabel,
     bool isRefund = false,
   }) async {
-    final amountController = TextEditingController(
-      text: maxAmount.toStringAsFixed(0),
-    );
-    final referenceController = TextEditingController();
-    final noteController = TextEditingController();
-    PaymentMethodType method = PaymentMethodType.cash;
-
+    // Use a dedicated StatefulWidget instead of StatefulBuilder here.
+    // This keeps the dialog's state inside its own route element and avoids
+    // inherited-widget dependents surviving dialog deactivation.
     final result = await showDialog<Map<String, dynamic>>(
       context: context,
-      builder: (dialogContext) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            return AlertDialog(
-              backgroundColor: card,
-              surfaceTintColor: Colors.transparent,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(24),
-              ),
-              title: _text(title, size: 19, weight: FontWeight.w900),
-              content: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    TextField(
-                      controller: amountController,
-                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                      decoration: _input(
-                        isRefund ? 'Refund amount' : 'Payment amount',
-                        hint: 'Maximum ${_money(maxAmount)}',
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    DropdownButtonFormField<PaymentMethodType>(
-                      value: method,
-                      decoration: _input('Method'),
-                      items: const [
-                        DropdownMenuItem(
-                          value: PaymentMethodType.cash,
-                          child: Text('Cash'),
-                        ),
-                        DropdownMenuItem(
-                          value: PaymentMethodType.upi,
-                          child: Text('UPI'),
-                        ),
-                        DropdownMenuItem(
-                          value: PaymentMethodType.card,
-                          child: Text('Card'),
-                        ),
-                        DropdownMenuItem(
-                          value: PaymentMethodType.bankTransfer,
-                          child: Text('Bank Transfer'),
-                        ),
-                        DropdownMenuItem(
-                          value: PaymentMethodType.razorpay,
-                          child: Text('Razorpay'),
-                        ),
-                        DropdownMenuItem(
-                          value: PaymentMethodType.other,
-                          child: Text('Other'),
-                        ),
-                      ],
-                      onChanged: (value) {
-                        if (value != null) {
-                          setDialogState(() => method = value);
-                        }
-                      },
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: referenceController,
-                      decoration: _input(
-                        'Transaction reference',
-                        hint: 'Optional',
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: noteController,
-                      maxLines: 3,
-                      decoration: _input(
-                        'Note',
-                        hint: isRefund ? 'Refund reason / gateway note' : 'Payment note',
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(dialogContext),
-                  child: _text('Cancel', color: muted, weight: FontWeight.w800),
-                ),
-                ElevatedButton(
-                  onPressed: () {
-                    final amount = double.tryParse(amountController.text.trim());
-                    if (amount == null || amount <= 0) return;
-                    if (amount > maxAmount + 0.009) return;
-
-                    Navigator.pop(
-                      dialogContext,
-                      {
-                        'amount': amount,
-                        'method': method,
-                        'reference': referenceController.text.trim().isEmpty
-                            ? null
-                            : referenceController.text.trim(),
-                        'note': noteController.text.trim().isEmpty
-                            ? null
-                            : noteController.text.trim(),
-                      },
-                    );
-                  },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: isRefund ? purple : primary,
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                  child: _text(
-                    actionLabel,
-                    color: Colors.white,
-                    weight: FontWeight.w900,
-                  ),
-                ),
-              ],
-            );
-          },
-        );
-      },
+      useRootNavigator: true,
+      barrierDismissible: false,
+      builder: (_) => _PaymentEntryDialog(
+        maxAmount: maxAmount,
+        title: title,
+        actionLabel: actionLabel,
+        isRefund: isRefund,
+      ),
     );
-
-    amountController.dispose();
-    referenceController.dispose();
-    noteController.dispose();
 
     return result;
   }
@@ -959,137 +953,6 @@ class _AdminBookingDetailsScreenState
     );
 
     controller.dispose();
-    return result;
-  }
-
-  Future<Map<String, dynamic>?> _showReturnInspectionDialog() async {
-    final odometer = TextEditingController();
-    final notes = TextEditingController();
-    bool damageFound = false;
-
-    final result = await showDialog<Map<String, dynamic>>(
-      context: context,
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            return AlertDialog(
-              backgroundColor: card,
-              surfaceTintColor: Colors.transparent,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(24),
-              ),
-              title: Row(
-                children: [
-                  Container(
-                    width: 42,
-                    height: 42,
-                    decoration: BoxDecoration(
-                      color: purple.withOpacity(.10),
-                      borderRadius: BorderRadius.circular(13),
-                    ),
-                    child: const Icon(
-                      Icons.fact_check_rounded,
-                      color: purple,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: _text(
-                      'Return Inspection',
-                      size: 18,
-                      weight: FontWeight.w900,
-                    ),
-                  ),
-                ],
-              ),
-              content: SingleChildScrollView(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _text(
-                      'Complete the physical inspection before closing this rental.',
-                      size: 12,
-                      color: body,
-                      height: 1.45,
-                    ),
-                    const SizedBox(height: 18),
-                    TextField(
-                      controller: odometer,
-                      keyboardType: TextInputType.number,
-                      decoration: _input(
-                        'Return odometer',
-                        hint: 'e.g. 48210 km',
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    SwitchListTile.adaptive(
-                      contentPadding: EdgeInsets.zero,
-                      value: damageFound,
-                      onChanged: (value) {
-                        setDialogState(() => damageFound = value);
-                      },
-                      title: _text(
-                        'Damage found',
-                        weight: FontWeight.w800,
-                      ),
-                      subtitle: _text(
-                        'Record this if the vehicle needs damage review.',
-                        size: 11,
-                        color: muted,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    TextField(
-                      controller: notes,
-                      maxLines: 4,
-                      decoration: _input(
-                        'Inspection notes',
-                        hint: 'Fuel, cleanliness, damage, accessories...',
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(context),
-                  child: _text(
-                    'Cancel',
-                    color: muted,
-                    weight: FontWeight.w800,
-                  ),
-                ),
-                ElevatedButton(
-                  onPressed: () {
-                    Navigator.pop(
-                      context,
-                      {
-                        'odometer': odometer.text.trim(),
-                        'damageFound': damageFound,
-                        'notes': notes.text.trim(),
-                      },
-                    );
-                  },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: success,
-                    elevation: 0,
-                  ),
-                  child: _text(
-                    'Complete Return',
-                    color: Colors.white,
-                    weight: FontWeight.w800,
-                  ),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
-
-    odometer.dispose();
-    notes.dispose();
-
     return result;
   }
 
@@ -1652,28 +1515,40 @@ class _AdminBookingDetailsScreenState
       );
     }
 
-    if (_canStartPickup) {
+    if (_canPreparePickup) {
       result.add(
         _actionButton(
-          'Start Pickup / Handover',
-          'Record physical vehicle handover and make the rental Active.',
+          'Open Pickup Pending',
+          'Move this booking into the Pickup Pending queue. Physical handover is completed there.',
           Icons.key_rounded,
           blue,
-          _actionBusy ? null : _startPickup,
+          _actionBusy ? null : _preparePickup,
         ),
       );
     } else if (_booking.status == BookingStatus.confirmed) {
       result.add(
         _disabledAction(
           'Pickup Scheduled',
-          !_kycVerified
-              ? 'KYC verification is required before physical handover.'
-              : _pickupDue
-                  ? 'Ready for handover.'
-                  : 'Pickup action becomes available when the scheduled pickup time is reached.',
-          !_kycVerified
+          _pickupDue
+              ? 'Pickup is due, but another verification is currently required.'
+              : 'Pickup action becomes available when the scheduled pickup time is reached.',
+          _pickupDue
               ? Icons.verified_user_outlined
               : Icons.schedule_rounded,
+        ),
+      );
+    }
+
+    if (_canOpenPickupPending) {
+      result.add(
+        _actionButton(
+          'Open Pickup Pending',
+          _kycVerified
+              ? 'Complete the physical handover, capture odometer, fuel, evidence, and activate the rental.'
+              : 'Open the pickup queue. KYC must be verified before physical handover.',
+          Icons.key_rounded,
+          blue,
+          _actionBusy ? null : _openCurrentOperationalScreen,
         ),
       );
     }
@@ -1681,8 +1556,8 @@ class _AdminBookingDetailsScreenState
     if (_canStartReturn) {
       result.add(
         _actionButton(
-          'Start Return',
-          'Move the rental to Return Pending for physical inspection.',
+          'Open Return Pending',
+          'Move the active rental to Return Pending for physical return inspection.',
           Icons.assignment_return_rounded,
           purple,
           _actionBusy ? null : _startReturn,
@@ -1690,14 +1565,14 @@ class _AdminBookingDetailsScreenState
       );
     }
 
-    if (_canCompleteReturn) {
+    if (_canOpenReturnPending) {
       result.add(
         _actionButton(
-          'Complete Return',
-          'Run return inspection and close the rental.',
+          'Open Return Pending',
+          'Complete the return inspection, charges, evidence, and close the rental.',
           Icons.fact_check_rounded,
           success,
-          _actionBusy ? null : _completeReturn,
+          _actionBusy ? null : _openCurrentOperationalScreen,
         ),
       );
     }
@@ -2433,6 +2308,23 @@ class _AdminBookingDetailsScreenState
                       color: color,
                       weight: FontWeight.w900,
                     ),
+                    const SizedBox(width: 6),
+                    InkWell(
+                      onTap: _actionBusy ? null : () => _editPayment(transaction),
+                      borderRadius: BorderRadius.circular(9),
+                      child: Container(
+                        padding: const EdgeInsets.all(6),
+                        decoration: BoxDecoration(
+                          color: primary.withOpacity(.08),
+                          borderRadius: BorderRadius.circular(9),
+                        ),
+                        child: const Icon(
+                          Icons.edit_rounded,
+                          size: 14,
+                          color: primary,
+                        ),
+                      ),
+                    ),
                   ],
                 ),
                 const SizedBox(height: 3),
@@ -2467,12 +2359,36 @@ class _AdminBookingDetailsScreenState
                     color: muted,
                     weight: FontWeight.w700,
                   ),
+                if (transaction.recordedBy?.trim().isNotEmpty == true)
+                  _text(
+                    'Recorded by: ${transaction.recordedBy?.trim().isNotEmpty == true ? transaction.recordedBy!.trim() : 'Unknown'}',
+                    size: 9,
+                    color: muted,
+                    weight: FontWeight.w700,
+                  ),
+                if (transaction.editedBy?.trim().isNotEmpty == true) ...[
+                  const SizedBox(height: 2),
+                  _text(
+                    'Edited by: ${_paymentEditorLabel(transaction)} • ${transaction.editedByRole ?? 'admin'}${transaction.editedAt == null ? '' : ' • ${_dateTime(transaction.editedAt!)}'}',
+                    size: 9,
+                    color: primary,
+                    weight: FontWeight.w800,
+                  ),
+                ],
               ],
             ),
           ),
         ],
       ),
     );
+  }
+
+  String _paymentEditorLabel(PaymentTransaction transaction) {
+    return transaction.editedByName?.trim().isNotEmpty == true
+        ? transaction.editedByName!.trim()
+        : (transaction.editedBy?.trim().isNotEmpty == true
+            ? transaction.editedBy!.trim()
+            : 'Unknown admin');
   }
 
   String _paymentMethodToLabel(PaymentMethodType method) {
@@ -3581,5 +3497,717 @@ class _AdminBookingDetailsScreenState
       case PaymentStatus.partiallyRefunded:
         return purple;
     }
+  }
+// ================================================================
+// SAFE PAYMENT ENTRY DIALOG
+// ================================================================
+
+}
+class _PaymentEntryDialog extends StatefulWidget {
+  const _PaymentEntryDialog({
+    required this.maxAmount,
+    required this.title,
+    required this.actionLabel,
+    required this.isRefund,
+  });
+
+  final double maxAmount;
+  final String title;
+  final String actionLabel;
+  final bool isRefund;
+
+  @override
+  State<_PaymentEntryDialog> createState() => _PaymentEntryDialogState();
+}
+
+class _PaymentEntryDialogState extends State<_PaymentEntryDialog> {
+  late final TextEditingController _amountController;
+  late final TextEditingController _referenceController;
+  late final TextEditingController _noteController;
+
+  PaymentMethodType _method = PaymentMethodType.cash;
+  String? _validationError;
+  bool _closing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _amountController = TextEditingController(
+      text: widget.maxAmount.toStringAsFixed(0),
+    );
+    _referenceController = TextEditingController();
+    _noteController = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    _amountController.dispose();
+    _referenceController.dispose();
+    _noteController.dispose();
+    super.dispose();
+  }
+
+  String _methodLabel(PaymentMethodType method) {
+    switch (method) {
+      case PaymentMethodType.cash:
+        return 'Cash';
+      case PaymentMethodType.upi:
+        return 'UPI';
+      case PaymentMethodType.card:
+        return 'Card';
+      case PaymentMethodType.bankTransfer:
+        return 'Bank Transfer';
+      case PaymentMethodType.razorpay:
+        return 'Razorpay';
+      case PaymentMethodType.other:
+        return 'Other';
+    }
+  }
+
+  void _close([Map<String, dynamic>? result]) {
+    if (_closing) return;
+    _closing = true;
+    FocusManager.instance.primaryFocus?.unfocus();
+    Navigator.of(context, rootNavigator: true).pop(result);
+  }
+
+  void _submit() {
+    if (_closing) return;
+
+    final amount = double.tryParse(_amountController.text.trim());
+
+    if (amount == null || amount <= 0) {
+      setState(() {
+        _validationError = 'Enter a valid amount greater than zero.';
+      });
+      return;
+    }
+
+    if (amount > widget.maxAmount + 0.009) {
+      setState(() {
+        _validationError =
+            'Amount cannot be greater than ${_moneyStatic(widget.maxAmount)}.';
+      });
+      return;
+    }
+
+    _close({
+      'amount': amount,
+      'method': _method,
+      'reference': _referenceController.text.trim().isEmpty
+          ? null
+          : _referenceController.text.trim(),
+      'note': _noteController.text.trim().isEmpty
+          ? null
+          : _noteController.text.trim(),
+    });
+  }
+
+  static String _moneyStatic(double value) {
+    return '₹${value.toStringAsFixed(2)}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const primaryColor = Color(0xFF2563EB);
+    const headingColor = Color(0xFF111827);
+    const bodyColor = Color(0xFF374151);
+    const mutedColor = Color(0xFF6B7280);
+    const borderColor = Color(0xFFE5E7EB);
+    const backgroundColor = Color(0xFFF8FAFC);
+    const cardColor = Colors.white;
+    const dangerColor = Color(0xFFDC2626);
+    final methods = <PaymentMethodType>[
+      PaymentMethodType.cash,
+      PaymentMethodType.upi,
+      PaymentMethodType.card,
+      PaymentMethodType.bankTransfer,
+      PaymentMethodType.razorpay,
+      PaymentMethodType.other,
+    ];
+
+    return AlertDialog(
+      backgroundColor: cardColor,
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(24),
+      ),
+      title: Text(
+        widget.title,
+        style: const TextStyle(
+          fontSize: 19,
+          fontWeight: FontWeight.w900,
+          color: headingColor,
+        ),
+      ),
+      content: SingleChildScrollView(
+        child: SizedBox(
+          width: 460,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: primaryColor.withOpacity(.06),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: primaryColor.withOpacity(.14)),
+                ),
+                child: const Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.verified_user_outlined, color: primaryColor, size: 18),
+                    SizedBox(width: 9),
+                    Expanded(
+                      child: Text(
+                        'This payment will be recorded in the booking payment ledger.',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: bodyColor,
+                          height: 1.4,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 15),
+              TextField(
+                controller: _amountController,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                decoration: InputDecoration(
+                  labelText: widget.isRefund ? 'Refund amount' : 'Payment amount',
+                  hintText: 'Maximum ${_moneyStatic(widget.maxAmount)}',
+                  filled: true,
+                  fillColor: backgroundColor,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(14),
+                    borderSide: const BorderSide(color: borderColor),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(14),
+                    borderSide: const BorderSide(color: borderColor),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
+              const Text(
+                'Payment method',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w900,
+                  color: mutedColor,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: methods.map((item) {
+                  final selected = _method == item;
+                  return ChoiceChip(
+                    label: Text(_methodLabel(item)),
+                    selected: selected,
+                    onSelected: _closing
+                        ? null
+                        : (_) => setState(() {
+                              _method = item;
+                              _validationError = null;
+                            }),
+                    selectedColor: primaryColor.withOpacity(.12),
+                    backgroundColor: backgroundColor,
+                    side: BorderSide(
+                      color: selected ? primaryColor : borderColor,
+                    ),
+                    labelStyle: TextStyle(
+                      color: selected ? primaryColor : bodyColor,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 11,
+                    ),
+                  );
+                }).toList(),
+              ),
+              const SizedBox(height: 14),
+              TextField(
+                controller: _referenceController,
+                decoration: InputDecoration(
+                  labelText: 'Transaction reference',
+                  hintText: 'Optional',
+                  filled: true,
+                  fillColor: backgroundColor,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(14),
+                    borderSide: const BorderSide(color: borderColor),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(14),
+                    borderSide: const BorderSide(color: borderColor),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _noteController,
+                maxLines: 3,
+                decoration: InputDecoration(
+                  labelText: 'Note',
+                  hintText: widget.isRefund
+                      ? 'Refund reason / gateway note'
+                      : 'Payment note',
+                  filled: true,
+                  fillColor: backgroundColor,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(14),
+                    borderSide: const BorderSide(color: borderColor),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(14),
+                    borderSide: const BorderSide(color: borderColor),
+                  ),
+                ),
+              ),
+              if (_validationError != null) ...[
+                const SizedBox(height: 10),
+                Text(
+                  _validationError!,
+                  style: const TextStyle(
+                    color: dangerColor,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _closing ? null : () => _close(),
+          child: const Text(
+            'Cancel',
+            style: TextStyle(
+              color: mutedColor,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ),
+        ElevatedButton.icon(
+          onPressed: _closing ? null : _submit,
+          icon: const Icon(Icons.save_rounded, size: 17),
+          label: Text(
+            widget.actionLabel,
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: primaryColor,
+            foregroundColor: Colors.white,
+            elevation: 0,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+
+
+
+
+class _PaymentEditDialog extends StatefulWidget {
+  const _PaymentEditDialog({required this.transaction});
+
+  final PaymentTransaction transaction;
+
+  @override
+  State<_PaymentEditDialog> createState() => _PaymentEditDialogState();
+}
+
+class _PaymentEditDialogState extends State<_PaymentEditDialog> {
+  static const Color background = Color(0xFFF6F8FB);
+  static const Color card = Colors.white;
+  static const Color heading = Color(0xFF18212F);
+  static const Color body = Color(0xFF425066);
+  static const Color muted = Color(0xFF758195);
+  static const Color border = Color(0xFFE7EBF1);
+  static const Color primary = Color(0xFF315CF6);
+  static const Color danger = Color(0xFFEF4444);
+
+  late final TextEditingController _amountController;
+  late final TextEditingController _referenceController;
+  late final TextEditingController _gatewayController;
+  late final TextEditingController _razorpayController;
+  late final TextEditingController _noteController;
+
+  late PaymentMethodType _method;
+  late DateTime _paymentDate;
+  String? _error;
+  bool _closing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _amountController =
+        TextEditingController(text: widget.transaction.amount.toStringAsFixed(2));
+    _referenceController =
+        TextEditingController(text: widget.transaction.transactionReference ?? '');
+    _gatewayController =
+        TextEditingController(text: widget.transaction.gatewayTransactionId ?? '');
+    _razorpayController =
+        TextEditingController(text: widget.transaction.razorpayPaymentId ?? '');
+    _noteController = TextEditingController(text: widget.transaction.note ?? '');
+    _method = widget.transaction.method;
+    _paymentDate = widget.transaction.paymentDate ?? DateTime.now();
+  }
+
+  @override
+  void dispose() {
+    _amountController.dispose();
+    _referenceController.dispose();
+    _gatewayController.dispose();
+    _razorpayController.dispose();
+    _noteController.dispose();
+    super.dispose();
+  }
+
+  String _methodLabel(PaymentMethodType value) {
+    switch (value) {
+      case PaymentMethodType.cash:
+        return 'Cash';
+      case PaymentMethodType.upi:
+        return 'UPI';
+      case PaymentMethodType.card:
+        return 'Card';
+      case PaymentMethodType.bankTransfer:
+        return 'Bank Transfer';
+      case PaymentMethodType.razorpay:
+        return 'Razorpay';
+      case PaymentMethodType.other:
+        return 'Other';
+    }
+  }
+
+  String _dateTime(DateTime value) {
+    final local = value.toLocal();
+    final hh = local.hour.toString().padLeft(2, '0');
+    final mm = local.minute.toString().padLeft(2, '0');
+    return '${local.day.toString().padLeft(2, '0')}/'
+        '${local.month.toString().padLeft(2, '0')}/'
+        '${local.year}  $hh:$mm';
+  }
+
+  Future<void> _pickDateTime() async {
+    if (_closing || !mounted) return;
+
+    final date = await showDatePicker(
+      context: context,
+      initialDate: _paymentDate,
+      firstDate: DateTime(2000),
+      lastDate: DateTime.now().add(const Duration(days: 3650)),
+    );
+    if (date == null || !mounted) return;
+
+    final time = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(_paymentDate),
+    );
+    if (time == null || !mounted) return;
+
+    setState(() {
+      _paymentDate = DateTime(
+        date.year,
+        date.month,
+        date.day,
+        time.hour,
+        time.minute,
+      );
+    });
+  }
+
+  void _close() {
+    if (_closing || !mounted) return;
+    _closing = true;
+    FocusManager.instance.primaryFocus?.unfocus();
+    Navigator.of(context, rootNavigator: true).pop();
+  }
+
+  void _submit() {
+    if (_closing || !mounted) return;
+
+    final amount = double.tryParse(_amountController.text.trim());
+    if (amount == null || amount <= 0) {
+      setState(() => _error = 'Enter a valid amount greater than zero.');
+      return;
+    }
+
+    if (_method == PaymentMethodType.razorpay &&
+        _razorpayController.text.trim().isEmpty) {
+      setState(() => _error = 'Razorpay payment ID is required for Razorpay.');
+      return;
+    }
+
+    _closing = true;
+    FocusManager.instance.primaryFocus?.unfocus();
+
+    Navigator.of(context, rootNavigator: true).pop({
+      'amount': amount,
+      'method': _method,
+      'reference': _referenceController.text.trim().isEmpty
+          ? null
+          : _referenceController.text.trim(),
+      'note': _noteController.text.trim().isEmpty
+          ? null
+          : _noteController.text.trim(),
+      'razorpayPaymentId': _razorpayController.text.trim().isEmpty
+          ? null
+          : _razorpayController.text.trim(),
+      'gatewayTransactionId': _gatewayController.text.trim().isEmpty
+          ? null
+          : _gatewayController.text.trim(),
+      'paymentDate': _paymentDate,
+    });
+  }
+
+  InputDecoration _input(String label, {String? hint}) {
+    return InputDecoration(
+      labelText: label,
+      hintText: hint,
+      filled: true,
+      fillColor: background,
+      labelStyle: const TextStyle(color: muted, fontWeight: FontWeight.w700),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(14),
+        borderSide: const BorderSide(color: border),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(14),
+        borderSide: const BorderSide(color: border),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(14),
+        borderSide: const BorderSide(color: primary, width: 1.5),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final methods = <PaymentMethodType>[
+      PaymentMethodType.cash,
+      PaymentMethodType.upi,
+      PaymentMethodType.card,
+      PaymentMethodType.bankTransfer,
+      PaymentMethodType.razorpay,
+      PaymentMethodType.other,
+    ];
+
+    return AlertDialog(
+      backgroundColor: card,
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+      title: Row(
+        children: const [
+          Icon(Icons.edit_note_rounded, color: primary),
+          SizedBox(width: 11),
+          Expanded(
+            child: Text(
+              'Edit Payment',
+              style: TextStyle(
+                color: heading,
+                fontSize: 19,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ),
+        ],
+      ),
+      content: SizedBox(
+        width: 520,
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Audit protected',
+                style: TextStyle(
+                  color: primary,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 5),
+              const Text(
+                'Admin edit information and previous values are recorded by the payment update service.',
+                style: TextStyle(color: body, fontSize: 12, height: 1.4),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _amountController,
+                keyboardType:
+                    const TextInputType.numberWithOptions(decimal: true),
+                decoration: _input(
+                  widget.transaction.isRefund ? 'Refund amount' : 'Payment amount',
+                ),
+              ),
+              const SizedBox(height: 14),
+              const Text(
+                'Payment method',
+                style: TextStyle(
+                  color: muted,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: methods.map((item) {
+                  final selected = _method == item;
+                  return ChoiceChip(
+                    label: Text(_methodLabel(item)),
+                    selected: selected,
+                    onSelected: (_) => setState(() {
+                      _method = item;
+                      _error = null;
+                    }),
+                    selectedColor: primary.withOpacity(.12),
+                    backgroundColor: background,
+                    side: BorderSide(
+                      color: selected ? primary : border,
+                    ),
+                    labelStyle: TextStyle(
+                      color: selected ? primary : body,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 11,
+                    ),
+                  );
+                }).toList(),
+              ),
+              const SizedBox(height: 14),
+              TextField(
+                controller: _referenceController,
+                decoration: _input('Transaction reference', hint: 'Optional'),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _gatewayController,
+                decoration: _input('Gateway transaction ID', hint: 'Optional'),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _razorpayController,
+                decoration: _input(
+                  'Razorpay payment ID',
+                  hint: _method == PaymentMethodType.razorpay
+                      ? 'Required for Razorpay'
+                      : 'Optional',
+                ),
+              ),
+              const SizedBox(height: 12),
+              InkWell(
+                onTap: _pickDateTime,
+                borderRadius: BorderRadius.circular(14),
+                child: Container(
+                  width: double.infinity,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+                  decoration: BoxDecoration(
+                    color: background,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: border),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.event_rounded,
+                          size: 18, color: primary),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Payment date & time',
+                              style: TextStyle(
+                                color: muted,
+                                fontSize: 9,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              _dateTime(_paymentDate),
+                              style: const TextStyle(
+                                color: heading,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Icon(Icons.chevron_right_rounded, color: muted),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _noteController,
+                maxLines: 4,
+                decoration: _input(
+                  'Note',
+                  hint: 'Payment note / correction reason',
+                ),
+              ),
+              if (_error != null) ...[
+                const SizedBox(height: 10),
+                Text(
+                  _error!,
+                  style: const TextStyle(
+                    color: danger,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _closing ? null : _close,
+          child: const Text(
+            'Cancel',
+            style: TextStyle(color: muted, fontWeight: FontWeight.w800),
+          ),
+        ),
+        ElevatedButton.icon(
+          onPressed: _closing ? null : _submit,
+          icon: const Icon(Icons.save_rounded, size: 17),
+          label: const Text(
+            'Save Changes',
+            style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900),
+          ),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: primary,
+            foregroundColor: Colors.white,
+            elevation: 0,
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+        ),
+      ],
+    );
   }
 }

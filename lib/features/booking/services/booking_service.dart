@@ -972,6 +972,175 @@ class BookingService {
     );
   }
 
+  /// Edits an existing admin-visible payment ledger transaction.
+  ///
+  /// The original transaction document is retained. Every edit records an
+  /// audit snapshot in `editHistory` and writes the current editor identity to
+  /// `editedBy`, `editedByName`, `editedByRole`, and `editedAt`.
+  ///
+  /// After the edit, the booking payment summary is recalculated from the
+  /// complete ledger so changing an amount cannot leave paid/refunded totals
+  /// out of sync.
+  Future<PaymentTransaction> updatePaymentForAdmin({
+    required String tenantId,
+    required String bookingId,
+    required String paymentId,
+    required double amount,
+    required PaymentMethodType method,
+    String? transactionReference,
+    String? note,
+    String? razorpayPaymentId,
+    String? gatewayTransactionId,
+    DateTime? paymentDate,
+  }) async {
+    final adminData = await _requireTenantAdmin(tenantId: tenantId);
+    final adminUser = _requireUser();
+
+    if (amount <= 0) {
+      throw Exception('Payment amount must be greater than zero.');
+    }
+
+    final bookingRef = _bookings(tenantId).doc(bookingId);
+    final paymentRef = _payments(tenantId, bookingId).doc(paymentId);
+
+    final bookingDoc = await bookingRef.get();
+    if (!bookingDoc.exists || bookingDoc.data() == null) {
+      throw Exception('Booking not found.');
+    }
+
+    final booking = Booking.fromMap(bookingDoc.id, bookingDoc.data()!);
+    _validateTenant(booking, tenantId);
+
+    final paymentDoc = await paymentRef.get();
+    if (!paymentDoc.exists || paymentDoc.data() == null) {
+      throw Exception('Payment transaction not found.');
+    }
+
+    final current = PaymentTransaction.fromMap(
+      paymentDoc.id,
+      paymentDoc.data()!,
+    );
+
+    if (current.tenantId.isNotEmpty && current.tenantId != tenantId) {
+      throw Exception('Payment transaction does not belong to the active tenant.');
+    }
+    if (current.bookingId.isNotEmpty && current.bookingId != bookingId) {
+      throw Exception('Payment transaction does not belong to this booking.');
+    }
+
+    if (method == PaymentMethodType.razorpay &&
+        (razorpayPaymentId == null || razorpayPaymentId.trim().isEmpty) &&
+        (current.razorpayPaymentId == null ||
+            current.razorpayPaymentId!.trim().isEmpty)) {
+      throw Exception('Razorpay payment ID is required for a Razorpay payment.');
+    }
+
+    // Validate the proposed amount against the rest of the ledger. This
+    // prevents an edited payment/refund from creating impossible totals.
+    final snapshot = await _payments(tenantId, bookingId).get();
+    double otherPaid = 0.0;
+    double otherRefunded = 0.0;
+
+    for (final doc in snapshot.docs) {
+      if (doc.id == paymentId) continue;
+      final transaction = PaymentTransaction.fromMap(doc.id, doc.data());
+
+      if (transaction.isSuccessful && !transaction.isRefund) {
+        otherPaid += transaction.amount;
+      }
+      if (transaction.isRefund) {
+        otherRefunded += transaction.refundAmount > 0
+            ? transaction.refundAmount
+            : transaction.amount;
+      }
+    }
+
+    if (current.isRefund) {
+      if (otherRefunded + amount > otherPaid + 0.009) {
+        throw Exception(
+          'Refund amount cannot exceed the remaining paid amount in the ledger.',
+        );
+      }
+    } else if (current.isSuccessful) {
+      if (otherPaid + amount > booking.totalAmount + 0.009) {
+        throw Exception(
+          'Payment amount would exceed the booking total.',
+        );
+      }
+    }
+
+    final editorName = (adminData['displayName'] ??
+            adminData['name'] ??
+            adminData['fullName'] ??
+            adminData['email'] ??
+            adminUser.email ??
+            adminUser.uid)
+        .toString()
+        .trim();
+
+    final now = DateTime.now();
+    final previous = <String, dynamic>{
+      'amount': current.amount,
+      'method': _paymentMethodTypeToString(current.method),
+      'transactionReference': current.transactionReference,
+      'note': current.note,
+      'paymentDate': current.paymentDate == null
+          ? null
+          : Timestamp.fromDate(current.paymentDate!),
+      'razorpayPaymentId': current.razorpayPaymentId,
+      'gatewayTransactionId': current.gatewayTransactionId,
+      'editedAt': Timestamp.fromDate(now),
+      'editedBy': adminUser.uid,
+      'editedByRole': 'admin',
+      'editedByName': editorName,
+    };
+
+    final data = <String, dynamic>{
+      'amount': amount,
+      'method': _paymentMethodTypeToString(method),
+      'transactionReference': transactionReference?.trim().isEmpty == true
+          ? null
+          : transactionReference?.trim(),
+      'note': note?.trim().isEmpty == true ? null : note?.trim(),
+      'paymentDate': Timestamp.fromDate(paymentDate ?? current.paymentDate ?? now),
+      'razorpayPaymentId':
+          method == PaymentMethodType.razorpay
+              ? ((razorpayPaymentId?.trim().isNotEmpty == true)
+                  ? razorpayPaymentId!.trim()
+                  : current.razorpayPaymentId)
+              : current.razorpayPaymentId,
+      'gatewayTransactionId': gatewayTransactionId?.trim().isEmpty == true
+          ? null
+          : (gatewayTransactionId?.trim() ?? current.gatewayTransactionId),
+      'refundAmount': current.isRefund ? amount : current.refundAmount,
+      'editedBy': adminUser.uid,
+      'editedByRole': 'admin',
+      'editedByName': editorName,
+      'editedAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+      'editHistory': FieldValue.arrayUnion([previous]),
+    };
+
+    await paymentRef.update(data);
+
+    await recalculateBookingPaymentSummary(
+      tenantId: tenantId,
+      bookingId: bookingId,
+    );
+
+    final updated = await getPaymentForAdmin(
+      tenantId: tenantId,
+      bookingId: bookingId,
+      paymentId: paymentId,
+    );
+
+    if (updated == null) {
+      throw Exception('Payment was updated but could not be reloaded.');
+    }
+
+    return updated;
+  }
+
   /// Records a refund as a separate immutable ledger transaction.
   Future<PaymentTransaction> refundPaymentForAdmin({
     required String tenantId,
