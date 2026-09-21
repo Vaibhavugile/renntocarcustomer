@@ -364,7 +364,8 @@ class BookingService {
       final paymentRef = _payments(tenantId, reference.id).doc();
       batch.set(
         paymentRef,
-        payment.copyWith(
+        _paymentWith(
+          payment,
           paymentId: paymentRef.id,
           bookingId: reference.id,
           tenantId: tenantId,
@@ -642,7 +643,8 @@ class BookingService {
       final paymentRef = _payments(tenantId, reference.id).doc();
       batch.set(
         paymentRef,
-        payment.copyWith(
+        _paymentWith(
+          payment,
           paymentId: paymentRef.id,
           bookingId: reference.id,
           tenantId: tenantId,
@@ -1132,12 +1134,12 @@ class BookingService {
     required Booking booking,
     required PaymentTransaction transaction,
   }) {
-    final paid = transaction.isRefund ? 0 : transaction.amount;
+    final double paid = transaction.isRefund ? 0.0 : transaction.amount;
     final refunded = transaction.isRefund
         ? (transaction.refundAmount > 0
             ? transaction.refundAmount
             : transaction.amount)
-        : 0;
+        : 0.0;
 
     return {
       'paidAmount': paid,
@@ -1166,10 +1168,10 @@ class BookingService {
     required Booking booking,
     required PaymentTransaction transaction,
   }) {
-    final paid = booking.paidAmount +
+    final double paid = booking.paidAmount +
         (transaction.isRefund ? 0 : transaction.amount);
 
-    final refunded = booking.refundAmount +
+    final double refunded = booking.refundAmount +
         (transaction.isRefund
             ? (transaction.refundAmount > 0
                 ? transaction.refundAmount
@@ -1248,15 +1250,14 @@ class BookingService {
       );
     }
 
-    return payment.copyWith(
+    return _paymentWith(
+      payment,
       tenantId: tenantId,
       bookingId: booking.bookingId,
       customerId: booking.customerId,
       source: payment.source,
-      recordedBy:
-          payment.recordedBy ?? defaultRecordedBy,
-      recordedByRole:
-          payment.recordedByRole ?? defaultRecordedByRole,
+      recordedBy: payment.recordedBy ?? defaultRecordedBy,
+      recordedByRole: payment.recordedByRole ?? defaultRecordedByRole,
       customerName: payment.customerName.isEmpty
           ? booking.customerName
           : payment.customerName,
@@ -2241,6 +2242,340 @@ class BookingService {
       'lastActionBy': _auth.currentUser!.uid,
       'lastActionByRole': 'admin',
     });
+  }
+
+
+  // ============================================================
+  // PICKUP / RETURN INSPECTIONS
+  // ============================================================
+
+  /// Records the physical vehicle handover.
+  ///
+  /// The starting odometer and condition snapshot are immutable operational
+  /// evidence for the rental. The booking is moved to ACTIVE only after the
+  /// handover write succeeds.
+  Future<Booking> recordPickupHandoverForAdmin({
+    required String tenantId,
+    required String bookingId,
+    required int startingOdometer,
+    required List<String> photoUrls,
+    List<String> damagePhotoUrls = const [],
+    List<String> existingDamage = const [],
+    String fuelLevel = '',
+    String notes = '',
+    String? customerAcknowledgement,
+    DateTime? handoverAt,
+  }) async {
+    await _requireTenantAdmin(tenantId: tenantId);
+
+    if (startingOdometer < 0) {
+      throw Exception('Starting odometer cannot be negative.');
+    }
+
+    final reference = _bookings(tenantId).doc(bookingId);
+    final doc = await reference.get();
+
+    if (!doc.exists || doc.data() == null) {
+      throw Exception('Booking not found.');
+    }
+
+    final booking = Booking.fromMap(doc.id, doc.data()!);
+    _validateTenant(booking, tenantId);
+
+    if (booking.status != BookingStatus.confirmed &&
+        booking.status != BookingStatus.pickupPending) {
+      throw Exception(
+        'Vehicle handover is only allowed for a confirmed pickup.',
+      );
+    }
+
+    if (photoUrls.isEmpty) {
+      throw Exception('At least one vehicle handover photo is required.');
+    }
+
+    final now = handoverAt ?? DateTime.now();
+
+    await reference.update({
+      'status': 'active',
+      'actualPickupDateTime': Timestamp.fromDate(now),
+      'pickupInspection': {
+        'startingOdometer': startingOdometer,
+        'odometer': startingOdometer,
+        'photoUrls': List<String>.from(photoUrls),
+        'damagePhotoUrls': List<String>.from(damagePhotoUrls),
+        'existingDamage': List<String>.from(existingDamage),
+        'fuelLevel': fuelLevel.trim(),
+        'notes': notes.trim(),
+        'customerAcknowledgement': customerAcknowledgement,
+        'inspectedBy': _auth.currentUser!.uid,
+        'inspectedByRole': 'admin',
+        'inspectedAt': Timestamp.fromDate(now),
+      },
+      'handover': {
+        'startingOdometer': startingOdometer,
+        'photoUrls': List<String>.from(photoUrls),
+        'odometerPhotoUrl':
+            photoUrls.isNotEmpty ? photoUrls.last : null,
+        'fuelLevel': fuelLevel.trim(),
+        'notes': notes.trim(),
+        'acknowledgement': customerAcknowledgement,
+        'completedBy': _auth.currentUser!.uid,
+        'completedAt': Timestamp.fromDate(now),
+      },
+      'lastActionBy': _auth.currentUser!.uid,
+      'lastActionByRole': 'admin',
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+
+    final saved = await reference.get();
+    if (!saved.exists || saved.data() == null) {
+      throw Exception('Unable to save pickup handover.');
+    }
+
+    return Booking.fromMap(saved.id, saved.data()!);
+  }
+
+  /// Records the physical vehicle return and calculates the odometer delta.
+  ///
+  /// Pricing/extra-KM rates are deliberately not hard-coded here. The screen
+  /// or PricingEngine supplies the authoritative charge after reading the
+  /// booking's pricing profile. This method stores the measured KM and the
+  /// final billing snapshot together.
+  Future<Booking> recordReturnInspectionForAdmin({
+    required String tenantId,
+    required String bookingId,
+    required int endingOdometer,
+    required double extraKmCharge,
+    int? includedKm,
+    List<String> photoUrls = const [],
+    List<String> damagePhotoUrls = const [],
+    List<String> damagesFound = const [],
+    String fuelLevel = '',
+    String notes = '',
+    double damageCharge = 0,
+    double lateCharge = 0,
+    double otherCharge = 0,
+    double securityDepositAdjustment = 0,
+    String? customerAcknowledgement,
+    DateTime? returnAt,
+  }) async {
+    await _requireTenantAdmin(tenantId: tenantId);
+
+    if (endingOdometer < 0) {
+      throw Exception('Ending odometer cannot be negative.');
+    }
+
+    if (extraKmCharge < 0 ||
+        damageCharge < 0 ||
+        lateCharge < 0 ||
+        otherCharge < 0 ||
+        securityDepositAdjustment < 0) {
+      throw Exception('Return charges cannot be negative.');
+    }
+
+    final reference = _bookings(tenantId).doc(bookingId);
+    final doc = await reference.get();
+
+    if (!doc.exists || doc.data() == null) {
+      throw Exception('Booking not found.');
+    }
+
+    final booking = Booking.fromMap(doc.id, doc.data()!);
+    _validateTenant(booking, tenantId);
+
+    if (booking.status != BookingStatus.active &&
+        booking.status != BookingStatus.returnPending) {
+      throw Exception(
+        'This booking is not ready for vehicle return.',
+      );
+    }
+
+    final pickupData = (doc.data()!['pickupInspection'] is Map)
+        ? Map<String, dynamic>.from(
+            doc.data()!['pickupInspection'] as Map,
+          )
+        : <String, dynamic>{};
+
+    final rawStarting = pickupData['startingOdometer'] ??
+        pickupData['odometer'] ??
+        doc.data()!['startingOdometer'];
+
+    final startingOdometer = _toInt(rawStarting);
+
+    if (startingOdometer <= 0 && endingOdometer < startingOdometer) {
+      throw Exception(
+        'A valid starting odometer must exist before completing return.',
+      );
+    }
+
+    if (endingOdometer < startingOdometer) {
+      throw Exception(
+        'Ending odometer cannot be lower than the pickup odometer.',
+      );
+    }
+
+    final actualKm = endingOdometer - startingOdometer;
+    final safeIncludedKm = includedKm == null || includedKm < 0
+        ? 0
+        : includedKm;
+    final extraKm = actualKm > safeIncludedKm
+        ? actualKm - safeIncludedKm
+        : 0;
+
+    final now = returnAt ?? DateTime.now();
+
+    final returnInspection = <String, dynamic>{
+      'startingOdometer': startingOdometer,
+      'endingOdometer': endingOdometer,
+      'actualKm': actualKm,
+      'includedKm': safeIncludedKm,
+      'extraKm': extraKm,
+      'extraKmCharge': extraKmCharge,
+      'photoUrls': List<String>.from(photoUrls),
+      'damagePhotoUrls': List<String>.from(damagePhotoUrls),
+      'damagesFound': List<String>.from(damagesFound),
+      'fuelLevel': fuelLevel.trim(),
+      'notes': notes.trim(),
+      'damageCharge': damageCharge,
+      'lateCharge': lateCharge,
+      'otherCharge': otherCharge,
+      'securityDepositAdjustment': securityDepositAdjustment,
+      'customerAcknowledgement': customerAcknowledgement,
+      'inspectedBy': _auth.currentUser!.uid,
+      'inspectedByRole': 'admin',
+      'inspectedAt': Timestamp.fromDate(now),
+    };
+
+    final existingExtraCharges =
+        (doc.data()!['extraCharges'] as num?)?.toDouble() ?? 0.0;
+
+    final finalExtraCharges =
+        extraKmCharge + damageCharge + lateCharge + otherCharge;
+
+    await reference.update({
+      'status': 'completed',
+      'actualReturnDateTime': Timestamp.fromDate(now),
+      'returnInspection': returnInspection,
+      'odometerStart': startingOdometer,
+      'odometerEnd': endingOdometer,
+      'actualKm': actualKm,
+      'includedKm': safeIncludedKm,
+      'extraKm': extraKm,
+      'extraKmCharge': extraKmCharge,
+      'damageCharge': damageCharge,
+      'lateCharge': lateCharge,
+      'otherCharge': otherCharge,
+      'securityDepositAdjustment': securityDepositAdjustment,
+      'extraCharges': existingExtraCharges + finalExtraCharges,
+      'lastActionBy': _auth.currentUser!.uid,
+      'lastActionByRole': 'admin',
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+
+    final saved = await reference.get();
+    if (!saved.exists || saved.data() == null) {
+      throw Exception('Unable to save return inspection.');
+    }
+
+    return Booking.fromMap(saved.id, saved.data()!);
+  }
+
+  /// Reads the pickup/return operational snapshot for an admin screen.
+  Future<Map<String, dynamic>?> getInspectionDataForAdmin({
+    required String tenantId,
+    required String bookingId,
+  }) async {
+    await _requireTenantAdmin(tenantId: tenantId);
+
+    final doc = await _bookings(tenantId).doc(bookingId).get();
+    if (!doc.exists || doc.data() == null) {
+      return null;
+    }
+
+    final booking = Booking.fromMap(doc.id, doc.data()!);
+    _validateTenant(booking, tenantId);
+
+    return {
+      'pickupInspection': doc.data()!['pickupInspection'],
+      'returnInspection': doc.data()!['returnInspection'],
+      'odometerStart': doc.data()!['odometerStart'],
+      'odometerEnd': doc.data()!['odometerEnd'],
+      'actualKm': doc.data()!['actualKm'],
+      'includedKm': doc.data()!['includedKm'],
+      'extraKm': doc.data()!['extraKm'],
+      'extraKmCharge': doc.data()!['extraKmCharge'],
+      'damageCharge': doc.data()!['damageCharge'],
+      'lateCharge': doc.data()!['lateCharge'],
+      'otherCharge': doc.data()!['otherCharge'],
+      'securityDepositAdjustment':
+          doc.data()!['securityDepositAdjustment'],
+    };
+  }
+
+
+  PaymentTransaction _paymentWith(
+    PaymentTransaction payment, {
+    String? paymentId,
+    String? tenantId,
+    String? bookingId,
+    String? customerId,
+    PaymentSource? source,
+    String? recordedBy,
+    String? recordedByRole,
+    String? customerName,
+    String? customerPhone,
+    String? customerEmail,
+    DateTime? paymentDate,
+    DateTime? createdAt,
+    DateTime? updatedAt,
+  }) {
+    return PaymentTransaction(
+      paymentId: paymentId ?? payment.paymentId,
+      tenantId: tenantId ?? payment.tenantId,
+      bookingId: bookingId ?? payment.bookingId,
+      customerId: customerId ?? payment.customerId,
+      amount: payment.amount,
+      currency: payment.currency,
+      status: payment.status,
+      method: payment.method,
+      source: source ?? payment.source,
+      transactionReference: payment.transactionReference,
+      gateway: payment.gateway,
+      razorpayOrderId: payment.razorpayOrderId,
+      razorpayPaymentId: payment.razorpayPaymentId,
+      razorpaySignature: payment.razorpaySignature,
+      gatewayTransactionId: payment.gatewayTransactionId,
+      gatewayStatus: payment.gatewayStatus,
+      gatewayMethod: payment.gatewayMethod,
+      customerName: customerName ?? payment.customerName,
+      customerPhone: customerPhone ?? payment.customerPhone,
+      customerEmail: customerEmail ?? payment.customerEmail,
+      recordedBy: recordedBy ?? payment.recordedBy,
+      recordedByRole: recordedByRole ?? payment.recordedByRole,
+      note: payment.note,
+      originalPaymentId: payment.originalPaymentId,
+      refundAmount: payment.refundAmount,
+      paymentDate: paymentDate ?? payment.paymentDate,
+      createdAt: createdAt ?? payment.createdAt,
+      updatedAt: updatedAt ?? payment.updatedAt,
+    );
+  }
+
+  String _paymentMethodTypeToString(PaymentMethodType method) {
+    switch (method) {
+      case PaymentMethodType.razorpay:
+        return 'razorpay';
+      case PaymentMethodType.cash:
+        return 'cash';
+      case PaymentMethodType.upi:
+        return 'upi';
+      case PaymentMethodType.card:
+        return 'card';
+      case PaymentMethodType.bankTransfer:
+        return 'bank_transfer';
+      case PaymentMethodType.other:
+        return 'other';
+    }
   }
 
   // ============================================================

@@ -1,6 +1,6 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
-import '../../../core/config/app_config.dart';
 import '../../cars/models/car.dart';
 import '../../pricing/models/km_pricing_package.dart';
 import '../../pricing/models/pricing_config.dart';
@@ -48,13 +48,21 @@ class _PricingScreenState extends State<PricingScreen> {
   final PricingEngine _pricingEngine =
       const PricingEngine();
 
+  final FirebaseFirestore _firestore =
+      FirebaseFirestore.instance;
+
   PricingResult? _result;
+  PricingProfile? _freshPricingProfile;
+  KmPricingPackage? _freshSelectedPackage;
 
   bool _isLoading = true;
+  bool _isRefreshing = false;
   bool _isContinuing = false;
+  bool _isStale = false;
+  DateTime? _lastCheckedAt;
   String? _errorMessage;
 
-  String get _tenantId => AppConfig.tenant.tenantId;
+  String get _tenantId => widget.tenantId;
 
   @override
   void initState() {
@@ -62,50 +70,93 @@ class _PricingScreenState extends State<PricingScreen> {
     _calculatePricing();
   }
 
-  void _calculatePricing() {
+  Future<void> _calculatePricing({
+    bool showRefreshMessage = false,
+  }) async {
+    if (_isRefreshing && !showRefreshMessage) return;
+
+    if (mounted) {
+      setState(() {
+        _isLoading = true;
+        _errorMessage = null;
+      });
+    }
+
     try {
-      final PricingConfig? config =
-          PricingManager.instance.pricing;
+      // Always reload the pricing profile from the tenant pricing source.
+      // Do not rely only on the PricingProfile passed from KmPackageScreen.
+      final profile =
+          await PricingManager.instance.loadPricingForCar(
+        tenantId: _tenantId,
+        pricingProfileId: widget.car.pricingProfileId,
+      );
+
+      if (!mounted) return;
+
+      if (profile == null) {
+        setState(() {
+          _isLoading = false;
+          _isStale = true;
+          _errorMessage =
+              'Pricing is currently unavailable for this vehicle.';
+        });
+        return;
+      }
+
+      final freshPackage =
+          profile.getPackage(widget.selectedKmPackage.id);
+
+      if (freshPackage == null) {
+        setState(() {
+          _isLoading = false;
+          _isStale = true;
+          _freshPricingProfile = profile;
+          _freshSelectedPackage = null;
+          _errorMessage =
+              'The selected KM package is no longer available. Please go back and select another package.';
+        });
+        return;
+      }
+
+      final config = PricingManager.instance.pricing;
 
       if (config == null) {
         setState(() {
           _isLoading = false;
+          _isStale = true;
           _errorMessage =
               'Pricing configuration is unavailable. Please try again.';
         });
         return;
       }
 
+      if (widget.returnDateTime.isBefore(widget.pickupDateTime) ||
+          widget.returnDateTime.isAtSameMomentAs(widget.pickupDateTime)) {
+        setState(() {
+          _isLoading = false;
+          _isStale = true;
+          _errorMessage =
+              'The return time must be after the pickup time.';
+        });
+        return;
+      }
+
       final result = _pricingEngine.calculate(
         config: config,
-        pricingProfileId:
-            widget.pricingProfile.id,
-        pickupDateTime:
-            widget.pickupDateTime,
-        returnDateTime:
-            widget.returnDateTime,
-
-        // During booking actual KM is not known.
+        pricingProfileId: profile.id,
+        pickupDateTime: widget.pickupDateTime,
+        returnDateTime: widget.returnDateTime,
         actualKm: 0,
-
-        // We don't assume any planned KM.
         plannedKm: 0,
-
-        // The exact Firebase KM package selected
-        // by the customer.
-        selectedKmPackageId:
-            widget.selectedKmPackage.id,
-
-        unlimitedKm:
-            widget.selectedKmPackage.unlimitedKm,
-
-        // Deposit is included in amount payable.
+        selectedKmPackageId: freshPackage.id,
+        unlimitedKm: freshPackage.unlimitedKm,
         includeSecurityDeposit: true,
       );
 
       if (result.pricingProfileId.isEmpty) {
         setState(() {
           _isLoading = false;
+          _isStale = true;
           _errorMessage =
               'Unable to calculate pricing for this booking.';
         });
@@ -114,16 +165,279 @@ class _PricingScreenState extends State<PricingScreen> {
 
       setState(() {
         _result = result;
+        _freshPricingProfile = profile;
+        _freshSelectedPackage = freshPackage;
         _isLoading = false;
+        _isStale = false;
+        _lastCheckedAt = DateTime.now();
         _errorMessage = null;
       });
+
+      if (showRefreshMessage && mounted) {
+        _showSnackBar(
+          'Pricing refreshed and verified.',
+          icon: Icons.check_circle_outline_rounded,
+        );
+      }
     } catch (_) {
+      if (!mounted) return;
+
       setState(() {
         _isLoading = false;
+        _isStale = true;
         _errorMessage =
-            'Something went wrong while calculating the price.';
+            'Something went wrong while calculating the current price.';
       });
     }
+  }
+
+  Future<void> _refreshPricing() async {
+    if (_isRefreshing || _isContinuing) return;
+
+    setState(() {
+      _isRefreshing = true;
+      _errorMessage = null;
+    });
+
+    try {
+      await _calculatePricing(showRefreshMessage: true);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isRefreshing = false;
+        });
+      }
+    }
+  }
+
+  Future<bool> _revalidateBranch() async {
+    try {
+      final branchDoc = await _firestore
+          .collection('tenants')
+          .doc(_tenantId)
+          .collection('branches')
+          .doc(widget.branch.id)
+          .get();
+
+      if (!branchDoc.exists || branchDoc.data() == null) {
+        _errorMessage =
+            'This pickup branch is no longer available. Please go back and select another branch.';
+        return false;
+      }
+
+      final data = branchDoc.data()!;
+      final isActive = data['isActive'] == true;
+
+      if (!isActive) {
+        _errorMessage =
+            'This pickup branch is currently unavailable. Please select another branch.';
+        return false;
+      }
+
+      return true;
+    } catch (_) {
+      _errorMessage =
+          'Unable to verify the pickup branch. Please try again.';
+      return false;
+    }
+  }
+
+  Future<void> _continue() async {
+    if (_isContinuing || _isRefreshing) return;
+
+    setState(() {
+      _isContinuing = true;
+      _errorMessage = null;
+    });
+
+    try {
+      // Re-check the branch because availability can change while
+      // the customer is reviewing the price.
+      final branchValid = await _revalidateBranch();
+      if (!branchValid) {
+        if (mounted) {
+          setState(() {
+            _isContinuing = false;
+            _isStale = true;
+          });
+        }
+        return;
+      }
+
+      // Recalculate from the current tenant pricing source immediately
+      // before creating the review payload.
+      final profile =
+          await PricingManager.instance.loadPricingForCar(
+        tenantId: _tenantId,
+        pricingProfileId: widget.car.pricingProfileId,
+      );
+
+      if (!mounted) return;
+
+      if (profile == null) {
+        setState(() {
+          _isContinuing = false;
+          _isStale = true;
+          _errorMessage =
+              'Vehicle pricing is no longer available.';
+        });
+        return;
+      }
+
+      final freshPackage =
+          profile.getPackage(widget.selectedKmPackage.id);
+
+      if (freshPackage == null) {
+        setState(() {
+          _isContinuing = false;
+          _isStale = true;
+          _freshPricingProfile = profile;
+          _freshSelectedPackage = null;
+          _errorMessage =
+              'This KM package is no longer available. Please go back and select another package.';
+        });
+        return;
+      }
+
+      final config = PricingManager.instance.pricing;
+
+      if (config == null) {
+        setState(() {
+          _isContinuing = false;
+          _isStale = true;
+          _errorMessage =
+              'Pricing configuration is unavailable. Please try again.';
+        });
+        return;
+      }
+
+      if (widget.returnDateTime.isBefore(widget.pickupDateTime) ||
+          widget.returnDateTime.isAtSameMomentAs(widget.pickupDateTime)) {
+        setState(() {
+          _isContinuing = false;
+          _isStale = true;
+          _errorMessage =
+              'The return time must be after the pickup time.';
+        });
+        return;
+      }
+
+      final freshResult = _pricingEngine.calculate(
+        config: config,
+        pricingProfileId: profile.id,
+        pickupDateTime: widget.pickupDateTime,
+        returnDateTime: widget.returnDateTime,
+        actualKm: 0,
+        plannedKm: 0,
+        selectedKmPackageId: freshPackage.id,
+        unlimitedKm: freshPackage.unlimitedKm,
+        includeSecurityDeposit: true,
+      );
+
+      if (freshResult.pricingProfileId.isEmpty) {
+        setState(() {
+          _isContinuing = false;
+          _isStale = true;
+          _errorMessage =
+              'Unable to verify the final booking price.';
+        });
+        return;
+      }
+
+      if (!mounted) return;
+
+      setState(() {
+        _result = freshResult;
+        _freshPricingProfile = profile;
+        _freshSelectedPackage = freshPackage;
+        _lastCheckedAt = DateTime.now();
+        _isStale = false;
+      });
+
+      await Future<void>.delayed(
+        const Duration(milliseconds: 80),
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        _isContinuing = false;
+      });
+
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => ReviewBookingScreen(
+            car: widget.car,
+            tenantId: _tenantId,
+            branch: widget.branch,
+            pickupDateTime: widget.pickupDateTime,
+            returnDateTime: widget.returnDateTime,
+            pricingProfile: profile,
+            selectedKmPackage: freshPackage,
+            pricingResult: freshResult,
+          ),
+        ),
+      );
+    } catch (_) {
+      if (!mounted) return;
+
+      setState(() {
+        _isContinuing = false;
+        _isStale = true;
+        _errorMessage =
+            'Unable to verify the current booking price. Please try again.';
+      });
+    }
+  }
+
+  void _showSnackBar(
+    String message, {
+    IconData icon = Icons.info_outline_rounded,
+  }) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          behavior: SnackBarBehavior.floating,
+          margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          elevation: 0,
+          backgroundColor: heading,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+          content: Row(
+            children: [
+              Icon(icon, color: Colors.white, size: 19),
+              const SizedBox(width: 9),
+              Expanded(
+                child: Text(
+                  message,
+                  style: const TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+  }
+
+  String _lastCheckedText() {
+    final checked = _lastCheckedAt;
+    if (checked == null) return 'Not checked yet';
+
+    final hour = checked.hour % 12 == 0 ? 12 : checked.hour % 12;
+    final minute = checked.minute.toString().padLeft(2, '0');
+    final period = checked.hour >= 12 ? 'PM' : 'AM';
+
+    return 'Last checked $hour:$minute $period';
   }
 
   String _money(double value) {
@@ -165,46 +479,6 @@ class _PricingScreenState extends State<PricingScreen> {
         '${days == 1 ? 'day' : 'days'}';
   }
 
-  Future<void> _continue() async {
-    if (_result == null) {
-      return;
-    }
-
-    setState(() {
-      _isContinuing = true;
-    });
-
-    // Small async boundary keeps the button responsive
-    // while the next screen is prepared.
-    await Future<void>.delayed(
-      const Duration(milliseconds: 120),
-    );
-
-    if (!mounted) return;
-
-    final result = _result!;
-
-    setState(() {
-      _isContinuing = false;
-    });
-
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => ReviewBookingScreen(
-          car: widget.car,
-          tenantId: _tenantId,
-          branch: widget.branch,
-          pickupDateTime: widget.pickupDateTime,
-          returnDateTime: widget.returnDateTime,
-          pricingProfile: widget.pricingProfile,
-          selectedKmPackage: widget.selectedKmPackage,
-          pricingResult: result,
-        ),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -214,7 +488,7 @@ class _PricingScreenState extends State<PricingScreen> {
         elevation: 0,
         surfaceTintColor: Colors.transparent,
         leading: IconButton(
-          onPressed: () => Navigator.pop(context),
+          onPressed: _isContinuing || _isRefreshing ? null : () => Navigator.pop(context),
           icon: const Icon(
             Icons.arrow_back_ios_new_rounded,
             size: 20,
@@ -230,6 +504,28 @@ class _PricingScreenState extends State<PricingScreen> {
             color: heading,
           ),
         ),
+        actions: [
+          IconButton(
+            tooltip: 'Refresh pricing',
+            onPressed: _isRefreshing || _isContinuing
+                ? null
+                : _refreshPricing,
+            icon: _isRefreshing
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: primary,
+                    ),
+                  )
+                : const Icon(
+                    Icons.refresh_rounded,
+                    color: heading,
+                  ),
+          ),
+          const SizedBox(width: 6),
+        ],
       ),
       body: SafeArea(
         child: _isLoading
@@ -252,15 +548,21 @@ class _PricingScreenState extends State<PricingScreen> {
   Widget _buildContent() {
     final result = _result!;
 
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(
-        20,
-        8,
-        20,
-        120,
-      ),
-      children: [
-        _buildCarCard(),
+    return RefreshIndicator(
+      color: primary,
+      onRefresh: _refreshPricing,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(
+          20,
+          8,
+          20,
+          120,
+        ),
+        children: [
+          _buildPricingStatus(),
+          const SizedBox(height: 12),
+          _buildCarCard(),
         const SizedBox(height: 14),
         _buildTripCard(),
         const SizedBox(height: 20),
@@ -270,8 +572,93 @@ class _PricingScreenState extends State<PricingScreen> {
         const SizedBox(height: 14),
         _buildDepositCard(result),
         const SizedBox(height: 14),
-        _buildTotalCard(result),
-      ],
+          _buildTotalCard(result),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPricingStatus() {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: 13,
+        vertical: 11,
+      ),
+      decoration: BoxDecoration(
+        color: _isStale ? const Color(0xFFFFF8ED) : softAccent,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: _isStale
+              ? const Color(0xFFF1D39B)
+              : const Color(0xFFC8EEE8),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            _isStale
+                ? Icons.warning_amber_rounded
+                : Icons.verified_rounded,
+            size: 18,
+            color: _isStale
+                ? const Color(0xFF9A6700)
+                : primary,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  _isStale
+                      ? 'Price needs verification'
+                      : 'Live pricing verified',
+                  style: TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w800,
+                    color: _isStale
+                        ? const Color(0xFF7A5200)
+                        : heading,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  _lastCheckedText(),
+                  style: const TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
+                    color: body,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          TextButton(
+            onPressed: _isRefreshing || _isContinuing
+                ? null
+                : _refreshPricing,
+            style: TextButton.styleFrom(
+              foregroundColor: primary,
+              padding: const EdgeInsets.symmetric(
+                horizontal: 8,
+                vertical: 4,
+              ),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            child: const Text(
+              'Refresh',
+              style: TextStyle(
+                fontFamily: 'Manrope',
+                fontSize: 11,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -437,7 +824,7 @@ class _PricingScreenState extends State<PricingScreen> {
   }
 
   Widget _buildSelectedPackage() {
-    final package = widget.selectedKmPackage;
+    final package = _freshSelectedPackage ?? widget.selectedKmPackage;
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -839,7 +1226,9 @@ class _PricingScreenState extends State<PricingScreen> {
           height: 54,
           child: ElevatedButton(
             onPressed:
-                _isContinuing ? null : _continue,
+                _isContinuing || _isRefreshing || _isStale
+                    ? null
+                    : _continue,
             style: ElevatedButton.styleFrom(
               backgroundColor: primary,
               disabledBackgroundColor:
@@ -923,14 +1312,9 @@ class _PricingScreenState extends State<PricingScreen> {
             ),
             const SizedBox(height: 20),
             ElevatedButton(
-              onPressed: () {
-                setState(() {
-                  _isLoading = true;
-                  _errorMessage = null;
-                });
-
-                _calculatePricing();
-              },
+              onPressed: _isRefreshing || _isContinuing
+                  ? null
+                  : _refreshPricing,
               style: ElevatedButton.styleFrom(
                 backgroundColor: primary,
                 foregroundColor: Colors.white,

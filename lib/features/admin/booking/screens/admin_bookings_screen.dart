@@ -67,9 +67,7 @@ enum _BookingSearchField {
   paymentStatus,
 }
 
-class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
-  final BookingService _bookingService = BookingService();
-
+class _AdminBookingsScreenState extends State<AdminBookingsScreen> with WidgetsBindingObserver {
   final TextEditingController _searchController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
@@ -85,8 +83,11 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
   bool _searching = false;
   String? _error;
   Timer? _searchDebounce;
+  Timer? _autoRefreshTimer;
   bool _suppressSearchListener = false;
+  bool _refreshInFlight = false;
   int _loadGeneration = 0;
+  DateTime? _lastRefreshedAt;
 
   // KPI values are loaded independently from the paginated list so the
   // dashboard remains accurate even when only the first 100 bookings are
@@ -121,6 +122,7 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
 
     developer.log(
       'INIT | tenant=$_tenantId',
@@ -142,10 +144,29 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
 
       _loadBookings();
     });
+
+    // Keep the operations dashboard fresh without forcing a full real-time
+    // Firestore listener across every filtered/search query.
+    _autoRefreshTimer = Timer.periodic(const Duration(seconds: 60), (_) {
+      if (!mounted || _refreshInFlight) return;
+      _refreshCurrentView(silent: true);
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed || !mounted) return;
+
+    final last = _lastRefreshedAt;
+    if (last == null || DateTime.now().difference(last) >= const Duration(seconds: 45)) {
+      _refreshCurrentView(silent: true);
+    }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _autoRefreshTimer?.cancel();
     _searchController
       ..removeListener(_onSearchChanged)
       ..dispose();
@@ -185,8 +206,31 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
 
   String get _tenantId => AppConfig.tenant.tenantId;
 
-  Future<void> _loadBookings({bool refresh = false}) async {
+  Future<void> _refreshCurrentView({bool silent = false}) async {
+    if (!mounted) return;
+
+    // A user-triggered refresh/filter/search change supersedes an older
+    // request instead of getting stuck behind it.
+    if (_refreshInFlight) {
+      ++_loadGeneration;
+      _refreshInFlight = false;
+    }
+
+    final hasActiveSearch = _searching &&
+        (_searchFieldIsDate ? _searchDate != null : _searchController.text.trim().isNotEmpty);
+
+    if (hasActiveSearch) {
+      await _runSearch(silent: silent);
+      return;
+    }
+
+    await _loadBookings(refresh: true, silent: silent);
+  }
+
+  Future<void> _loadBookings({bool refresh = false, bool silent = false}) async {
+    if (!mounted || _refreshInFlight) return;
     final generation = ++_loadGeneration;
+    _refreshInFlight = true;
 
     developer.log(
       'LOAD START | tenant=$_tenantId | refresh=$refresh | pageSize=$_pageSize',
@@ -196,10 +240,12 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
     if (!mounted) return;
 
     if (refresh) {
-      setState(() {
-        _refreshing = true;
-        _error = null;
-      });
+      if (!silent) {
+        setState(() {
+          _refreshing = true;
+          _error = null;
+        });
+      }
     } else {
       setState(() {
         _loading = true;
@@ -208,11 +254,14 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
     }
 
     if (_tenantId.isEmpty) {
-      setState(() {
-        _loading = false;
-        _refreshing = false;
-        _error = 'Tenant configuration is missing.';
-      });
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _refreshing = false;
+          _error = 'Tenant configuration is missing.';
+        });
+      }
+      _refreshInFlight = false;
       return;
     }
 
@@ -232,12 +281,17 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
 
       await _fetchBookingsPage(generation: generation);
 
-      if (!mounted || generation != _loadGeneration) return;
+      if (!mounted || generation != _loadGeneration) {
+        _refreshInFlight = false;
+        return;
+      }
       setState(() {
         _loading = false;
         _refreshing = false;
         _error = null;
+        _lastRefreshedAt = DateTime.now();
       });
+      _refreshInFlight = false;
     } catch (e, stackTrace) {
       developer.log(
         'LOAD ERROR',
@@ -246,12 +300,16 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
         stackTrace: stackTrace,
       );
 
-      if (!mounted || generation != _loadGeneration) return;
+      if (!mounted || generation != _loadGeneration) {
+        _refreshInFlight = false;
+        return;
+      }
       setState(() {
         _loading = false;
         _refreshing = false;
         _error = _cleanError(e);
       });
+      _refreshInFlight = false;
     }
   }
 
@@ -583,7 +641,7 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
 
     // Start a clean first page using the selected search field.
     if (!mounted) return;
-    _loadBookings(refresh: true);
+    _refreshCurrentView();
   }
 
   Future<void> _pickSearchDate() async {
@@ -732,7 +790,8 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
     return query.limit(_pageSize);
   }
 
-  Future<void> _runSearch() async {
+  Future<void> _runSearch({bool silent = false}) async {
+    if (!mounted) return;
     final queryText = _searchController.text.trim();
     if (queryText.isEmpty && !_searchFieldIsDate) {
       if (!mounted) return;
@@ -751,10 +810,12 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
       _error = null;
       _searchLastDocument = null;
       _hasMoreSearchResults = true;
-      _allBookings = <Booking>[];
+      if (!silent) {
+        _allBookings = <Booking>[];
+      }
     });
 
-    await _fetchSearchPage(generation: generation);
+    await _fetchSearchPage(generation: generation, replaceResults: true);
   }
 
   Future<void> _loadMoreSearchResults() async {
@@ -762,7 +823,7 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
     await _fetchSearchPage(generation: _loadGeneration, append: true);
   }
 
-  Future<void> _fetchSearchPage({required int generation, bool append = false}) async {
+  Future<void> _fetchSearchPage({required int generation, bool append = false, bool replaceResults = false}) async {
     if (!mounted || generation != _loadGeneration) return;
     setState(() => _loadingMore = true);
 
@@ -805,6 +866,7 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
           _allBookings = results;
           _hasMoreSearchResults = false;
           _loadingMore = false;
+          _lastRefreshedAt = DateTime.now();
         });
         return;
       }
@@ -828,8 +890,13 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
       _hasMoreSearchResults = snapshot.docs.length == _pageSize;
 
       setState(() {
-        _allBookings.addAll(additions);
+        if (replaceResults) {
+          _allBookings = page;
+        } else {
+          _allBookings.addAll(additions);
+        }
         _loadingMore = false;
+        _lastRefreshedAt = DateTime.now();
       });
     } catch (e, stackTrace) {
       developer.log('FIELD SEARCH ERROR', name: 'ADMIN_BOOKINGS', error: e, stackTrace: stackTrace);
@@ -1289,7 +1356,7 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
       _customRange = range;
       _dateScope = _BookingDateScope.custom;
     });
-    _loadBookings(refresh: true);
+    _refreshCurrentView();
   }
 
   void _resetFilters() {
@@ -1317,7 +1384,7 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
       _error = null;
     });
 
-    _loadBookings(refresh: true);
+    _refreshCurrentView();
   }
 
   void _selectOperation(_OperationFilter filter) {
@@ -1328,7 +1395,7 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
       _dateScope = _BookingDateScope.all;
       _customRange = null;
     });
-    _loadBookings(refresh: true);
+    _refreshCurrentView();
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {
@@ -1363,7 +1430,7 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
             );
 
             if (index == -1) {
-              _loadBookings(refresh: true);
+              _refreshCurrentView();
               return;
             }
 
@@ -1373,7 +1440,7 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
 
             // Re-read from Firestore as the details screen may have changed
             // fields beyond the in-memory Booking object.
-            _loadBookings(refresh: true);
+            _refreshCurrentView();
           },
         ),
       ),
@@ -1397,7 +1464,7 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
       body: SafeArea(
         child: RefreshIndicator(
           color: _BookingColors.primary,
-          onRefresh: () => _loadBookings(refresh: true),
+          onRefresh: () => _refreshCurrentView(),
           child: CustomScrollView(
             controller: _scrollController,
             physics: const AlwaysScrollableScrollPhysics(
@@ -1454,6 +1521,17 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
     );
   }
 
+  String get _lastRefreshedLabel {
+    if (_refreshing) return 'Refreshing…';
+    final value = _lastRefreshedAt;
+    if (value == null) return 'Waiting for first sync';
+    final diff = DateTime.now().difference(value);
+    if (diff.inSeconds < 10) return 'Live • just now';
+    if (diff.inMinutes < 1) return 'Live • ${diff.inSeconds}s ago';
+    if (diff.inMinutes < 60) return 'Live • ${diff.inMinutes}m ago';
+    return 'Checked ${value.day.toString().padLeft(2, '0')}/${value.month.toString().padLeft(2, '0')} ${_formatTime(value)}';
+  }
+
   Widget _buildHeader({
     required bool isMobile,
     required bool isTablet,
@@ -1492,6 +1570,27 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
                     fontWeight: FontWeight.w500,
                   ),
                 ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 6,
+                  children: [
+                    _LiveStatusPill(
+                      icon: _refreshing
+                          ? Icons.sync_rounded
+                          : Icons.verified_rounded,
+                      text: _lastRefreshedLabel,
+                      color: _refreshing
+                          ? _BookingColors.orange
+                          : _BookingColors.green,
+                    ),
+                    const _LiveStatusPill(
+                      icon: Icons.autorenew_rounded,
+                      text: 'Auto refresh 60s',
+                      color: _BookingColors.primary,
+                    ),
+                  ],
+                ),
               ],
             ),
           ),
@@ -1511,7 +1610,7 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
                 : Icons.refresh_rounded,
             onTap: _refreshing
                 ? null
-                : () => _loadBookings(refresh: true),
+                : () => _refreshCurrentView(),
           ),
           if (isMobile) ...[
             const SizedBox(width: 8),
@@ -1935,7 +2034,7 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
               _statusFilter = value;
               _operationFilter = _OperationFilter.all;
             });
-            _loadBookings(refresh: true);
+            _refreshCurrentView();
           },
         ),
         const SizedBox(width: 8),
@@ -1959,7 +2058,7 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
               _paymentFilter = value;
               _operationFilter = _OperationFilter.all;
             });
-            _loadBookings(refresh: true);
+            _refreshCurrentView();
           },
         ),
         const SizedBox(width: 8),
@@ -1999,7 +2098,7 @@ class _AdminBookingsScreenState extends State<AdminBookingsScreen> {
               _dateScope = value;
               _operationFilter = _OperationFilter.all;
             });
-            _loadBookings(refresh: true);
+            _refreshCurrentView();
           },
         ),
         if (_dateScope == _BookingDateScope.custom &&
@@ -3130,6 +3229,45 @@ class _VehicleThumb extends StatelessWidget {
                 );
               },
             ),
+    );
+  }
+}
+
+class _LiveStatusPill extends StatelessWidget {
+  const _LiveStatusPill({
+    required this.icon,
+    required this.text,
+    required this.color,
+  });
+
+  final IconData icon;
+  final String text;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      decoration: BoxDecoration(
+        color: color.withOpacity(.07),
+        borderRadius: BorderRadius.circular(99),
+        border: Border.all(color: color.withOpacity(.16)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 12, color: color),
+          const SizedBox(width: 5),
+          Text(
+            text,
+            style: GoogleFonts.inter(
+              fontSize: 9.5,
+              fontWeight: FontWeight.w800,
+              color: color,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

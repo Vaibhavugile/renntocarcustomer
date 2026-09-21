@@ -63,7 +63,9 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
 
   bool _loadingAvailability = true;
   bool _checkingAvailability = false;
+  bool _refreshingAvailability = false;
   bool _datesConfirmed = false;
+  DateTime? _lastAvailabilityCheckedAt;
 
   // ============================================================
   // INIT
@@ -291,6 +293,7 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
       setState(() {
         _availabilitySnapshot = snapshot;
         _loadingAvailability = false;
+        _lastAvailabilityCheckedAt = DateTime.now();
       });
     } catch (_) {
       if (!mounted) return;
@@ -1340,6 +1343,60 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
     });
   }
 
+  Future<void> _refreshAvailability({bool showMessage = false}) async {
+    if (_loadingAvailability || _refreshingAvailability || _checkingAvailability) {
+      return;
+    }
+
+    setState(() {
+      _refreshingAvailability = true;
+      _errorMessage = null;
+    });
+
+    try {
+      await _loadAvailability();
+
+      if (!mounted) return;
+
+      if (showMessage && _availabilitySnapshot != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            behavior: SnackBarBehavior.floating,
+            backgroundColor: heading,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+            content: const Text(
+              'Availability refreshed successfully.',
+              style: TextStyle(
+                fontFamily: 'Manrope',
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _refreshingAvailability = false;
+        });
+      }
+    }
+  }
+
+  String _lastCheckedText() {
+    final checked = _lastAvailabilityCheckedAt;
+    if (checked == null) return 'Not checked yet';
+
+    final now = DateTime.now();
+    final difference = now.difference(checked);
+    if (difference.inSeconds < 10) return 'Checked just now';
+    if (difference.inMinutes < 1) return 'Checked ${difference.inSeconds}s ago';
+    if (difference.inHours < 1) return 'Checked ${difference.inMinutes}m ago';
+    return 'Checked ${difference.inHours}h ago';
+  }
+
   // ============================================================
   // FINAL AVAILABILITY CHECK
   // ============================================================
@@ -1491,7 +1548,7 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
         leading: IconButton(
           tooltip: 'Back',
           onPressed:
-              _checkingAvailability
+              (_checkingAvailability || _refreshingAvailability)
                   ? null
                   : () =>
                       Navigator.pop(
@@ -1677,46 +1734,30 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
   Widget _buildAvailabilityBanner() {
     if (_loadingAvailability) {
       return Container(
-        padding:
-            const EdgeInsets
-                .symmetric(
-          horizontal: 13,
-          vertical: 11,
-        ),
-        decoration:
-            BoxDecoration(
+        padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 12),
+        decoration: BoxDecoration(
           color: card,
-          borderRadius:
-              BorderRadius.circular(
-            14,
-          ),
-          border: Border.all(
-            color: border,
-          ),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: border),
         ),
         child: const Row(
           children: [
             SizedBox(
-              width: 17,
-              height: 17,
-              child:
-                  CircularProgressIndicator(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(
                 strokeWidth: 2,
                 color: primary,
               ),
             ),
-            SizedBox(
-              width: 10,
-            ),
+            SizedBox(width: 10),
             Expanded(
               child: Text(
                 'Checking live availability...',
                 style: TextStyle(
-                  fontFamily:
-                      'Manrope',
+                  fontFamily: 'Manrope',
                   fontSize: 12,
-                  fontWeight:
-                      FontWeight.w600,
+                  fontWeight: FontWeight.w700,
                   color: body,
                 ),
               ),
@@ -1727,49 +1768,73 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
     }
 
     return Container(
-      padding:
-          const EdgeInsets
-              .symmetric(
-        horizontal: 13,
-        vertical: 11,
-      ),
-      decoration:
-          BoxDecoration(
+      padding: const EdgeInsets.fromLTRB(13, 11, 8, 11),
+      decoration: BoxDecoration(
         color: softAccent,
-        borderRadius:
-            BorderRadius.circular(
-          14,
-        ),
-        border: Border.all(
-          color:
-              const Color(
-            0xFFBDEBE5,
-          ),
-        ),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFBDEBE5)),
       ),
-      child: const Row(
+      child: Row(
         children: [
-          Icon(
-            Icons
-                .verified_rounded,
-            size: 18,
-            color: primary,
-          ),
-          SizedBox(
-            width: 9,
-          ),
-          Expanded(
-            child: Text(
-              'Live availability checked for this vehicle',
-              style: TextStyle(
-                fontFamily:
-                    'Manrope',
-                fontSize: 12,
-                fontWeight:
-                    FontWeight.w700,
-                color: heading,
-              ),
+          Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(11),
             ),
+            child: const Icon(
+              Icons.verified_rounded,
+              size: 18,
+              color: primary,
+            ),
+          ),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Live availability',
+                  style: TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                    color: heading,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  _lastCheckedText(),
+                  style: const TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
+                    color: body,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            tooltip: 'Refresh availability',
+            onPressed: _refreshingAvailability
+                ? null
+                : () => _refreshAvailability(showMessage: true),
+            icon: _refreshingAvailability
+                ? const SizedBox(
+                    width: 17,
+                    height: 17,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: primary,
+                    ),
+                  )
+                : const Icon(
+                    Icons.refresh_rounded,
+                    size: 20,
+                    color: primary,
+                  ),
           ),
         ],
       ),
@@ -1777,32 +1842,54 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
   }
 
   Widget _buildHeading() {
-    return const Column(
-      crossAxisAlignment:
-          CrossAxisAlignment.start,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          'When do you need the car?',
-          style: TextStyle(
-            fontFamily: 'Manrope',
-            fontSize: 21,
-            fontWeight:
-                FontWeight.w800,
-            color: heading,
-          ),
-        ),
-        SizedBox(
-          height: 5,
-        ),
-        Text(
-          'Select your rental dates, then choose the pickup and return times.',
-          style: TextStyle(
-            fontFamily: 'Manrope',
-            fontSize: 13,
-            fontWeight:
-                FontWeight.w500,
-            color: body,
-          ),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'When do you need the car?',
+                    style: TextStyle(
+                      fontFamily: 'Manrope',
+                      fontSize: 21,
+                      fontWeight: FontWeight.w800,
+                      color: heading,
+                    ),
+                  ),
+                  SizedBox(height: 5),
+                  Text(
+                    'Select your rental dates, then choose the pickup and return times.',
+                    style: TextStyle(
+                      fontFamily: 'Manrope',
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                      color: body,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (_pickupDate != null || _returnDate != null)
+              TextButton.icon(
+                onPressed: _resetDateSelection,
+                icon: const Icon(Icons.restart_alt_rounded, size: 16),
+                label: const Text('Reset'),
+                style: TextButton.styleFrom(
+                  foregroundColor: primary,
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                  textStyle: const TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+          ],
         ),
       ],
     );
@@ -2077,6 +2164,8 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
     final ready =
         !_loadingAvailability &&
             !_checkingAvailability &&
+            !_refreshingAvailability &&
+            _datesConfirmed &&
             _pickupDateTime !=
                 null &&
             _returnDateTime !=
@@ -2145,7 +2234,7 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
             ),
           ),
           child:
-              _checkingAvailability
+              (_checkingAvailability || _refreshingAvailability)
                   ? const SizedBox(
                       width: 21,
                       height: 21,

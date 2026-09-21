@@ -1,3 +1,4 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
@@ -8,6 +9,7 @@ import '../../customer/services/customer_service.dart';
 import '../../pricing/models/km_pricing_package.dart';
 import '../../pricing/models/pricing_profile.dart';
 import '../../pricing/engine/pricing_engine.dart';
+import '../../pricing/manager/pricing_manager.dart';
 import '../models/booking.dart';
 import '../../../models/branch.dart';
 import '../services/booking_service.dart';
@@ -80,9 +82,29 @@ class _ReviewBookingScreenState
 
   bool _loadingCustomer = true;
   bool _isCreatingBooking = false;
+  bool _isVerifyingBooking = true;
   bool _termsAccepted = false;
 
   String? _errorMessage;
+
+  PricingProfile? _livePricingProfile;
+  KmPricingPackage? _liveKmPackage;
+  PricingResult? _livePricingResult;
+  Branch? _liveBranch;
+  DateTime? _lastVerifiedAt;
+
+  FirebaseFirestore get _firestore => FirebaseFirestore.instance;
+
+  PricingProfile get _effectivePricingProfile =>
+      _livePricingProfile ?? widget.pricingProfile;
+
+  KmPricingPackage get _effectiveKmPackage =>
+      _liveKmPackage ?? _effectiveKmPackage;
+
+  PricingResult get _effectivePricingResult =>
+      _livePricingResult ?? _effectivePricingResult;
+
+  Branch get _effectiveBranch => _liveBranch ?? widget.branch;
 
   String get _tenantId =>
       AppConfig.tenant.tenantId;
@@ -91,6 +113,7 @@ class _ReviewBookingScreenState
   void initState() {
     super.initState();
     _loadCustomer();
+    _verifyBookingData();
   }
 
   @override
@@ -100,6 +123,154 @@ class _ReviewBookingScreenState
     _phoneController.dispose();
     _noteController.dispose();
     super.dispose();
+  }
+
+  Future<void> _verifyBookingData({bool showMessage = false}) async {
+    if (!mounted) return;
+
+    setState(() {
+      _isVerifyingBooking = true;
+      _lastVerifiedAt = null;
+      if (!showMessage) _errorMessage = null;
+    });
+
+    try {
+      final profile = await PricingManager.instance.loadPricingForCar(
+        tenantId: _tenantId,
+        pricingProfileId: widget.pricingProfile.id,
+      );
+
+      if (profile == null) {
+        throw Exception('PRICING_UNAVAILABLE');
+      }
+
+      final freshPackage = profile.getPackage(_effectiveKmPackage.id);
+      if (freshPackage == null) {
+        throw Exception('PACKAGE_UNAVAILABLE');
+      }
+
+      final config = PricingManager.instance.pricing;
+      if (config == null) {
+        throw Exception('PRICING_CONFIG_UNAVAILABLE');
+      }
+
+      final result = const PricingEngine().calculate(
+        config: config,
+        pricingProfileId: profile.id,
+        pickupDateTime: widget.pickupDateTime,
+        returnDateTime: widget.returnDateTime,
+        actualKm: 0,
+        plannedKm: 0,
+        selectedKmPackageId: freshPackage.id,
+        unlimitedKm: freshPackage.unlimitedKm,
+        includeSecurityDeposit: true,
+      );
+
+      if (result.pricingProfileId.isEmpty) {
+        throw Exception('PRICE_CALCULATION_FAILED');
+      }
+
+      final branchDoc = await _firestore
+          .collection('tenants')
+          .doc(_tenantId)
+          .collection('branches')
+          .doc(widget.branch.id)
+          .get();
+
+      if (!branchDoc.exists) {
+        throw Exception('BRANCH_NOT_FOUND');
+      }
+
+      final freshBranch =
+          Branch.fromMap(branchDoc.id, branchDoc.data()!);
+
+      if (!freshBranch.isActive) {
+        throw Exception('BRANCH_INACTIVE');
+      }
+
+      if (!widget.returnDateTime.isAfter(widget.pickupDateTime)) {
+        throw Exception('INVALID_DATE_RANGE');
+      }
+
+      if (!mounted) return;
+
+      setState(() {
+        _livePricingProfile = profile;
+        _liveKmPackage = freshPackage;
+        _livePricingResult = result;
+        _liveBranch = freshBranch;
+        _lastVerifiedAt = DateTime.now();
+        _isVerifyingBooking = false;
+        _errorMessage = null;
+      });
+
+      if (showMessage && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            behavior: SnackBarBehavior.floating,
+            backgroundColor: primary,
+            margin: const EdgeInsets.fromLTRB(16, 0, 16, 18),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+            ),
+            content: const Row(
+              children: [
+                Icon(Icons.verified_rounded, color: Colors.white, size: 19),
+                SizedBox(width: 9),
+                Expanded(
+                  child: Text(
+                    'Booking details verified with the latest pricing.',
+                    style: TextStyle(
+                      fontFamily: 'Manrope',
+                      fontWeight: FontWeight.w700,
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+
+      String message =
+          'Unable to verify the booking details. Please try again.';
+      final error = e.toString().toLowerCase();
+
+      if (error.contains('pricing_unavailable') ||
+          error.contains('pricing_config_unavailable')) {
+        message =
+            'Latest pricing is unavailable. Please refresh and try again.';
+      } else if (error.contains('package_unavailable')) {
+        message =
+            'This KM package is no longer available. Please go back and select another package.';
+      } else if (error.contains('branch_not_found') ||
+          error.contains('branch_inactive')) {
+        message =
+            'This pickup branch is no longer available. Please go back and select another branch.';
+      } else if (error.contains('invalid_date_range')) {
+        message =
+            'The selected return time must be after the pickup time.';
+      }
+
+      setState(() {
+        _isVerifyingBooking = false;
+        _errorMessage = message;
+      });
+    }
+  }
+
+  String _lastVerifiedText() {
+    final value = _lastVerifiedAt;
+    if (value == null) return 'Not verified yet';
+
+    final diff = DateTime.now().difference(value);
+    if (diff.inSeconds < 10) return 'Verified just now';
+    if (diff.inMinutes < 1) return 'Verified ${diff.inSeconds}s ago';
+    if (diff.inMinutes < 60) return 'Verified ${diff.inMinutes}m ago';
+    return 'Verified ${diff.inHours}h ago';
   }
 
   Future<void> _loadCustomer() async {
@@ -184,14 +355,14 @@ class _ReviewBookingScreenState
 
   String _durationText() {
     final minutes =
-        widget.pricingResult.durationMinutes;
+        _effectivePricingResult.durationMinutes;
 
     if (minutes < 60) {
       return '$minutes minutes';
     }
 
     final hours =
-        widget.pricingResult.durationHours;
+        _effectivePricingResult.durationHours;
 
     if (hours < 24) {
       final rounded =
@@ -202,7 +373,7 @@ class _ReviewBookingScreenState
     }
 
     final days =
-        widget.pricingResult.rentalDays;
+        _effectivePricingResult.rentalDays;
 
     return '$days '
         '${days == 1 ? 'day' : 'days'}';
@@ -211,14 +382,13 @@ class _ReviewBookingScreenState
   Future<void> _confirmBooking() async {
     FocusScope.of(context).unfocus();
 
-    if (!_formKey.currentState!.validate()) {
-      return;
-    }
+    if (_isCreatingBooking || _isVerifyingBooking) return;
+
+    if (!_formKey.currentState!.validate()) return;
 
     if (!_termsAccepted) {
       setState(() {
-        _errorMessage =
-            'Please accept the booking terms to continue.';
+        _errorMessage = 'Please accept the booking terms to continue.';
       });
       return;
     }
@@ -227,8 +397,7 @@ class _ReviewBookingScreenState
 
     if (user == null) {
       setState(() {
-        _errorMessage =
-            'Your session has expired. Please login again.';
+        _errorMessage = 'Your session has expired. Please login again.';
       });
       return;
     }
@@ -239,43 +408,39 @@ class _ReviewBookingScreenState
     });
 
     try {
-      /*
-       * Make sure the customer record exists before creating
-       * the booking.
-       *
-       * Customer records are tenant-scoped.
-       */
-      await _customerService
-          .createCustomerIfNotExists(
+      await _verifyBookingData();
+
+      if (!mounted) return;
+
+      if (_isVerifyingBooking ||
+          _livePricingResult == null ||
+          _livePricingProfile == null ||
+          _liveKmPackage == null ||
+          _liveBranch == null) {
+        throw Exception('BOOKING_VERIFICATION_FAILED');
+      }
+
+      final liveResult = _livePricingResult!;
+      final liveProfile = _livePricingProfile!;
+      final livePackage = _liveKmPackage!;
+      final liveBranch = _liveBranch!;
+
+      await _customerService.createCustomerIfNotExists(
         tenantId: _tenantId,
       );
 
-      final customer =
-          await _customerService
-              .getCurrentCustomer(
+      final customer = await _customerService.getCurrentCustomer(
         tenantId: _tenantId,
       );
 
       if (customer == null) {
-        throw Exception(
-          'Customer profile could not be loaded.',
-        );
+        throw Exception('Customer profile could not be loaded.');
       }
 
-      /*
-       * Save the minimum booking details entered here.
-       *
-       * Full KYC/profile remains separate and can be completed
-       * later during the pickup workflow.
-       */
-      final updatedCustomer =
-          customer.copyWith(
-        fullName:
-            _nameController.text.trim(),
-        email:
-            _emailController.text.trim(),
-        updatedAt:
-            DateTime.now(),
+      final updatedCustomer = customer.copyWith(
+        fullName: _nameController.text.trim(),
+        email: _emailController.text.trim(),
+        updatedAt: DateTime.now(),
       );
 
       await _customerService.updateCustomer(
@@ -283,252 +448,92 @@ class _ReviewBookingScreenState
         customer: updatedCustomer,
       );
 
-      /*
-       * Historical pricing snapshot.
-       *
-       * The booking keeps the exact values used at booking time
-       * so future pricing changes do not alter this booking.
-       */
-      final pricing =
-          BookingPricingSnapshot(
-        pricingProfileId:
-            widget.pricingResult
-                .pricingProfileId,
-
-        kmPackageId:
-            widget.pricingResult
-                .selectedKmPackageId,
-
-        kmPackageName:
-            widget.pricingResult
-                .selectedKmPackageName,
-
-        includedKm:
-            widget.pricingResult.includedKm,
-
-        unlimitedKm:
-            widget.pricingResult.unlimitedKm,
-
+      final pricing = BookingPricingSnapshot(
+        pricingProfileId: liveResult.pricingProfileId,
+        kmPackageId: liveResult.selectedKmPackageId,
+        kmPackageName: liveResult.selectedKmPackageName,
+        includedKm: liveResult.includedKm,
+        unlimitedKm: liveResult.unlimitedKm,
         extraKmRate:
-            widget.pricingResult
-                    .selectedKmPackageExtraKmRate ??
-                widget.pricingProfile.extraKmRate,
-
-        baseAmount:
-            widget.pricingResult.rentalPrice,
-
-        extraKmAmount:
-            widget.pricingResult.extraKmCharge,
-
-        extraTimeAmount:
-            widget.pricingResult.extraTimeCharge,
-
-        addOnsAmount:
-            widget.pricingResult.addOnTotal,
-
-        protectionAmount:
-            widget.pricingResult.protectionTotal,
-
-        discountAmount:
-            widget.pricingResult.discountAmount,
-
-        taxAmount:
-            widget.pricingResult.taxAmount,
-
-        securityDeposit:
-            widget.pricingResult.securityDeposit,
-
-        totalAmount:
-            widget.pricingResult.total,
+            liveResult.selectedKmPackageExtraKmRate ?? liveProfile.extraKmRate,
+        baseAmount: liveResult.rentalPrice,
+        extraKmAmount: liveResult.extraKmCharge,
+        extraTimeAmount: liveResult.extraTimeCharge,
+        addOnsAmount: liveResult.addOnTotal,
+        protectionAmount: liveResult.protectionTotal,
+        discountAmount: liveResult.discountAmount,
+        taxAmount: liveResult.taxAmount,
+        securityDeposit: liveResult.securityDeposit,
+        totalAmount: liveResult.total,
       );
 
-      /*
-       * Build the Booking object.
-       *
-       * BookingService will create the booking ID and timestamps.
-       */
       final booking = Booking(
         bookingId: '',
-
         tenantId: _tenantId,
-
         customerId: user.uid,
-
         carId: widget.car.id,
-
-        branchId: widget.branch.id,
-
-        status:
-            BookingStatus.pending,
-
-        paymentStatus:
-            PaymentStatus.pending,
-
-        pickupDateTime:
-            widget.pickupDateTime,
-
-        returnDateTime:
-            widget.returnDateTime,
-
-        actualPickupDateTime:
-            null,
-
-        actualReturnDateTime:
-            null,
-
-        pickupBranchId:
-            widget.branch.id,
-
-        /*
-         * We currently use the same branch for pickup
-         * and return.
-         *
-         * A separate return-branch selector can be added
-         * later without changing the booking architecture.
-         */
-        returnBranchId:
-            widget.branch.id,
-
-        pickupBranch:
-            BookingBranchSnapshot(
-          branchId:
-              widget.branch.id,
-          name:
-              widget.branch.name,
-          city:
-              widget.branch.city,
-          address:
-              widget.branch.address,
-          phone:
-              widget.branch.phone,
+        branchId: liveBranch.id,
+        status: BookingStatus.pending,
+        paymentStatus: PaymentStatus.pending,
+        pickupDateTime: widget.pickupDateTime,
+        returnDateTime: widget.returnDateTime,
+        actualPickupDateTime: null,
+        actualReturnDateTime: null,
+        pickupBranchId: liveBranch.id,
+        returnBranchId: liveBranch.id,
+        pickupBranch: BookingBranchSnapshot(
+          branchId: liveBranch.id,
+          name: liveBranch.name,
+          city: liveBranch.city,
+          address: liveBranch.address,
+          phone: liveBranch.phone,
         ),
-
-        returnBranch:
-            BookingBranchSnapshot(
-          branchId:
-              widget.branch.id,
-          name:
-              widget.branch.name,
-          city:
-              widget.branch.city,
-          address:
-              widget.branch.address,
-          phone:
-              widget.branch.phone,
+        returnBranch: BookingBranchSnapshot(
+          branchId: liveBranch.id,
+          name: liveBranch.name,
+          city: liveBranch.city,
+          address: liveBranch.address,
+          phone: liveBranch.phone,
         ),
-
-        /*
-         * BookingService also creates/validates the historical
-         * car snapshot, so we can leave this null.
-         */
         car: null,
-
-        kmPackageId:
-            widget.pricingResult
-                .selectedKmPackageId,
-
-        kmPackageName:
-            widget.pricingResult
-                .selectedKmPackageName,
-
-        includedKm:
-            widget.pricingResult.includedKm,
-
-        unlimitedKm:
-            widget.pricingResult.unlimitedKm,
-
+        kmPackageId: liveResult.selectedKmPackageId,
+        kmPackageName: liveResult.selectedKmPackageName,
+        includedKm: liveResult.includedKm,
+        unlimitedKm: liveResult.unlimitedKm,
         extraKmRate:
-            widget.pricingResult
-                    .selectedKmPackageExtraKmRate ??
-                widget.selectedKmPackage.extraKmRate,
-
-        pricingProfileId:
-            widget.pricingResult
-                .pricingProfileId,
-
-        baseAmount:
-            widget.pricingResult.rentalPrice,
-
-        extraKmAmount:
-            widget.pricingResult.extraKmCharge,
-
-        extraTimeAmount:
-            widget.pricingResult.extraTimeCharge,
-
-        addOnsAmount:
-            widget.pricingResult.addOnTotal,
-
-        protectionAmount:
-            widget.pricingResult.protectionTotal,
-
-        discountAmount:
-            widget.pricingResult.discountAmount,
-
-        taxAmount:
-            widget.pricingResult.taxAmount,
-
-        securityDeposit:
-            widget.pricingResult.securityDeposit,
-
-        totalAmount:
-            widget.pricingResult.total,
-
-        pricing:
-            pricing,
-
+            liveResult.selectedKmPackageExtraKmRate ?? livePackage.extraKmRate,
+        pricingProfileId: liveResult.pricingProfileId,
+        baseAmount: liveResult.rentalPrice,
+        extraKmAmount: liveResult.extraKmCharge,
+        extraTimeAmount: liveResult.extraTimeCharge,
+        addOnsAmount: liveResult.addOnTotal,
+        protectionAmount: liveResult.protectionTotal,
+        discountAmount: liveResult.discountAmount,
+        taxAmount: liveResult.taxAmount,
+        securityDeposit: liveResult.securityDeposit,
+        totalAmount: liveResult.total,
+        pricing: pricing,
         paidAmount: 0,
-
         refundAmount: 0,
-
         paymentId: null,
-
         paymentOrderId: null,
-
         paymentTransactionId: null,
-
         paymentMethod: null,
-
         couponCode: null,
-
-        customerName:
-            _nameController.text.trim(),
-
-        customerPhone:
-            _phoneController.text.trim(),
-
-        customerEmail:
-            _emailController.text.trim(),
-
-        customerNote:
-            _noteController.text.trim(),
-
+        customerName: _nameController.text.trim(),
+        customerPhone: _phoneController.text.trim(),
+        customerEmail: _emailController.text.trim(),
+        customerNote: _noteController.text.trim(),
         cancellationReason: '',
-
         rejectionReason: '',
-
-        /*
-         * Pending expiry will eventually be controlled by
-         * the backend/Cloud Function.
-         *
-         * Keep it null here so the server can become the
-         * authoritative source later.
-         */
         expiresAt: null,
-
         createdAt: null,
-
         updatedAt: null,
       );
 
-      /*
-       * IMPORTANT:
-       *
-       * BookingService performs the final availability check
-       * immediately before saving.
-       */
-      final savedBooking =
-          await _bookingService
-              .createBooking(
+      // BookingService remains the final availability authority and
+      // performs its own final check immediately before persistence.
+      final savedBooking = await _bookingService.createBooking(
         tenantId: _tenantId,
         booking: booking,
       );
@@ -539,14 +544,6 @@ class _ReviewBookingScreenState
         _isCreatingBooking = false;
       });
 
-      /*
-       * Payment comes immediately after booking creation.
-       *
-       * For now payment is a simple Firebase-only/manual
-       * completion step. Later this screen can be replaced
-       * by Razorpay or another payment gateway without
-       * changing the booking creation flow.
-       */
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(
@@ -560,22 +557,29 @@ class _ReviewBookingScreenState
 
       String message =
           'Unable to create your booking. Please try again.';
-
-      final error =
-          e.toString().toLowerCase();
+      final error = e.toString().toLowerCase();
 
       if (error.contains('not available')) {
         message =
             'Sorry, this car is no longer available for the selected time. Please choose another time.';
-      } else if (error.contains('authenticated')) {
+      } else if (error.contains('package_unavailable')) {
         message =
-            'Your session has expired. Please login again.';
+            'The selected KM package has changed. Please go back and choose the latest package.';
+      } else if (error.contains('branch_inactive') ||
+          error.contains('branch_not_found')) {
+        message =
+            'The selected pickup branch is no longer available. Please go back and select another branch.';
+      } else if (error.contains('authenticated')) {
+        message = 'Your session has expired. Please login again.';
       } else if (error.contains('tenant mismatch')) {
         message =
             'Unable to verify the rental account. Please restart the booking.';
       } else if (error.contains('customer identity')) {
+        message = 'Unable to verify your customer account.';
+      } else if (error.contains('already exists') ||
+          error.contains('duplicate')) {
         message =
-            'Unable to verify your customer account.';
+            'This booking appears to have already been created. Please check My Bookings.';
       }
 
       setState(() {
@@ -594,7 +598,7 @@ class _ReviewBookingScreenState
         elevation: 0,
         surfaceTintColor: Colors.transparent,
         leading: IconButton(
-          onPressed: _isCreatingBooking
+          onPressed: _isCreatingBooking || _isVerifyingBooking
               ? null
               : () => Navigator.pop(context),
           icon: const Icon(
@@ -631,6 +635,8 @@ class _ReviewBookingScreenState
                 ),
                 children: [
                   _buildHeader(),
+                  const SizedBox(height: 12),
+                  _buildVerificationBanner(),
                   const SizedBox(height: 18),
                   if (_errorMessage != null) ...[
                     _buildError(),
@@ -681,6 +687,94 @@ class _ReviewBookingScreenState
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildVerificationBanner() {
+    final verified = _lastVerifiedAt != null &&
+        !_isVerifyingBooking &&
+        _livePricingResult != null;
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(13, 11, 8, 11),
+      decoration: BoxDecoration(
+        color: verified ? softAccent : card,
+        borderRadius: BorderRadius.circular(15),
+        border: Border.all(
+          color: verified ? const Color(0xFFC8EEE8) : border,
+        ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              color: verified ? primary : background,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: _isVerifyingBooking
+                ? const Padding(
+                    padding: EdgeInsets.all(9),
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: primary,
+                    ),
+                  )
+                : Icon(
+                    verified
+                        ? Icons.verified_rounded
+                        : Icons.sync_rounded,
+                    size: 18,
+                    color: verified ? Colors.white : primary,
+                  ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  _isVerifyingBooking
+                      ? 'Verifying booking details'
+                      : verified
+                          ? 'Booking details verified'
+                          : 'Verification required',
+                  style: const TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w800,
+                    color: heading,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  _isVerifyingBooking
+                      ? 'Checking branch, KM package and latest pricing.'
+                      : _lastVerifiedText(),
+                  style: const TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 10,
+                    fontWeight: FontWeight.w500,
+                    color: body,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            tooltip: 'Refresh verification',
+            onPressed: _isCreatingBooking || _isVerifyingBooking
+                ? null
+                : () => _verifyBookingData(showMessage: true),
+            icon: const Icon(
+              Icons.refresh_rounded,
+              size: 20,
+              color: primary,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -748,7 +842,7 @@ class _ReviewBookingScreenState
           _detailRow(
             Icons.location_on_outlined,
             'Pickup location',
-            widget.branch.name,
+            _effectiveBranch.name,
           ),
           const SizedBox(height: 11),
           _detailRow(
@@ -779,7 +873,7 @@ class _ReviewBookingScreenState
 
   Widget _buildPackageSection() {
     final package =
-        widget.selectedKmPackage;
+        _effectiveKmPackage;
 
     return _sectionCard(
       title: 'KM PACKAGE',
@@ -1016,7 +1110,7 @@ class _ReviewBookingScreenState
 
   Widget _buildPriceSection() {
     final result =
-        widget.pricingResult;
+        _effectivePricingResult;
 
     return _sectionCard(
       title: 'PRICE SUMMARY',
@@ -1368,7 +1462,7 @@ class _ReviewBookingScreenState
 
   Widget _buildBottomButton() {
     final amount =
-        widget.pricingResult.amountPayable;
+        _effectivePricingResult.amountPayable;
 
     return SafeArea(
       minimum:
@@ -1402,7 +1496,9 @@ class _ReviewBookingScreenState
           height: 56,
           child: ElevatedButton(
             onPressed:
-                _isCreatingBooking
+                _isCreatingBooking ||
+                        _isVerifyingBooking ||
+                        _lastVerifiedAt == null
                     ? null
                     : _confirmBooking,
             style:

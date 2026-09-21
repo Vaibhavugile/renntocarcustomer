@@ -1,3 +1,4 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
 import '../../../core/config/app_config.dart';
@@ -45,8 +46,12 @@ class _KmPackageScreenState extends State<KmPackageScreen> {
   KmPricingPackage? _selectedPackage;
 
   bool _isLoading = true;
+  bool _isRefreshing = false;
   bool _isContinuing = false;
   String? _errorMessage;
+  DateTime? _lastCheckedAt;
+
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
   @override
   void initState() {
@@ -54,7 +59,17 @@ class _KmPackageScreenState extends State<KmPackageScreen> {
     _loadPricing();
   }
 
-  Future<void> _loadPricing() async {
+  Future<void> _loadPricing({bool preserveSelection = true}) async {
+    if (!mounted) return;
+
+    final previousPackageId =
+        preserveSelection ? _selectedPackage?.id : null;
+
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
     try {
       final profile =
           await PricingManager.instance.loadPricingForCar(
@@ -66,35 +81,141 @@ class _KmPackageScreenState extends State<KmPackageScreen> {
 
       if (profile == null) {
         setState(() {
+          _pricingProfile = null;
+          _selectedPackage = null;
           _isLoading = false;
+          _lastCheckedAt = DateTime.now();
           _errorMessage =
               'Pricing is currently unavailable for this vehicle.';
         });
         return;
       }
 
-      final packages = profile.kmPackages;
+      final packages = List<KmPricingPackage>.from(profile.kmPackages);
+      KmPricingPackage? selected;
 
-      KmPricingPackage? initialPackage;
-
-      if (packages.isNotEmpty) {
-        initialPackage = packages.first;
+      if (previousPackageId != null) {
+        for (final package in packages) {
+          if (package.id == previousPackageId) {
+            selected = package;
+            break;
+          }
+        }
       }
+
+      selected ??= packages.isNotEmpty ? packages.first : null;
 
       setState(() {
         _pricingProfile = profile;
-        _selectedPackage = initialPackage;
+        _selectedPackage = selected;
         _isLoading = false;
+        _lastCheckedAt = DateTime.now();
       });
     } catch (_) {
       if (!mounted) return;
 
       setState(() {
         _isLoading = false;
+        _lastCheckedAt = DateTime.now();
         _errorMessage =
             'Unable to load KM packages. Please try again.';
       });
     }
+  }
+
+  Future<void> _refreshPricing({bool showMessage = true}) async {
+    if (_isRefreshing || _isContinuing) return;
+
+    setState(() {
+      _isRefreshing = true;
+      _errorMessage = null;
+    });
+
+    try {
+      await _loadPricing(preserveSelection: true);
+
+      if (!mounted) return;
+
+      if (showMessage && _pricingProfile != null) {
+        _showSnackBar(
+          'Pricing and KM packages are up to date.',
+          icon: Icons.check_circle_outline_rounded,
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isRefreshing = false);
+      }
+    }
+  }
+
+  Future<Branch?> _revalidateBranch() async {
+    final branchDoc = await _firestore
+        .collection('tenants')
+        .doc(_tenantId)
+        .collection('branches')
+        .doc(widget.branch.id)
+        .get();
+
+    if (!branchDoc.exists || branchDoc.data() == null) {
+      return null;
+    }
+
+    final branch = Branch.fromMap(
+      branchDoc.id,
+      branchDoc.data()!,
+    );
+
+    return branch.isActive ? branch : null;
+  }
+
+  String _lastCheckedText() {
+    final value = _lastCheckedAt;
+    if (value == null) return 'Checking live pricing…';
+
+    final hour = value.hour % 12 == 0 ? 12 : value.hour % 12;
+    final minute = value.minute.toString().padLeft(2, '0');
+    final period = value.hour >= 12 ? 'PM' : 'AM';
+
+    return 'Last checked $hour:$minute $period';
+  }
+
+  void _showSnackBar(
+    String message, {
+    IconData icon = Icons.info_outline_rounded,
+  }) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          behavior: SnackBarBehavior.floating,
+          margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          backgroundColor: heading,
+          elevation: 0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+          content: Row(
+            children: [
+              Icon(icon, color: Colors.white, size: 19),
+              const SizedBox(width: 9),
+              Expanded(
+                child: Text(
+                  message,
+                  style: const TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
   }
 
   Future<void> _continue() async {
@@ -108,15 +229,31 @@ class _KmPackageScreenState extends State<KmPackageScreen> {
       return;
     }
 
+    if (_isContinuing || _isRefreshing) return;
+
     setState(() {
       _isContinuing = true;
       _errorMessage = null;
     });
 
-    // The pricing profile was loaded from Firebase.
-    // Before moving forward, make sure the selected package
-    // still exists in the current pricing profile.
     try {
+      // Revalidate the branch because availability/configuration can
+      // change after the customer leaves the previous screen.
+      final freshBranch = await _revalidateBranch();
+
+      if (!mounted) return;
+
+      if (freshBranch == null) {
+        setState(() {
+          _isContinuing = false;
+          _errorMessage =
+              'This pickup branch is no longer available. Please go back and choose another branch.';
+        });
+        return;
+      }
+
+      // Re-read pricing immediately before navigation. This prevents a
+      // stale package/rate from being carried into the pricing calculation.
       final profile =
           await PricingManager.instance.loadPricingForCar(
         tenantId: _tenantId,
@@ -128,26 +265,32 @@ class _KmPackageScreenState extends State<KmPackageScreen> {
       if (profile == null) {
         setState(() {
           _isContinuing = false;
+          _pricingProfile = null;
+          _selectedPackage = null;
+          _lastCheckedAt = DateTime.now();
           _errorMessage =
               'Vehicle pricing is no longer available.';
         });
         return;
       }
 
-      final freshPackage =
-          profile.getPackage(package.id);
+      final freshPackage = profile.getPackage(package.id);
 
       if (freshPackage == null) {
         setState(() {
           _isContinuing = false;
+          _pricingProfile = profile;
+          _selectedPackage = profile.kmPackages.isNotEmpty
+              ? profile.kmPackages.first
+              : null;
+          _lastCheckedAt = DateTime.now();
           _errorMessage =
               'This KM package is no longer available. Please select another package.';
-          _pricingProfile = profile;
-          _selectedPackage =
-              profile.kmPackages.isNotEmpty
-                  ? profile.kmPackages.first
-                  : null;
         });
+        _showSnackBar(
+          'The selected package changed. Please review the updated packages.',
+          icon: Icons.sync_problem_rounded,
+        );
         return;
       }
 
@@ -155,6 +298,7 @@ class _KmPackageScreenState extends State<KmPackageScreen> {
         _isContinuing = false;
         _pricingProfile = profile;
         _selectedPackage = freshPackage;
+        _lastCheckedAt = DateTime.now();
       });
 
       Navigator.push(
@@ -163,7 +307,7 @@ class _KmPackageScreenState extends State<KmPackageScreen> {
           builder: (_) => PricingScreen(
             car: widget.car,
             tenantId: _tenantId,
-            branch: widget.branch,
+            branch: freshBranch,
             pickupDateTime: widget.pickupDateTime,
             returnDateTime: widget.returnDateTime,
             pricingProfile: profile,
@@ -176,8 +320,9 @@ class _KmPackageScreenState extends State<KmPackageScreen> {
 
       setState(() {
         _isContinuing = false;
+        _lastCheckedAt = DateTime.now();
         _errorMessage =
-            'Unable to confirm pricing. Please try again.';
+            'Unable to confirm the latest pricing. Please try again.';
       });
     }
   }
@@ -236,7 +381,7 @@ class _KmPackageScreenState extends State<KmPackageScreen> {
         elevation: 0,
         surfaceTintColor: Colors.transparent,
         leading: IconButton(
-          onPressed: () => Navigator.pop(context),
+          onPressed: _isContinuing || _isRefreshing ? null : () => Navigator.pop(context),
           icon: const Icon(
             Icons.arrow_back_ios_new_rounded,
             size: 20,
@@ -284,7 +429,7 @@ class _KmPackageScreenState extends State<KmPackageScreen> {
 
     return RefreshIndicator(
       color: primary,
-      onRefresh: _loadPricing,
+      onRefresh: () => _refreshPricing(showMessage: false),
       child: ListView(
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(
@@ -295,6 +440,8 @@ class _KmPackageScreenState extends State<KmPackageScreen> {
         ),
         children: [
           _buildTripSummary(),
+          const SizedBox(height: 12),
+          _buildLivePricingBanner(),
           const SizedBox(height: 24),
           _buildHeading(),
           const SizedBox(height: 14),
@@ -367,6 +514,16 @@ class _KmPackageScreenState extends State<KmPackageScreen> {
                         color: primary,
                       ),
                     ),
+                    if (widget.branch.city.isNotEmpty)
+                      Text(
+                        widget.branch.city,
+                        style: const TextStyle(
+                          fontFamily: 'Manrope',
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w600,
+                          color: muted,
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -431,29 +588,138 @@ class _KmPackageScreenState extends State<KmPackageScreen> {
   }
 
   Widget _buildHeading() {
-    return const Column(
+    final packages = _pricingProfile?.kmPackages ?? [];
+
+    return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          'Select your KM package',
-          style: TextStyle(
-            fontFamily: 'Manrope',
-            fontSize: 20,
-            fontWeight: FontWeight.w800,
-            color: heading,
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Select your KM package',
+                style: TextStyle(
+                  fontFamily: 'Manrope',
+                  fontSize: 20,
+                  fontWeight: FontWeight.w800,
+                  color: heading,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                packages.isEmpty
+                    ? 'No distance packages are currently configured.'
+                    : '${packages.length} package${packages.length == 1 ? '' : 's'} available for this vehicle.',
+                style: const TextStyle(
+                  fontFamily: 'Manrope',
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                  color: body,
+                ),
+              ),
+            ],
           ),
         ),
-        SizedBox(height: 6),
-        Text(
-          'Choose the distance package that best fits your trip.',
-          style: TextStyle(
-            fontFamily: 'Manrope',
-            fontSize: 13,
-            fontWeight: FontWeight.w500,
-            color: body,
+        if (_selectedPackage != null)
+          TextButton(
+            onPressed: _isContinuing || _isRefreshing
+                ? null
+                : () {
+                    setState(() {
+                      _selectedPackage = packages.isNotEmpty ? packages.first : null;
+                      _errorMessage = null;
+                    });
+                  },
+            style: TextButton.styleFrom(
+              foregroundColor: primary,
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            child: const Text(
+              'Reset',
+              style: TextStyle(
+                fontFamily: 'Manrope',
+                fontSize: 11.5,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
           ),
-        ),
       ],
+    );
+  }
+
+  Widget _buildLivePricingBanner() {
+    final isReady = _pricingProfile != null && !_isLoading;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 11),
+      decoration: BoxDecoration(
+        color: isReady ? softAccent : card,
+        borderRadius: BorderRadius.circular(15),
+        border: Border.all(color: isReady ? const Color(0xFFCDEFE8) : border),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              color: isReady ? Colors.white : background,
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              isReady ? Icons.verified_rounded : Icons.sync_rounded,
+              size: 17,
+              color: primary,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Live pricing',
+                  style: TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w800,
+                    color: heading,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  _lastCheckedText(),
+                  style: const TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w600,
+                    color: body,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            tooltip: 'Refresh pricing',
+            onPressed: _isRefreshing || _isContinuing
+                ? null
+                : () => _refreshPricing(),
+            icon: _isRefreshing
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: primary,
+                    ),
+                  )
+                : const Icon(Icons.refresh_rounded, color: primary, size: 20),
+          ),
+        ],
+      ),
     );
   }
 
@@ -787,7 +1053,7 @@ class _KmPackageScreenState extends State<KmPackageScreen> {
             ),
             const SizedBox(height: 20),
             ElevatedButton(
-              onPressed: _loadPricing,
+              onPressed: _isRefreshing ? null : () => _refreshPricing(),
               style: ElevatedButton.styleFrom(
                 backgroundColor: primary,
                 foregroundColor: Colors.white,
@@ -818,14 +1084,14 @@ class _KmPackageScreenState extends State<KmPackageScreen> {
         child: Column(
           mainAxisAlignment:
               MainAxisAlignment.center,
-          children: const [
-            Icon(
+          children: [
+            const Icon(
               Icons.route_outlined,
               size: 48,
               color: muted,
             ),
-            SizedBox(height: 16),
-            Text(
+            const SizedBox(height: 16),
+            const Text(
               'No KM packages available',
               textAlign: TextAlign.center,
               style: TextStyle(
@@ -835,8 +1101,8 @@ class _KmPackageScreenState extends State<KmPackageScreen> {
                 color: heading,
               ),
             ),
-            SizedBox(height: 7),
-            Text(
+            const SizedBox(height: 7),
+            const Text(
               'There are currently no KM packages configured for this vehicle.',
               textAlign: TextAlign.center,
               style: TextStyle(
@@ -844,6 +1110,35 @@ class _KmPackageScreenState extends State<KmPackageScreen> {
                 fontSize: 13,
                 height: 1.4,
                 color: body,
+              ),
+            ),
+            const SizedBox(height: 18),
+            ElevatedButton.icon(
+              onPressed: _isRefreshing ? null : () => _refreshPricing(),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: primary,
+                foregroundColor: Colors.white,
+                elevation: 0,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              icon: _isRefreshing
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : const Icon(Icons.refresh_rounded, size: 17),
+              label: const Text(
+                'Check Again',
+                style: TextStyle(
+                  fontFamily: 'Manrope',
+                  fontWeight: FontWeight.w800,
+                ),
               ),
             ),
           ],
@@ -883,7 +1178,7 @@ class _KmPackageScreenState extends State<KmPackageScreen> {
           height: 54,
           child: ElevatedButton(
             onPressed:
-                hasSelection && !_isContinuing
+                hasSelection && !_isContinuing && !_isRefreshing
                     ? _continue
                     : null,
             style: ElevatedButton.styleFrom(

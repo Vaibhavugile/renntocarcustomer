@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 
 import '../../../core/config/app_config.dart';
 import '../../booking/models/booking.dart';
+import '../../booking/services/booking_service.dart';
 
 class PaymentScreen extends StatefulWidget {
   final Booking booking;
@@ -16,6 +17,7 @@ class PaymentScreen extends StatefulWidget {
   State<PaymentScreen> createState() => _PaymentScreenState();
 }
 
+
 class _PaymentScreenState extends State<PaymentScreen> {
   static const Color primary = Color(0xFF0F766E);
   static const Color accent = Color(0xFF14B8A6);
@@ -28,11 +30,71 @@ class _PaymentScreenState extends State<PaymentScreen> {
   static const Color border = Color(0xFFE5EBE9);
 
   bool _isProcessing = false;
+  bool _isRefreshing = false;
+  Booking? _latestBooking;
+  String? _lastCheckedText;
+
+  final BookingService _bookingService = BookingService();
 
   String get _tenantId => AppConfig.tenant.tenantId;
 
+  Future<void> _refreshBooking() async {
+    if (_isRefreshing || _isProcessing) return;
+
+    setState(() {
+      _isRefreshing = true;
+    });
+
+    try {
+      final ref = FirebaseFirestore.instance
+          .collection('tenants')
+          .doc(_tenantId)
+          .collection('bookings')
+          .doc(widget.booking.bookingId);
+
+      final snapshot = await ref.get();
+
+      if (!snapshot.exists || snapshot.data() == null) {
+        throw Exception('Booking not found.');
+      }
+
+      final data = snapshot.data()!;
+      if ((data['tenantId']?.toString() ?? '') != _tenantId) {
+        throw Exception('Invalid tenant booking.');
+      }
+
+      final latest = Booking.fromMap(snapshot.id, data);
+
+      if (!mounted) return;
+      setState(() {
+        _latestBooking = latest;
+        _lastCheckedText = _formatTime(DateTime.now());
+      });
+
+      _showMessage('Booking payment status refreshed.');
+    } catch (e) {
+      if (!mounted) return;
+      _showMessage(
+        e.toString().replaceFirst('Exception: ', ''),
+        error: true,
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isRefreshing = false);
+      }
+    }
+  }
+
+  Booking get _activeBooking => _latestBooking ?? widget.booking;
+
+  double get _outstandingAmount {
+    final booking = _activeBooking;
+    final balance = booking.totalAmount - booking.paidAmount + booking.refundAmount;
+    return balance < 0 ? 0 : balance;
+  }
+
   Future<void> _completePayment() async {
-    if (_isProcessing) return;
+    if (_isProcessing || _isRefreshing) return;
 
     setState(() {
       _isProcessing = true;
@@ -45,43 +107,39 @@ class _PaymentScreenState extends State<PaymentScreen> {
           .collection('bookings')
           .doc(widget.booking.bookingId);
 
+      // Always read the latest booking immediately before payment.
       final snapshot = await bookingRef.get();
 
-      if (!snapshot.exists) {
+      if (!snapshot.exists || snapshot.data() == null) {
         throw Exception('Booking not found.');
       }
 
-      final data = snapshot.data();
-
-      if (data == null) {
-        throw Exception('Unable to load booking.');
-      }
-
-      final bookingTenantId = data['tenantId']?.toString() ?? '';
-
-      if (bookingTenantId != _tenantId) {
+      final data = snapshot.data()!;
+      if ((data['tenantId']?.toString() ?? '') != _tenantId) {
         throw Exception('Invalid tenant booking.');
       }
 
-      final currentStatus = data['status']?.toString() ?? '';
-      final currentPaymentStatus =
-          data['paymentStatus']?.toString() ?? '';
+      final latestBooking = Booking.fromMap(snapshot.id, data);
 
-      if (currentStatus == 'cancelled' ||
-          currentStatus == 'rejected' ||
-          currentStatus == 'completed') {
+      if (latestBooking.status == BookingStatus.cancelled ||
+          latestBooking.status == BookingStatus.rejected ||
+          latestBooking.status == BookingStatus.completed ||
+          latestBooking.status == BookingStatus.noShow) {
         throw Exception(
           'This booking is no longer available for payment.',
         );
       }
 
-      if (currentPaymentStatus == 'paid') {
+      if (latestBooking.paymentStatus == PaymentStatus.paid ||
+          latestBooking.balanceAmount <= 0.009) {
         if (mounted) {
+          setState(() => _latestBooking = latestBooking);
           Navigator.pushReplacement(
             context,
             MaterialPageRoute(
               builder: (_) => PaymentSuccessScreen(
-                booking: widget.booking,
+                booking: latestBooking,
+                paymentId: latestBooking.paymentId,
               ),
             ),
           );
@@ -89,53 +147,110 @@ class _PaymentScreenState extends State<PaymentScreen> {
         return;
       }
 
-      final totalAmount = _toDouble(
-        data['totalAmount'],
+      final amount = latestBooking.balanceAmount;
+      if (amount <= 0) {
+        throw Exception('There is no outstanding payment for this booking.');
+      }
+
+      /*
+       * IMPORTANT:
+       *
+       * Do not update paidAmount/paymentStatus directly here.
+       * BookingService records an immutable PaymentTransaction in:
+       * tenants/{tenantId}/bookings/{bookingId}/payments/{paymentId}
+       * and updates the booking payment summary atomically.
+       *
+       * This current screen still represents the existing Firebase/manual
+       * payment flow. When Razorpay is connected, its verified gateway IDs
+       * should be supplied to this same ledger method instead.
+       */
+      final transaction = await _bookingService.addVerifiedCustomerPayment(
+        tenantId: _tenantId,
+        bookingId: latestBooking.bookingId,
+        amount: amount,
+        method: PaymentMethodType.other,
+        transactionReference:
+            'manual_${DateTime.now().millisecondsSinceEpoch}',
+        note: 'Customer payment completed from payment screen.',
+        paymentDate: DateTime.now(),
       );
 
-      final paymentId =
-          'manual_${DateTime.now().millisecondsSinceEpoch}';
-
+      // A fully paid booking becomes confirmed. PaymentService/BookingService
+      // owns the financial summary; this only advances the booking lifecycle.
       await bookingRef.update({
-        'paymentStatus': 'paid',
-        'paidAmount': totalAmount,
-        'paymentMethod': 'manual',
-        'paymentId': paymentId,
-        'paymentTransactionId': paymentId,
-        'paymentOrderId': null,
-        'status': 'confirmed',
+        'status': BookingStatus.confirmed.name,
         'updatedAt': FieldValue.serverTimestamp(),
       });
 
+      final refreshed = await bookingRef.get();
+      final savedBooking = refreshed.exists && refreshed.data() != null
+          ? Booking.fromMap(refreshed.id, refreshed.data()!)
+          : latestBooking;
+
       if (!mounted) return;
+
+      setState(() {
+        _latestBooking = savedBooking;
+        _lastCheckedText = _formatTime(DateTime.now());
+      });
 
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(
           builder: (_) => PaymentSuccessScreen(
-            booking: widget.booking,
-            paymentId: paymentId,
+            booking: savedBooking,
+            paymentId: transaction.paymentId,
           ),
         ),
       );
     } catch (e) {
       if (!mounted) return;
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            e.toString().replaceFirst('Exception: ', ''),
-          ),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      final raw = e.toString().replaceFirst('Exception: ', '');
+      String message = raw.isEmpty
+          ? 'Unable to complete the payment. Please try again.'
+          : raw;
+
+      if (raw.toLowerCase().contains('already been recorded')) {
+        message = 'This payment has already been recorded. Please refresh the payment status.';
+      }
+
+      _showMessage(message, error: true);
     } finally {
       if (mounted) {
-        setState(() {
-          _isProcessing = false;
-        });
+        setState(() => _isProcessing = false);
       }
     }
+  }
+
+  void _showMessage(String message, {bool error = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(
+            message,
+            style: const TextStyle(
+              fontFamily: 'Manrope',
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          backgroundColor: error ? const Color(0xFFB42318) : primary,
+          behavior: SnackBarBehavior.floating,
+          margin: const EdgeInsets.all(16),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+        ),
+      );
+  }
+
+  String _formatTime(DateTime date) {
+    final hour = date.hour % 12 == 0 ? 12 : date.hour % 12;
+    final minute = date.minute.toString().padLeft(2, '0');
+    final period = date.hour >= 12 ? 'PM' : 'AM';
+    return '$hour:$minute $period';
   }
 
   double _toDouble(dynamic value) {
@@ -172,9 +287,10 @@ class _PaymentScreenState extends State<PaymentScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final booking = widget.booking;
+    final booking = _activeBooking;
 
     final total = booking.totalAmount;
+    final outstanding = _outstandingAmount;
 
     return Scaffold(
       backgroundColor: background,
@@ -194,6 +310,26 @@ class _PaymentScreenState extends State<PaymentScreen> {
         iconTheme: const IconThemeData(
           color: heading,
         ),
+        actions: [
+          IconButton(
+            tooltip: 'Refresh payment status',
+            onPressed: _isProcessing || _isRefreshing ? null : _refreshBooking,
+            icon: _isRefreshing
+                ? const Padding(
+                    padding: EdgeInsets.all(12),
+                    child: SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: primary,
+                      ),
+                    ),
+                  )
+                : const Icon(Icons.refresh_rounded),
+          ),
+          const SizedBox(width: 4),
+        ],
       ),
       body: SafeArea(
         child: Column(
@@ -211,7 +347,9 @@ class _PaymentScreenState extends State<PaymentScreen> {
                   children: [
                     _buildBookingSummary(booking),
                     const SizedBox(height: 20),
-                    _buildAmountCard(total),
+                    _buildAmountCard(total, outstanding),
+                    const SizedBox(height: 20),
+                    _buildPaymentStatus(booking, outstanding),
                     const SizedBox(height: 20),
                     _buildPaymentMethod(),
                     const SizedBox(height: 20),
@@ -359,7 +497,9 @@ class _PaymentScreenState extends State<PaymentScreen> {
     );
   }
 
-  Widget _buildAmountCard(double total) {
+  Widget _buildAmountCard(double total, double outstanding) {
+    final booking = _activeBooking;
+    final isPaid = outstanding <= 0.009 || booking.paymentStatus == PaymentStatus.paid;
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
@@ -388,7 +528,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
           ),
           const SizedBox(height: 7),
           Text(
-            _formatAmount(total),
+            _formatAmount(isPaid ? booking.totalAmount : outstanding),
             style: const TextStyle(
               fontFamily: 'Manrope',
               fontSize: 32,
@@ -406,6 +546,131 @@ class _PaymentScreenState extends State<PaymentScreen> {
               fontWeight: FontWeight.w500,
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPaymentStatus(Booking booking, double outstanding) {
+    final paid = booking.paidAmount;
+    final isPaid = outstanding <= 0.009 || booking.paymentStatus == PaymentStatus.paid;
+
+    return Container(
+      padding: const EdgeInsets.all(17),
+      decoration: BoxDecoration(
+        color: card,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: border),
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: softAccent,
+                  borderRadius: BorderRadius.circular(13),
+                ),
+                child: Icon(
+                  isPaid ? Icons.verified_rounded : Icons.account_balance_wallet_outlined,
+                  color: primary,
+                  size: 21,
+                ),
+              ),
+              const SizedBox(width: 11),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      isPaid ? 'Payment completed' : 'Payment status',
+                      style: const TextStyle(
+                        fontFamily: 'Manrope',
+                        fontSize: 14,
+                        fontWeight: FontWeight.w800,
+                        color: heading,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      isPaid
+                          ? 'This booking has no outstanding balance.'
+                          : '${_formatAmount(outstanding)} remaining',
+                      style: const TextStyle(
+                        fontFamily: 'Manrope',
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: body,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                tooltip: 'Refresh payment status',
+                onPressed: _isProcessing || _isRefreshing ? null : _refreshBooking,
+                icon: _isRefreshing
+                    ? const SizedBox(
+                        width: 19,
+                        height: 19,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: primary,
+                        ),
+                      )
+                    : const Icon(Icons.refresh_rounded, color: primary),
+              ),
+            ],
+          ),
+          const SizedBox(height: 13),
+          const Divider(height: 1, color: border),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(child: _paymentMetric('Paid', _formatAmount(paid))),
+              const SizedBox(width: 10),
+              Expanded(child: _paymentMetric('Balance', _formatAmount(outstanding))),
+            ],
+          ),
+          if (_lastCheckedText != null) ...[
+            const SizedBox(height: 9),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'Last checked $_lastCheckedText',
+                style: const TextStyle(
+                  fontFamily: 'Manrope',
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                  color: muted,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _paymentMetric(String label, String value) {
+    return Container(
+      padding: const EdgeInsets.all(11),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: const TextStyle(
+            fontFamily: 'Manrope', fontSize: 10, color: muted, fontWeight: FontWeight.w600,
+          )),
+          const SizedBox(height: 3),
+          Text(value, style: const TextStyle(
+            fontFamily: 'Manrope', fontSize: 13, color: heading, fontWeight: FontWeight.w900,
+          )),
         ],
       ),
     );
@@ -456,7 +721,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
                         CrossAxisAlignment.start,
                     children: [
                       Text(
-                        'Manual Payment',
+                        'Payment confirmation',
                         style: TextStyle(
                           fontFamily: 'Manrope',
                           fontSize: 14,
@@ -466,7 +731,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
                       ),
                       SizedBox(height: 3),
                       Text(
-                        'Payment will be recorded as completed',
+                        'The payment is recorded in the booking payment ledger.',
                         style: TextStyle(
                           fontFamily: 'Manrope',
                           fontSize: 11,
@@ -501,7 +766,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
         const SizedBox(width: 10),
         Expanded(
           child: Text(
-            'Your booking will be confirmed after completing this payment step.',
+            'Your payment is recorded as a transaction against this booking. When the full balance is paid, the booking is confirmed.',
             style: const TextStyle(
               fontFamily: 'Manrope',
               fontSize: 12,
@@ -516,6 +781,10 @@ class _PaymentScreenState extends State<PaymentScreen> {
   }
 
   Widget _buildBottomBar(double total) {
+    final booking = _activeBooking;
+    final outstanding = _outstandingAmount;
+    final isPaid = outstanding <= 0.009 || booking.paymentStatus == PaymentStatus.paid;
+
     return Container(
       padding: const EdgeInsets.fromLTRB(
         20,
@@ -546,8 +815,8 @@ class _PaymentScreenState extends State<PaymentScreen> {
                   CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text(
-                  'Payable',
+                Text(
+                  isPaid ? 'Paid' : 'Balance',
                   style: TextStyle(
                     fontFamily: 'Manrope',
                     fontSize: 11,
@@ -557,7 +826,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  _formatAmount(total),
+                  _formatAmount(isPaid ? booking.totalAmount : outstanding),
                   style: const TextStyle(
                     fontFamily: 'Manrope',
                     fontSize: 18,
@@ -574,7 +843,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
               height: 54,
               child: ElevatedButton(
                 onPressed:
-                    _isProcessing ? null : _completePayment,
+                    (_isProcessing || _isRefreshing || isPaid) ? null : _completePayment,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: primary,
                   foregroundColor: Colors.white,
@@ -600,9 +869,9 @@ class _PaymentScreenState extends State<PaymentScreen> {
                           ),
                         ),
                       )
-                    : const Text(
-                        'Complete Payment',
-                        style: TextStyle(
+                    : Text(
+                        isPaid ? 'Payment Completed' : 'Complete Payment',
+                        style: const TextStyle(
                           fontFamily: 'Manrope',
                           fontSize: 14,
                           fontWeight: FontWeight.w800,
@@ -744,6 +1013,11 @@ class PaymentSuccessScreen extends StatelessWidget {
           _row(
             'Status',
             'Confirmed',
+          ),
+          const SizedBox(height: 12),
+          _row(
+            'Paid',
+            '₹${booking.paidAmount.toStringAsFixed(0)}',
           ),
         ],
       ),

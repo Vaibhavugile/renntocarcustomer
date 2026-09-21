@@ -79,7 +79,12 @@ class _AdminBookingDetailsScreenState
   bool _loading = true;
   bool _refreshing = false;
   bool _actionBusy = false;
+  bool _paymentsLoading = false;
   String? _error;
+
+  List<PaymentTransaction> _paymentTransactions = <PaymentTransaction>[];
+  DateTime? _lastVerifiedAt;
+  int _loadGeneration = 0;
 
   @override
   void initState() {
@@ -91,11 +96,23 @@ class _AdminBookingDetailsScreenState
   String get _tenantId => AppConfig.tenant.tenantId;
 
   Future<void> _loadAll({bool showLoader = true}) async {
+    final generation = ++_loadGeneration;
+
     if (showLoader && mounted) {
       setState(() {
         _loading = true;
         _error = null;
       });
+    }
+
+    if (_tenantId.trim().isEmpty) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _refreshing = false;
+        _error = 'Tenant configuration is missing.';
+      });
+      return;
     }
 
     try {
@@ -109,27 +126,41 @@ class _AdminBookingDetailsScreenState
           customerId: _booking.customerId,
         ),
         _loadRawCustomer(),
+        _bookingService.getBookingPaymentsForAdmin(
+          tenantId: _tenantId,
+          bookingId: _booking.bookingId,
+        ),
       ]);
+
+      if (!mounted || generation != _loadGeneration) return;
 
       final freshBooking = results[0] as Booking?;
       final customer = results[1] as Customer?;
       final raw = results[2] as Map<String, dynamic>?;
+      final payments = results[3] as List<PaymentTransaction>;
 
-      if (!mounted) return;
+      if (freshBooking == null) {
+        throw Exception('Booking not found.');
+      }
+
+      if (freshBooking.tenantId.isNotEmpty &&
+          freshBooking.tenantId != _tenantId) {
+        throw Exception('Booking does not belong to the active tenant.');
+      }
 
       setState(() {
-        if (freshBooking != null) {
-          _booking = freshBooking;
-        }
+        _booking = freshBooking;
         _customer = customer;
         _customerRaw = raw;
+        _paymentTransactions = payments;
         _loading = false;
         _refreshing = false;
+        _lastVerifiedAt = DateTime.now();
       });
 
       widget.onBookingChanged?.call(_booking);
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || generation != _loadGeneration) return;
 
       setState(() {
         _loading = false;
@@ -160,6 +191,67 @@ class _AdminBookingDetailsScreenState
 
     setState(() => _refreshing = true);
     await _loadAll(showLoader: false);
+  }
+
+  Future<void> _refreshPayments() async {
+    if (_paymentsLoading || _actionBusy) return;
+
+    setState(() => _paymentsLoading = true);
+    try {
+      final payments = await _bookingService.getBookingPaymentsForAdmin(
+        tenantId: _tenantId,
+        bookingId: _booking.bookingId,
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _paymentTransactions = payments;
+        _paymentsLoading = false;
+        _lastVerifiedAt = DateTime.now();
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _paymentsLoading = false);
+      _showMessage(_cleanError(e.toString()), error: true);
+    }
+  }
+
+  String get _lastVerifiedText {
+    final value = _lastVerifiedAt;
+    if (value == null) return 'Not verified yet';
+
+    final seconds = DateTime.now().difference(value).inSeconds;
+    if (seconds < 10) return 'Verified just now';
+    if (seconds < 60) return 'Verified ${seconds}s ago';
+
+    final minutes = seconds ~/ 60;
+    if (minutes < 60) return 'Verified ${minutes}m ago';
+
+    return 'Verified at ${DateFormat('hh:mm a').format(value)}';
+  }
+
+  Future<Booking?> _revalidateBookingBeforeAction() async {
+    final fresh = await _bookingService.getBookingForAdmin(
+      tenantId: _tenantId,
+      bookingId: _booking.bookingId,
+    );
+
+    if (fresh == null) {
+      throw Exception('Booking no longer exists.');
+    }
+
+    if (fresh.tenantId.isNotEmpty && fresh.tenantId != _tenantId) {
+      throw Exception('Booking does not belong to the active tenant.');
+    }
+
+    if (!mounted) return fresh;
+
+    setState(() {
+      _booking = fresh;
+      _lastVerifiedAt = DateTime.now();
+    });
+
+    return fresh;
   }
 
   String _cleanError(String value) {
@@ -302,7 +394,8 @@ class _AdminBookingDetailsScreenState
   bool get _canStartPickup =>
       (_booking.status == BookingStatus.confirmed ||
           _booking.status == BookingStatus.pickupPending) &&
-      _pickupDue;
+      _pickupDue &&
+      _kycVerified;
 
   bool get _canStartReturn =>
       _booking.status == BookingStatus.active;
@@ -330,6 +423,14 @@ class _AdminBookingDetailsScreenState
   }
 
   Future<void> _startPickup() async {
+    if (!_kycVerified) {
+      _showMessage(
+        'Customer KYC must be verified before physical vehicle handover.',
+        error: true,
+      );
+      return;
+    }
+
     if (!_canStartPickup) {
       _showMessage(
         _booking.status == BookingStatus.confirmed
@@ -468,6 +569,10 @@ class _AdminBookingDetailsScreenState
     setState(() => _actionBusy = true);
 
     try {
+      // Always re-read immediately before a lifecycle/payment action.
+      // This prevents acting on stale status data when another admin/device
+      // has changed the booking.
+      await _revalidateBookingBeforeAction();
       await action();
       await _loadAll(showLoader: false);
 
@@ -481,6 +586,258 @@ class _AdminBookingDetailsScreenState
         setState(() => _actionBusy = false);
       }
     }
+  }
+
+
+  // ============================================================
+  // PAYMENT LEDGER ACTIONS
+  // ============================================================
+
+  Future<void> _addPayment() async {
+    if (_actionBusy || _booking.isFinished || !_booking.hasBalance) return;
+
+    final result = await _showPaymentDialog(
+      maxAmount: _booking.balanceAmount,
+      title: 'Record Payment',
+      actionLabel: 'Record Payment',
+    );
+    if (result == null) return;
+
+    setState(() => _actionBusy = true);
+
+    try {
+      await _revalidateBookingBeforeAction();
+
+      final amount = result['amount'] as double;
+      if (amount > _booking.balanceAmount + 0.009) {
+        throw Exception('Payment amount exceeds the current outstanding balance.');
+      }
+
+      await _bookingService.addPaymentForAdmin(
+        tenantId: _tenantId,
+        bookingId: _booking.bookingId,
+        amount: amount,
+        method: result['method'] as PaymentMethodType,
+        transactionReference: result['reference'] as String?,
+        note: result['note'] as String?,
+        paymentDate: DateTime.now(),
+      );
+
+      await _loadAll(showLoader: false);
+
+      if (!mounted) return;
+      _showMessage('Payment recorded in the booking ledger.');
+    } catch (e) {
+      if (!mounted) return;
+      _showMessage(_cleanError(e.toString()), error: true);
+    } finally {
+      if (mounted) setState(() => _actionBusy = false);
+    }
+  }
+
+  Future<void> _refundPayment() async {
+    if (_actionBusy || _booking.paidAmount <= _booking.refundAmount + 0.009) {
+      return;
+    }
+
+    final refundable =
+        (_booking.paidAmount - _booking.refundAmount).clamp(0.0, double.infinity);
+
+    final result = await _showPaymentDialog(
+      maxAmount: refundable,
+      title: 'Record Refund',
+      actionLabel: 'Record Refund',
+      isRefund: true,
+    );
+    if (result == null) return;
+
+    final confirmed = await _confirm(
+      title: 'Confirm refund?',
+      message:
+          'This will create a separate immutable refund transaction and update the booking payment summary.',
+      confirmText: 'Record Refund',
+      color: purple,
+    );
+    if (!confirmed) return;
+
+    setState(() => _actionBusy = true);
+
+    try {
+      await _revalidateBookingBeforeAction();
+
+      final amount = result['amount'] as double;
+      final currentRefundable =
+          (_booking.paidAmount - _booking.refundAmount).clamp(0.0, double.infinity);
+
+      if (amount > currentRefundable + 0.009) {
+        throw Exception('Refund amount exceeds the current refundable amount.');
+      }
+
+      await _bookingService.refundPaymentForAdmin(
+        tenantId: _tenantId,
+        bookingId: _booking.bookingId,
+        amount: amount,
+        method: PaymentMethodType.other,
+        transactionReference: result['reference'] as String?,
+        note: result['note'] as String?,
+        paymentDate: DateTime.now(),
+      );
+
+      await _loadAll(showLoader: false);
+
+      if (!mounted) return;
+      _showMessage('Refund recorded in the payment ledger.');
+    } catch (e) {
+      if (!mounted) return;
+      _showMessage(_cleanError(e.toString()), error: true);
+    } finally {
+      if (mounted) setState(() => _actionBusy = false);
+    }
+  }
+
+  Future<Map<String, dynamic>?> _showPaymentDialog({
+    required double maxAmount,
+    required String title,
+    required String actionLabel,
+    bool isRefund = false,
+  }) async {
+    final amountController = TextEditingController(
+      text: maxAmount.toStringAsFixed(0),
+    );
+    final referenceController = TextEditingController();
+    final noteController = TextEditingController();
+    PaymentMethodType method = PaymentMethodType.cash;
+
+    final result = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              backgroundColor: card,
+              surfaceTintColor: Colors.transparent,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(24),
+              ),
+              title: _text(title, size: 19, weight: FontWeight.w900),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextField(
+                      controller: amountController,
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      decoration: _input(
+                        isRefund ? 'Refund amount' : 'Payment amount',
+                        hint: 'Maximum ${_money(maxAmount)}',
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<PaymentMethodType>(
+                      value: method,
+                      decoration: _input('Method'),
+                      items: const [
+                        DropdownMenuItem(
+                          value: PaymentMethodType.cash,
+                          child: Text('Cash'),
+                        ),
+                        DropdownMenuItem(
+                          value: PaymentMethodType.upi,
+                          child: Text('UPI'),
+                        ),
+                        DropdownMenuItem(
+                          value: PaymentMethodType.card,
+                          child: Text('Card'),
+                        ),
+                        DropdownMenuItem(
+                          value: PaymentMethodType.bankTransfer,
+                          child: Text('Bank Transfer'),
+                        ),
+                        DropdownMenuItem(
+                          value: PaymentMethodType.razorpay,
+                          child: Text('Razorpay'),
+                        ),
+                        DropdownMenuItem(
+                          value: PaymentMethodType.other,
+                          child: Text('Other'),
+                        ),
+                      ],
+                      onChanged: (value) {
+                        if (value != null) {
+                          setDialogState(() => method = value);
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: referenceController,
+                      decoration: _input(
+                        'Transaction reference',
+                        hint: 'Optional',
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: noteController,
+                      maxLines: 3,
+                      decoration: _input(
+                        'Note',
+                        hint: isRefund ? 'Refund reason / gateway note' : 'Payment note',
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext),
+                  child: _text('Cancel', color: muted, weight: FontWeight.w800),
+                ),
+                ElevatedButton(
+                  onPressed: () {
+                    final amount = double.tryParse(amountController.text.trim());
+                    if (amount == null || amount <= 0) return;
+                    if (amount > maxAmount + 0.009) return;
+
+                    Navigator.pop(
+                      dialogContext,
+                      {
+                        'amount': amount,
+                        'method': method,
+                        'reference': referenceController.text.trim().isEmpty
+                            ? null
+                            : referenceController.text.trim(),
+                        'note': noteController.text.trim().isEmpty
+                            ? null
+                            : noteController.text.trim(),
+                      },
+                    );
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: isRefund ? purple : primary,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  child: _text(
+                    actionLabel,
+                    color: Colors.white,
+                    weight: FontWeight.w900,
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    amountController.dispose();
+    referenceController.dispose();
+    noteController.dispose();
+
+    return result;
   }
 
   // ============================================================
@@ -817,6 +1174,17 @@ class _AdminBookingDetailsScreenState
         ],
       ),
       actions: [
+        Padding(
+          padding: const EdgeInsets.only(right: 4),
+          child: Center(
+            child: _text(
+              _lastVerifiedText,
+              size: 9,
+              color: muted,
+              weight: FontWeight.w800,
+            ),
+          ),
+        ),
         if (_refreshing)
           const Padding(
             padding: EdgeInsets.only(right: 18),
@@ -911,6 +1279,8 @@ class _AdminBookingDetailsScreenState
         _pricingCard(),
         const SizedBox(height: 14),
         _paymentCard(),
+        const SizedBox(height: 14),
+        _paymentLedgerCard(),
         const SizedBox(height: 14),
         _branchCard(),
         const SizedBox(height: 14),
@@ -1028,6 +1398,33 @@ class _AdminBookingDetailsScreenState
               return Column(
                 children: [
                   identity,
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      const Icon(
+                        Icons.verified_rounded,
+                        size: 14,
+                        color: success,
+                      ),
+                      const SizedBox(width: 6),
+                      _text(
+                        _lastVerifiedText,
+                        size: 9.5,
+                        color: muted,
+                        weight: FontWeight.w800,
+                      ),
+                      const Spacer(),
+                      if (_refreshing)
+                        const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 1.8,
+                            color: primary,
+                          ),
+                        ),
+                    ],
+                  ),
                   if (compact) ...[
                     const SizedBox(height: 18),
                     Align(
@@ -1269,10 +1666,14 @@ class _AdminBookingDetailsScreenState
       result.add(
         _disabledAction(
           'Pickup Scheduled',
-          _pickupDue
-              ? 'Ready for handover.'
-              : 'Pickup action becomes available when the scheduled pickup time is reached.',
-          Icons.schedule_rounded,
+          !_kycVerified
+              ? 'KYC verification is required before physical handover.'
+              : _pickupDue
+                  ? 'Ready for handover.'
+                  : 'Pickup action becomes available when the scheduled pickup time is reached.',
+          !_kycVerified
+              ? Icons.verified_user_outlined
+              : Icons.schedule_rounded,
         ),
       );
     }
@@ -1885,6 +2286,221 @@ class _AdminBookingDetailsScreenState
         ],
       ),
     );
+  }
+
+
+  Widget _paymentLedgerCard() {
+    final refundable =
+        (_booking.paidAmount - _booking.refundAmount).clamp(0.0, double.infinity);
+
+    return _card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: _sectionTitle(
+                  'Payment Ledger',
+                  'Immutable payment and refund transaction history',
+                  Icons.receipt_long_rounded,
+                ),
+              ),
+              IconButton(
+                tooltip: 'Refresh payment history',
+                onPressed: _paymentsLoading || _actionBusy ? null : _refreshPayments,
+                icon: _paymentsLoading
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: primary,
+                        ),
+                      )
+                    : const Icon(Icons.refresh_rounded, color: body),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: _amountRow(
+                  'Paid',
+                  _booking.paidAmount,
+                  valueColor: success,
+                  strong: true,
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: _amountRow(
+                  'Refunded',
+                  _booking.refundAmount,
+                  valueColor: purple,
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: _amountRow(
+                  'Refundable',
+                  refundable,
+                  valueColor: refundable > 0 ? warning : muted,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          if (!_booking.isFinished && _booking.hasBalance)
+            _actionButton(
+              'Add Payment',
+              'Record an admin-collected payment through the ledger.',
+              Icons.add_card_rounded,
+              primary,
+              _actionBusy ? null : _addPayment,
+            ),
+          if (!_booking.isFinished && refundable > 0) ...[
+            const SizedBox(height: 9),
+            _outlineAction(
+              'Record Refund',
+              Icons.currency_exchange_rounded,
+              purple,
+              _actionBusy ? null : _refundPayment,
+            ),
+          ],
+          const SizedBox(height: 15),
+          const Divider(color: border, height: 1),
+          const SizedBox(height: 12),
+          if (_paymentsLoading)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.all(18),
+                child: CircularProgressIndicator(color: primary),
+              ),
+            )
+          else if (_paymentTransactions.isEmpty)
+            _text(
+              'No ledger transactions recorded for this booking.',
+              size: 11,
+              color: muted,
+              weight: FontWeight.w700,
+            )
+          else
+            ..._paymentTransactions.map(_paymentTransactionTile),
+        ],
+      ),
+    );
+  }
+
+  Widget _paymentTransactionTile(PaymentTransaction transaction) {
+    final refund = transaction.isRefund;
+    final color = refund ? purple : success;
+
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 9),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: border),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _iconBox(
+            refund ? Icons.undo_rounded : Icons.payments_rounded,
+            color,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: _text(
+                        refund ? 'Refund' : 'Payment',
+                        size: 11,
+                        weight: FontWeight.w900,
+                      ),
+                    ),
+                    _text(
+                      '${refund ? '-' : '+'}${_money(transaction.amount)}',
+                      size: 12,
+                      color: color,
+                      weight: FontWeight.w900,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 3),
+                _text(
+                  '${_prettyStatus(_paymentMethodToLabel(transaction.method))}  •  ${_prettyStatus(_paymentSourceToLabel(transaction.source))}',
+                  size: 9.5,
+                  color: muted,
+                  weight: FontWeight.w700,
+                ),
+                if (transaction.transactionReference?.trim().isNotEmpty == true)
+                  _infoRow(
+                    'Reference',
+                    transaction.transactionReference!.trim(),
+                  ),
+                if (transaction.razorpayPaymentId?.trim().isNotEmpty == true)
+                  _infoRow(
+                    'Razorpay Payment',
+                    transaction.razorpayPaymentId!.trim(),
+                  ),
+                if (transaction.note?.trim().isNotEmpty == true)
+                  _text(
+                    transaction.note!.trim(),
+                    size: 9.5,
+                    color: body,
+                    weight: FontWeight.w600,
+                    height: 1.35,
+                  ),
+                if (transaction.paymentDate != null)
+                  _text(
+                    _dateTime(transaction.paymentDate!),
+                    size: 9,
+                    color: muted,
+                    weight: FontWeight.w700,
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _paymentMethodToLabel(PaymentMethodType method) {
+    switch (method) {
+      case PaymentMethodType.razorpay:
+        return 'Razorpay';
+      case PaymentMethodType.cash:
+        return 'Cash';
+      case PaymentMethodType.upi:
+        return 'UPI';
+      case PaymentMethodType.card:
+        return 'Card';
+      case PaymentMethodType.bankTransfer:
+        return 'Bank Transfer';
+      case PaymentMethodType.other:
+        return 'Other';
+    }
+  }
+
+  String _paymentSourceToLabel(PaymentSource source) {
+    switch (source) {
+      case PaymentSource.customer:
+        return 'Customer';
+      case PaymentSource.admin:
+        return 'Admin';
+      case PaymentSource.system:
+        return 'System';
+    }
   }
 
   // ============================================================
@@ -2931,7 +3547,7 @@ class _AdminBookingDetailsScreenState
       case BookingStatus.cancelled:
       case BookingStatus.rejected:
       case BookingStatus.noShow:
-        return status == BookingStatus.pending ? 0 : 1;
+        return 1;
     }
   }
 
