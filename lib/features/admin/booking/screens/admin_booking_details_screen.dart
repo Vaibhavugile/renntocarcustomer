@@ -1,7 +1,13 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'dart:typed_data';
+
 import 'package:intl/intl.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../../core/config/app_config.dart';
@@ -1070,6 +1076,594 @@ class _AdminBookingDetailsScreenState
     }
   }
 
+  // ============================================================
+  // SHARE COMPLETE BOOKING RECEIPT
+  // ============================================================
+
+  Future<void> _shareReceipt() async {
+    if (_actionBusy || !mounted) return;
+
+    setState(() => _actionBusy = true);
+
+    try {
+      // Always re-read the booking before generating the receipt.
+      final fresh = await _revalidateBookingBeforeAction();
+      if (fresh == null) {
+        throw Exception('Booking could not be verified.');
+      }
+
+      final paymentResult =
+          await _bookingService.getBookingPaymentsForAdmin(
+        tenantId: _tenantId,
+        bookingId: _booking.bookingId,
+      );
+
+      Map<String, dynamic>? inspectionData;
+      try {
+        inspectionData =
+            await _bookingService.getInspectionDataForAdmin(
+          tenantId: _tenantId,
+          bookingId: _booking.bookingId,
+        );
+      } catch (_) {
+        // Older bookings may not have inspection data.
+      }
+
+      if (!mounted) return;
+
+      // IMPORTANT:
+      // Generate the real PDF bytes first. Do not open wa.me here because a
+      // WhatsApp web/deep-link can carry text, but it cannot attach these
+      // in-memory PDF bytes.
+      final bytes = await _buildCompleteReceiptPdf(
+        payments: paymentResult,
+        inspectionData: inspectionData,
+      );
+
+      if (bytes.isEmpty) {
+        throw Exception('Generated receipt PDF is empty.');
+      }
+
+      final safeId = _safeFilePart(
+        _booking.bookingId.isEmpty ? 'booking' : _booking.bookingId,
+      );
+      final fileName = 'Rental_Receipt_$safeId.pdf';
+
+      final customerName = _booking.customerName.trim().isEmpty
+          ? 'Customer'
+          : _booking.customerName.trim();
+
+      final shareText =
+          'Hi $customerName, your car rental receipt for booking '
+          '${_booking.bookingId} is attached as a PDF.';
+
+      // Share the actual PDF file as an attachment.
+      //
+      // WhatsApp will appear in the native Android/iOS share targets. When
+      // WhatsApp is selected, the PDF is attached and the message is
+      // pre-filled. This is different from launchUrl(wa.me), which can only
+      // pre-fill text and cannot attach a generated local PDF.
+      await Share.shareXFiles(
+        <XFile>[
+          XFile.fromData(
+            bytes,
+            mimeType: 'application/pdf',
+            name: fileName,
+          ),
+        ],
+        text: shareText,
+        subject: 'Car Rental Receipt - ${_booking.bookingId}',
+      );
+
+      if (!mounted) return;
+      _showMessage('PDF receipt is ready. Select WhatsApp to send it.');
+    } catch (e) {
+      if (!mounted) return;
+      _showMessage(
+        'Unable to create/share receipt: ${_cleanError(e.toString())}',
+        error: true,
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _actionBusy = false);
+      }
+    }
+  }
+
+  String _safeFilePart(String value) {
+    final cleaned = value.replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
+    return cleaned.isEmpty ? 'booking' : cleaned;
+  }
+
+  Future<Uint8List> _buildCompleteReceiptPdf({
+    required List<PaymentTransaction> payments,
+    required Map<String, dynamic>? inspectionData,
+  }) async {
+    final pdf = pw.Document();
+    final b = _booking;
+    final pickupBranch = b.pickupBranch;
+    final returnBranch = b.returnBranch;
+    final pickupInspection = inspectionData?['pickupInspection'];
+    final returnInspection = inspectionData?['returnInspection'];
+
+    String value(dynamic v, [String fallback = '—']) {
+      if (v == null) return fallback;
+      final text = v.toString().trim();
+      return text.isEmpty ? fallback : text;
+    }
+
+    String mapValue(dynamic source, String key, [String fallback = '—']) {
+      if (source is Map) return value(source[key], fallback);
+      return fallback;
+    }
+
+    String money(double amount) => _money(amount);
+
+    String dateValue(DateTime? date) =>
+        date == null ? 'Not recorded' : _dateTime(date);
+
+    List<List<String>> rows(Map<String, String> data) =>
+        data.entries.map((e) => <String>[e.key, e.value]).toList();
+
+    pw.Widget sectionTitle(String title, [String? subtitle]) {
+      return pw.Container(
+        width: double.infinity,
+        margin: const pw.EdgeInsets.only(top: 16, bottom: 8),
+        padding: const pw.EdgeInsets.only(bottom: 6),
+        decoration: const pw.BoxDecoration(
+          border: pw.Border(bottom: pw.BorderSide(color: PdfColors.grey300)),
+        ),
+        child: pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Text(
+              title,
+              style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold),
+            ),
+            if (subtitle != null && subtitle.trim().isNotEmpty)
+              pw.Padding(
+                padding: const pw.EdgeInsets.only(top: 2),
+                child: pw.Text(
+                  subtitle,
+                  style: const pw.TextStyle(
+                    fontSize: 8.5,
+                    color: PdfColors.grey600,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      );
+    }
+
+    pw.Widget infoTable(List<List<String>> data) {
+      return pw.Table(
+        border: pw.TableBorder.all(color: PdfColors.grey300, width: .5),
+        columnWidths: const <int, pw.TableColumnWidth>{
+          0: pw.FlexColumnWidth(1.25),
+          1: pw.FlexColumnWidth(2.75),
+        },
+        children: data
+            .map(
+              (row) => pw.TableRow(
+                children: [
+                  pw.Container(
+                    padding: const pw.EdgeInsets.all(6),
+                    color: PdfColors.grey100,
+                    child: pw.Text(
+                      row[0],
+                      style: pw.TextStyle(
+                        fontSize: 8.5,
+                        fontWeight: pw.FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  pw.Container(
+                    padding: const pw.EdgeInsets.all(6),
+                    child: pw.Text(
+                      row[1],
+                      style: const pw.TextStyle(fontSize: 8.5),
+                    ),
+                  ),
+                ],
+              ),
+            )
+            .toList(),
+      );
+    }
+
+    pw.Widget amountTable(List<List<String>> data) {
+      return pw.Table(
+        border: pw.TableBorder.all(color: PdfColors.grey300, width: .5),
+        columnWidths: const <int, pw.TableColumnWidth>{
+          0: pw.FlexColumnWidth(3),
+          1: pw.FlexColumnWidth(1.2),
+        },
+        children: data
+            .map(
+              (row) => pw.TableRow(
+                children: [
+                  pw.Padding(
+                    padding: const pw.EdgeInsets.all(6),
+                    child: pw.Text(row[0], style: const pw.TextStyle(fontSize: 8.5)),
+                  ),
+                  pw.Padding(
+                    padding: const pw.EdgeInsets.all(6),
+                    child: pw.Align(
+                      alignment: pw.Alignment.centerRight,
+                      child: pw.Text(
+                        row[1],
+                        style: pw.TextStyle(
+                          fontSize: 8.5,
+                          fontWeight: pw.FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            )
+            .toList(),
+      );
+    }
+
+    pw.Widget transactionTable() {
+      if (payments.isEmpty) {
+        return pw.Text(
+          'No payment/refund transactions recorded.',
+          style: const pw.TextStyle(fontSize: 8.5, color: PdfColors.grey600),
+        );
+      }
+
+      return pw.Table(
+        border: pw.TableBorder.all(color: PdfColors.grey300, width: .5),
+        columnWidths: const <int, pw.TableColumnWidth>{
+          0: pw.FlexColumnWidth(1.1),
+          1: pw.FlexColumnWidth(.9),
+          2: pw.FlexColumnWidth(1.1),
+          3: pw.FlexColumnWidth(1.5),
+          4: pw.FlexColumnWidth(1.6),
+        },
+        children: [
+          pw.TableRow(
+            decoration: const pw.BoxDecoration(color: PdfColors.grey100),
+            children: ['Type', 'Amount', 'Method', 'Reference', 'Date / Recorded by']
+                .map(
+                  (h) => pw.Padding(
+                    padding: const pw.EdgeInsets.all(5),
+                    child: pw.Text(
+                      h,
+                      style: pw.TextStyle(fontSize: 7.5, fontWeight: pw.FontWeight.bold),
+                    ),
+                  ),
+                )
+                .toList(),
+          ),
+          ...payments.map(
+            (tx) => pw.TableRow(
+              children: [
+                '${tx.isRefund ? 'Refund' : 'Payment'} • ${_paymentSourceToLabel(tx.source)}',
+                '${tx.isRefund ? '-' : '+'}${money(tx.amount)}',
+                _paymentMethodToLabel(tx.method),
+                value(tx.transactionReference),
+                '${dateValue(tx.paymentDate)}\n${value(tx.recordedBy)}',
+              ]
+                  .map(
+                    (v) => pw.Padding(
+                      padding: const pw.EdgeInsets.all(5),
+                      child: pw.Text(v, style: const pw.TextStyle(fontSize: 7.2)),
+                    ),
+                  )
+                  .toList(),
+            ),
+          ),
+        ],
+      );
+    }
+
+    pw.Widget inspectionTable(String title, dynamic data) {
+      if (data is! Map || data.isEmpty) {
+        return pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            sectionTitle(title),
+            pw.Text(
+              'No inspection record available.',
+              style: const pw.TextStyle(fontSize: 8.5, color: PdfColors.grey600),
+            ),
+          ],
+        );
+      }
+
+      final photos = <String>[];
+      for (final key in ['photos', 'photoUrls', 'vehiclePhotos', 'damagePhotos']) {
+        final raw = data[key];
+        if (raw is List) photos.addAll(raw.map((e) => e.toString()).where((e) => e.trim().isNotEmpty));
+        if (raw is String && raw.trim().isNotEmpty) {
+          photos.addAll(raw.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty));
+        }
+      }
+
+      final damages = <String>[];
+      final damageRaw = data['damages'];
+      if (damageRaw is List) damages.addAll(damageRaw.map((e) => e.toString()));
+      if (damageRaw is String && damageRaw.trim().isNotEmpty) {
+        damages.addAll(damageRaw.split('\n').map((e) => e.trim()).where((e) => e.isNotEmpty));
+      }
+
+      return pw.Column(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          sectionTitle(title),
+          infoTable(rows({
+            'Starting odometer': value(data['odometerStart'], value(data['startingOdometer'])),
+            'Ending odometer': value(data['endingOdometer'], value(data['odometerEnd'])),
+            'Actual KM': value(data['actualKm']),
+            'Included KM': value(data['includedKm']),
+            'Extra KM': value(data['extraKm']),
+            'Fuel level': value(data['fuelLevel']),
+            'Inspected by': value(data['inspectedBy'], value(data['recordedBy'])),
+            'Inspected at': value(data['inspectedAt'], value(data['createdAt'])),
+            'Fuel charge': money(_numberFrom(data['fuelCharge'])),
+            'Damage charge': money(_numberFrom(data['damageCharge'])),
+            'Late charge': money(_numberFrom(data['lateCharge'])),
+            'Other charge': money(_numberFrom(data['otherCharge'])),
+            'Security deposit adjustment': money(_numberFrom(data['securityDepositAdjustment'])),
+            'Notes': value(data['notes'], 'No notes recorded.'),
+            'Customer acknowledgement': value(data['customerAcknowledgement'], 'Not recorded.'),
+            if (damages.isNotEmpty) 'Damages found': damages.join(' • '),
+            if (photos.isNotEmpty) 'Evidence photo URLs': photos.join('\n'),
+          })),
+        ],
+      );
+    }
+
+    final customerName = b.customerName.isNotEmpty
+        ? b.customerName
+        : (_customer?.fullName ?? 'Customer');
+    final customerPhone = b.customerPhone.isNotEmpty
+        ? b.customerPhone
+        : (_customer?.phone ?? '—');
+    final customerEmail = b.customerEmail.isNotEmpty
+        ? b.customerEmail
+        : (_customer?.email ?? '—');
+
+    pdf.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4,
+        margin: const pw.EdgeInsets.fromLTRB(28, 28, 28, 34),
+        header: (context) => pw.Row(
+          mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+          children: [
+            pw.Text(
+              'CAR RENTAL RECEIPT',
+              style: pw.TextStyle(fontSize: 15, fontWeight: pw.FontWeight.bold),
+            ),
+            pw.Text(
+              'Generated ${DateFormat('dd MMM yyyy, hh:mm a').format(DateTime.now())}',
+              style: const pw.TextStyle(fontSize: 7.5, color: PdfColors.grey600),
+            ),
+          ],
+        ),
+        footer: (context) => pw.Align(
+          alignment: pw.Alignment.center,
+          child: pw.Text(
+            'Booking ${b.bookingId} • Page ${context.pageNumber} of ${context.pagesCount}',
+            style: const pw.TextStyle(fontSize: 7, color: PdfColors.grey600),
+          ),
+        ),
+        build: (context) => [
+          pw.SizedBox(height: 8),
+          pw.Container(
+            padding: const pw.EdgeInsets.all(10),
+            decoration: pw.BoxDecoration(
+              border: pw.Border.all(color: PdfColors.grey300),
+              borderRadius: pw.BorderRadius.circular(8),
+            ),
+            child: pw.Row(
+              mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+              children: [
+                pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: [
+                    pw.Text(
+                      b.car?.name.isNotEmpty == true ? b.car!.name : 'Rental Vehicle',
+                      style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold),
+                    ),
+                    pw.SizedBox(height: 3),
+                    pw.Text('Booking ID: ${b.bookingId}', style: const pw.TextStyle(fontSize: 8)),
+                    pw.Text('Status: ${_statusLabel(b.status)}', style: const pw.TextStyle(fontSize: 8)),
+                  ],
+                ),
+                pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.end,
+                  children: [
+                    pw.Text('TOTAL', style: const pw.TextStyle(fontSize: 7, color: PdfColors.grey600)),
+                    pw.Text(
+                      money(b.totalAmount),
+                      style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold),
+                    ),
+                    pw.Text(
+                      '${money(b.paidAmount)} paid • ${money(b.balanceAmount)} due',
+                      style: const pw.TextStyle(fontSize: 7.5),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+
+          sectionTitle('Customer', 'Customer identity attached to this booking'),
+          infoTable(rows({
+            'Name': customerName,
+            'Phone': customerPhone,
+            'Email': customerEmail,
+            'Customer ID': b.customerId,
+            'KYC': _kycLabel,
+            'Profile': _profileStatus,
+            'Driving licence': _licenseStatus,
+            'Government ID': _governmentIdStatus,
+          })),
+
+          sectionTitle('Vehicle', 'Vehicle information captured with the booking'),
+          infoTable(rows({
+            'Vehicle': b.car?.name ?? '—',
+            'Car ID': value(b.car?.carId),
+            'Registration': value(b.car?.registrationNumber),
+            'Rental type': _prettyStatus(b.rentalType),
+            'Included KM': b.unlimitedKm ? 'Unlimited' : '${b.includedKm} KM',
+          })),
+
+          sectionTitle('Rental schedule', 'Scheduled and actual operational timestamps'),
+          infoTable(rows({
+            'Pickup scheduled': _dateTime(b.pickupDateTime),
+            'Actual pickup': dateValue(b.actualPickupDateTime),
+            'Return scheduled': _dateTime(b.returnDateTime),
+            'Actual return': dateValue(b.actualReturnDateTime),
+            'Duration': _durationTextForReceipt(b),
+          })),
+
+          sectionTitle('Pickup branch', 'Pickup location'),
+          infoTable(rows({
+            'Branch': value(pickupBranch?.name),
+            'City': value(pickupBranch?.city),
+            'Address': value(pickupBranch?.address),
+            'Phone': value(pickupBranch?.phone),
+          })),
+
+          sectionTitle('Return branch', 'Return location'),
+          infoTable(rows({
+            'Branch': value(returnBranch?.name),
+            'City': value(returnBranch?.city),
+            'Address': value(returnBranch?.address),
+            'Phone': value(returnBranch?.phone),
+          })),
+
+          sectionTitle('Pricing breakdown', 'Historical pricing snapshot'),
+          amountTable([
+            ['Base rental', money(b.baseAmount)],
+            ['Extra KM', money(b.extraKmAmount)],
+            ['Extra time', money(b.extraTimeAmount)],
+            ['Add-ons', money(b.addOnsAmount)],
+            ['Protection', money(b.protectionAmount)],
+            ['Tax', money(b.taxAmount)],
+            ['Discount', '-${money(b.discountAmount)}'],
+            ['Security deposit', money(b.securityDeposit)],
+            ['Total booking value', money(b.totalAmount)],
+            if ((b.couponCode ?? '').trim().isNotEmpty) ['Coupon', (b.couponCode ?? '').trim()],
+          ]),
+
+          sectionTitle('Payment summary', 'Current booking payment position'),
+          amountTable([
+            ['Total', money(b.totalAmount)],
+            ['Paid', money(b.paidAmount)],
+            ['Refund', money(b.refundAmount)],
+            ['Outstanding', money(b.balanceAmount)],
+            ['Payment status', _paymentLabel(b.paymentStatus)],
+            ['Payment method', value(b.paymentMethod)],
+            ['Payment ID', value(b.paymentId)],
+            ['Order ID', value(b.paymentOrderId)],
+            ['Transaction ID', value(b.paymentTransactionId)],
+          ]),
+
+          sectionTitle('Payment ledger', 'Payment/refund transactions with recording and audit information'),
+          transactionTable(),
+
+          if (payments.any((p) => p.editedBy?.trim().isNotEmpty == true))
+            pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                sectionTitle('Payment edit audit'),
+                ...payments
+                    .where((p) => p.editedBy?.trim().isNotEmpty == true)
+                    .map(
+                      (p) => pw.Padding(
+                        padding: const pw.EdgeInsets.only(bottom: 5),
+                        child: pw.Text(
+                          '${p.paymentId}: Edited by ${_paymentEditorLabel(p)} • ${value(p.editedByRole, 'admin')} • ${dateValue(p.editedAt)}',
+                          style: const pw.TextStyle(fontSize: 8),
+                        ),
+                      ),
+                    ),
+              ],
+            ),
+
+          inspectionTable('Pickup inspection / handover', pickupInspection),
+          inspectionTable('Return inspection', returnInspection),
+
+          sectionTitle('Booking notes', 'Customer and workflow notes'),
+          infoTable(rows({
+            'Customer note': value(b.customerNote, 'No customer note.'),
+            'Cancellation reason': value(b.cancellationReason, '—'),
+            'Rejection reason': value(b.rejectionReason, '—'),
+          })),
+
+          sectionTitle('Admin audit trail', 'Recent administrative changes recorded for this booking'),
+          if (_auditLogs.isEmpty)
+            pw.Text(
+              'No audit entries recorded.',
+              style: const pw.TextStyle(fontSize: 8.5, color: PdfColors.grey600),
+            )
+          else
+            ..._auditLogs.map(
+              (log) => pw.Container(
+                margin: const pw.EdgeInsets.only(bottom: 6),
+                padding: const pw.EdgeInsets.all(7),
+                decoration: pw.BoxDecoration(
+                  border: pw.Border.all(color: PdfColors.grey300),
+                  borderRadius: pw.BorderRadius.circular(6),
+                ),
+                child: pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: [
+                    pw.Text(
+                      '${value(log['adminName'], value(log['adminEmail'], value(log['adminId'], 'Admin')))} • ${_auditDate(log['createdAt'])}',
+                      style: pw.TextStyle(fontSize: 8, fontWeight: pw.FontWeight.bold),
+                    ),
+                    if (value(log['reason'], '').isNotEmpty)
+                      pw.Text('Reason: ${value(log['reason'])}', style: const pw.TextStyle(fontSize: 7.5)),
+                    if (log['before'] is Map || log['after'] is Map)
+                      pw.Text(
+                        'Change: ${value(log['before'], '—')} → ${value(log['after'], '—')}',
+                        style: const pw.TextStyle(fontSize: 7.2, color: PdfColors.grey700),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+
+          pw.SizedBox(height: 14),
+          pw.Container(
+            padding: const pw.EdgeInsets.all(9),
+            decoration: pw.BoxDecoration(
+              color: PdfColors.grey100,
+              borderRadius: pw.BorderRadius.circular(7),
+            ),
+            child: pw.Text(
+              'This receipt is generated from the latest tenant booking record available at the time of sharing. It includes the booking, customer, vehicle, branch, schedule, pricing, payment ledger, inspection information, notes, and administrative audit information available to the system.',
+              style: const pw.TextStyle(fontSize: 7.5, color: PdfColors.grey700),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    return pdf.save();
+  }
+
+  double _numberFrom(dynamic value) {
+    if (value is num) return value.toDouble();
+    return double.tryParse(value?.toString() ?? '') ?? 0;
+  }
+
+  String _durationTextForReceipt(Booking booking) {
+    final duration = booking.returnDateTime.difference(booking.pickupDateTime);
+    if (duration.inMinutes < 60) return '${duration.inMinutes} minutes';
+    if (duration.inHours < 24) return '${duration.inHours} hours';
+    final days = duration.inDays;
+    return '$days ${days == 1 ? 'day' : 'days'}';
+  }
+
   Future<void> _editBookingAmounts() async {
     if (_actionBusy) return;
 
@@ -1257,6 +1851,12 @@ class _AdminBookingDetailsScreenState
             ),
           ),
         ),
+        IconButton(
+          tooltip: 'Share Receipt',
+          onPressed: _actionBusy ? null : _shareReceipt,
+          icon: const Icon(Icons.share_rounded, color: primary),
+        ),
+        const SizedBox(width: 2),
         if (_refreshing)
           const Padding(
             padding: EdgeInsets.only(right: 18),
@@ -3812,7 +4412,7 @@ class _AdminBookingDetailsScreenState
   String _money(double value) {
     final format = NumberFormat.currency(
       locale: 'en_IN',
-      symbol: '₹',
+      symbol: 'Rs ',
       decimalDigits: 0,
     );
     return format.format(value);
@@ -3974,6 +4574,14 @@ class _BookingAmountsEditDialog extends StatefulWidget {
 
 class _BookingAmountsEditDialogState
     extends State<_BookingAmountsEditDialog> {
+  // Keep dialog colors local to this top-level widget. The dialog is outside
+  // _AdminBookingDetailsScreenState, so it must not rely on the parent state's
+  // private color getters/constants.
+  static const Color dialogBackground = Color(0xFFF6F8FB);
+  static const Color dialogBorder = Color(0xFFE7EBF1);
+  static const Color dialogPrimary = Color(0xFF315CF6);
+  static const Color dialogDanger = Color(0xFFEF4444);
+
   final Map<String, TextEditingController> _controllers = {};
   String? _error;
 
@@ -4065,7 +4673,7 @@ class _BookingAmountsEditDialogState
                       fillColor: const Color(0xFFF7F9FC),
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(13),
-                        borderSide: const BorderSide(color: border),
+                        borderSide: const BorderSide(color: dialogBorder),
                       ),
                     ),
                   ),
@@ -4077,7 +4685,7 @@ class _BookingAmountsEditDialogState
                   child: Text(
                     _error!,
                     style: const TextStyle(
-                      color: danger,
+                      color: dialogDanger,
                       fontSize: 12,
                       fontWeight: FontWeight.w700,
                     ),
@@ -4095,7 +4703,7 @@ class _BookingAmountsEditDialogState
         ElevatedButton(
           onPressed: _submit,
           style: ElevatedButton.styleFrom(
-            backgroundColor: primary,
+            backgroundColor: dialogPrimary,
             foregroundColor: Colors.white,
             elevation: 0,
           ),

@@ -2841,6 +2841,68 @@ class BookingService {
         .toList();
   }
 
+  /// Customer-safe inspection read. It validates Firebase ownership before
+  /// returning pickup/return evidence from the tenant booking document.
+  Future<Map<String, dynamic>?> getInspectionDataForCustomer({
+    required String tenantId,
+    required String bookingId,
+  }) async {
+    final booking = await getBooking(
+      tenantId: tenantId,
+      bookingId: bookingId,
+    );
+
+    if (booking == null) return null;
+
+    final doc = await _bookings(tenantId).doc(bookingId).get();
+    if (!doc.exists || doc.data() == null) return null;
+
+    return {
+      'pickupInspection': doc.data()!['pickupInspection'],
+      'returnInspection': doc.data()!['returnInspection'],
+      'odometerStart': doc.data()!['odometerStart'],
+      'odometerEnd': doc.data()!['odometerEnd'],
+      'actualKm': doc.data()!['actualKm'],
+      'includedKm': doc.data()!['includedKm'],
+      'extraKm': doc.data()!['extraKm'],
+      'extraKmCharge': doc.data()!['extraKmCharge'],
+      'fuelCharge': doc.data()!['fuelCharge'],
+      'damageCharge': doc.data()!['damageCharge'],
+      'lateCharge': doc.data()!['lateCharge'],
+      'otherCharge': doc.data()!['otherCharge'],
+      'securityDepositAdjustment': doc.data()!['securityDepositAdjustment'],
+    };
+  }
+
+  /// Customer-safe payment ledger read. Ownership is validated through
+  /// getBooking() before the tenant payment subcollection is queried.
+  Future<List<PaymentTransaction>> getBookingPaymentsForCustomer({
+    required String tenantId,
+    required String bookingId,
+  }) async {
+    final booking = await getBooking(
+      tenantId: tenantId,
+      bookingId: bookingId,
+    );
+
+    if (booking == null) {
+      throw Exception('Booking not found.');
+    }
+
+    final snapshot = await _payments(tenantId, bookingId)
+        .orderBy('paymentDate', descending: true)
+        .get();
+
+    return snapshot.docs
+        .map(
+          (doc) => PaymentTransaction.fromMap(
+            doc.id,
+            doc.data(),
+          ),
+        )
+        .toList();
+  }
+
   Future<Map<String, dynamic>?> getInspectionDataForAdmin({
     required String tenantId,
     required String bookingId,

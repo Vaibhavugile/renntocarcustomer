@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 
 import '../models/booking.dart';
 import '../services/booking_service.dart';
+import 'customer_booking_details_screen.dart';
 
 class MyBookingsScreen extends StatefulWidget {
   final String tenantId;
@@ -858,16 +859,18 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> {
     return NumberFormat('#,##0.00').format(value);
   }
 
-  void _openBookingDetails(Booking booking) {
-    // Booking Details screen will be connected in the next step.
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          'Booking ${booking.bookingId} selected.',
-          style: const TextStyle(fontFamily: 'Manrope'),
+  Future<void> _openBookingDetails(Booking booking) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => CustomerBookingDetailsScreen(
+          booking: booking,
+          tenantId: widget.tenantId,
         ),
-        behavior: SnackBarBehavior.floating,
       ),
     );
+
+    if (mounted) {
+      await _loadBookings();
+    }
   }
 }

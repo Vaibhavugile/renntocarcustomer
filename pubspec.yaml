@@ -52,6 +52,10 @@ dependencies:
   firebase_storage: ^13.5.0
   image_picker: ^1.2.3
   cloud_functions: ^6.5.0
+  pdf: ^3.11.3
+  printing: ^5.14.2
+  http: ^1.5.0
+  share_plus: any
 
 dev_dependencies:
   flutter_test:

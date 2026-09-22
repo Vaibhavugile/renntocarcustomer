@@ -2,6 +2,12 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'dart:developer' as developer;
+import 'dart:typed_data';
+
+import 'package:http/http.dart' as http;
+import 'package:pdf/pdf.dart' as pdf;
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../../../../core/config/app_config.dart';
@@ -75,6 +81,17 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   bool _loadingCalendar = false;
   Car? _selectedCar;
   AdminAvailabilitySnapshot? _availabilitySnapshot;
+
+  // Available-vehicle list controls.
+  final TextEditingController _vehicleSearchController =
+      TextEditingController();
+  String _vehicleTypeFilter = 'All';
+  String _vehicleTransmissionFilter = 'All';
+  String _vehicleFuelFilter = 'All';
+  String _vehicleBranchFilter = 'All';
+  String _vehicleSort = 'sortOrder';
+  final Set<String> _selectedVehicleIds = <String>{};
+  bool _sharingVehiclePdf = false;
 
   // Every calendar load gets a generation number. Older async requests are
   // ignored so a previous vehicle/month can never overwrite the current one.
@@ -1921,12 +1938,9 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   }
 
   @override
-  void dispose() {
-    // Prevent any in-flight availability response from being applied after
-    // this screen has been removed.
-    _availabilityRequestId++;
-    super.dispose();
-  }
+
+
+
 
 
   @override
@@ -3028,34 +3042,941 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     );
   }
 
+
+  List<Car> get _filteredAvailableCars {
+    final query = _vehicleSearchController.text.trim().toLowerCase();
+
+    Iterable<Car> items = _availableCars.where(_isCarAssignedToTenant);
+
+    if (query.isNotEmpty) {
+      items = items.where((car) {
+        final values = <String>[
+          car.id,
+          car.name,
+          car.registrationNumber,
+          car.type,
+          car.transmission,
+          car.fuel,
+          car.pricingProfileId,
+        ];
+        return values.any(
+          (value) => value.toLowerCase().contains(query),
+        );
+      });
+    }
+
+    if (_vehicleTypeFilter != 'All') {
+      items = items.where(
+        (car) => car.type.trim().toLowerCase() ==
+            _vehicleTypeFilter.trim().toLowerCase(),
+      );
+    }
+
+    if (_vehicleTransmissionFilter != 'All') {
+      items = items.where(
+        (car) => car.transmission.trim().toLowerCase() ==
+            _vehicleTransmissionFilter.trim().toLowerCase(),
+      );
+    }
+
+    if (_vehicleFuelFilter != 'All') {
+      items = items.where(
+        (car) =>
+            car.fuel.trim().toLowerCase() ==
+            _vehicleFuelFilter.trim().toLowerCase(),
+      );
+    }
+
+    if (_vehicleBranchFilter != 'All') {
+      items = items.where(
+        (car) => car.branchIds.contains(_vehicleBranchFilter),
+      );
+    }
+
+    final result = items.toList();
+
+    switch (_vehicleSort) {
+      case 'name':
+        result.sort(
+          (a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()),
+        );
+        break;
+      case 'registration':
+        result.sort(
+          (a, b) => a.registrationNumber
+              .toLowerCase()
+              .compareTo(b.registrationNumber.toLowerCase()),
+        );
+        break;
+      case 'type':
+        result.sort(
+          (a, b) => a.type.toLowerCase().compareTo(b.type.toLowerCase()),
+        );
+        break;
+      case 'sortOrder':
+      default:
+        result.sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
+        break;
+    }
+
+    return result;
+  }
+
+  List<String> get _vehicleTypeOptions {
+    final values = _availableCars
+        .map((car) => car.type.trim())
+        .where((value) => value.isNotEmpty)
+        .toSet()
+        .toList();
+    values.sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+    return ['All', ...values];
+  }
+
+  List<String> get _vehicleTransmissionOptions {
+    final values = _availableCars
+        .map((car) => car.transmission.trim())
+        .where((value) => value.isNotEmpty)
+        .toSet()
+        .toList();
+    values.sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+    return ['All', ...values];
+  }
+
+  List<String> get _vehicleFuelOptions {
+    final values = _availableCars
+        .map((car) => car.fuel.trim())
+        .where((value) => value.isNotEmpty)
+        .toSet()
+        .toList();
+    values.sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+    return ['All', ...values];
+  }
+
+  bool get _allVisibleVehiclesSelected {
+    final visible = _filteredAvailableCars;
+    return visible.isNotEmpty &&
+        visible.every((car) => _selectedVehicleIds.contains(car.id));
+  }
+
+  void _toggleVehicleSelection(Car car, bool selected) {
+    setState(() {
+      if (selected) {
+        _selectedVehicleIds.add(car.id);
+      } else {
+        _selectedVehicleIds.remove(car.id);
+      }
+    });
+  }
+
+  void _toggleSelectAllVisible() {
+    final visible = _filteredAvailableCars;
+    if (visible.isEmpty) return;
+
+    setState(() {
+      if (_allVisibleVehiclesSelected) {
+        for (final car in visible) {
+          _selectedVehicleIds.remove(car.id);
+        }
+      } else {
+        for (final car in visible) {
+          _selectedVehicleIds.add(car.id);
+        }
+      }
+    });
+  }
+
+  void _clearVehicleFilters() {
+    setState(() {
+      _vehicleSearchController.clear();
+      _vehicleTypeFilter = 'All';
+      _vehicleTransmissionFilter = 'All';
+      _vehicleFuelFilter = 'All';
+      _vehicleBranchFilter = 'All';
+      _vehicleSort = 'sortOrder';
+    });
+  }
+
+  Future<List<String>> _loadVehicleImageUrls(Car car) async {
+    final urls = <String>[];
+
+    void add(dynamic value) {
+      if (value == null) return;
+
+      if (value is String) {
+        final url = value.trim();
+        if (url.isNotEmpty && url.startsWith('http')) {
+          if (!urls.contains(url)) urls.add(url);
+        }
+        return;
+      }
+
+      if (value is Iterable) {
+        for (final item in value) {
+          add(item);
+        }
+        return;
+      }
+
+      if (value is Map) {
+        // Some older records store image objects with url/downloadURL fields.
+        add(value['url']);
+        add(value['downloadURL']);
+        add(value['downloadUrl']);
+        add(value['image']);
+      }
+    }
+
+    add(car.image);
+
+    try {
+      final doc = await _firestore
+          .collection('tenants')
+          .doc(_tenantId)
+          .collection('cars')
+          .doc(car.id)
+          .get();
+
+      final data = doc.data();
+      if (data != null) {
+        // Support the common image/gallery field names without requiring a
+        // migration of the existing Car model.
+        for (final key in const [
+          'images',
+          'imageUrls',
+          'galleryImages',
+          'gallery',
+          'photos',
+          'photoUrls',
+          'carImages',
+        ]) {
+          add(data[key]);
+        }
+        add(data['image']);
+        add(data['imageUrl']);
+        add(data['imageURL']);
+        add(data['photo']);
+      }
+    } catch (e, stackTrace) {
+      developer.log(
+        'Unable to load vehicle gallery for ${car.id}',
+        name: 'AdminNewBooking',
+        error: e,
+        stackTrace: stackTrace,
+      );
+    }
+
+    return urls;
+  }
+
+  Future<Map<String, dynamic>> _loadVehicleRawDetails(Car car) async {
+    try {
+      final doc = await _firestore
+          .collection('tenants')
+          .doc(_tenantId)
+          .collection('cars')
+          .doc(car.id)
+          .get();
+
+      return doc.data() ?? <String, dynamic>{};
+    } catch (e, stackTrace) {
+      developer.log(
+        'Unable to load raw vehicle details for ${car.id}',
+        name: 'AdminNewBooking',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      return <String, dynamic>{};
+    }
+  }
+
+  Future<Uint8List?> _downloadPdfImage(String url) async {
+    try {
+      final response = await http
+          .get(Uri.parse(url))
+          .timeout(const Duration(seconds: 15));
+
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        return response.bodyBytes;
+      }
+    } catch (e) {
+      developer.log(
+        'Vehicle PDF image download failed: $url',
+        name: 'AdminNewBooking',
+        error: e,
+      );
+    }
+    return null;
+  }
+
+  String _pdfMoney(double value) {
+    if (value == value.roundToDouble()) {
+      return 'Rs ${value.toInt()}';
+    }
+    return 'Rs ${value.toStringAsFixed(2)}';
+  }
+
+  String _pdfSafe(dynamic value) {
+    if (value == null) return '—';
+    final text = value.toString().trim();
+    return text.isEmpty ? '—' : text;
+  }
+
+  Future<void> _shareSelectedVehiclesPdf() async {
+    if (_sharingVehiclePdf) return;
+
+    final selected = _availableCars
+        .where((car) => _selectedVehicleIds.contains(car.id))
+        .toList();
+
+    if (selected.isEmpty) {
+      _showError('Select at least one vehicle to share.');
+      return;
+    }
+
+    setState(() => _sharingVehiclePdf = true);
+
+    try {
+      // Re-check the selected vehicles against the same live availability
+      // engine before generating the document. This prevents a stale list
+      // from being shared as currently available.
+      final snapshot = await _availabilityService.getAvailabilityForRange(
+        rangeStart: _pickupDateTime,
+        rangeEnd: _returnDateTime,
+        tenantId: _tenantId,
+      );
+
+      final freshSelected = <Car>[];
+      for (final selectedCar in selected) {
+        final fresh = snapshot.cars.cast<Car?>().firstWhere(
+          (candidate) => candidate?.id == selectedCar.id,
+          orElse: () => null,
+        );
+
+        if (fresh == null) continue;
+
+        final available = _availabilityService.isCarAvailableForRange(
+          car: fresh,
+          start: _pickupDateTime,
+          end: _returnDateTime,
+          bookings: snapshot.bookings,
+          blocks: snapshot.blocks,
+        );
+
+        if (available && _isCarAssignedToTenant(fresh)) {
+          freshSelected.add(fresh);
+        }
+      }
+
+      if (freshSelected.isEmpty) {
+        _showError(
+          'None of the selected vehicles are still available for this period.',
+        );
+        return;
+      }
+
+      if (freshSelected.length != selected.length && mounted) {
+        final unavailableIds =
+            selected.map((car) => car.id).toSet()
+              ..removeAll(freshSelected.map((car) => car.id));
+        setState(() => _selectedVehicleIds.removeAll(unavailableIds));
+
+        _showError(
+          '${unavailableIds.length} selected vehicle(s) became unavailable. '
+          'The PDF will contain only the vehicles still available.',
+        );
+      }
+
+      final document = pw.Document();
+      final generatedAt = DateTime.now();
+
+      final imageCache = <String, Uint8List>{};
+
+      for (final car in freshSelected) {
+        final imageUrls = await _loadVehicleImageUrls(car);
+        final rawDetails = await _loadVehicleRawDetails(car);
+        final images = <pw.ImageProvider>[];
+
+        for (final url in imageUrls) {
+          final cached = imageCache[url] ?? await _downloadPdfImage(url);
+          if (cached != null) {
+            imageCache[url] = cached;
+            images.add(pw.MemoryImage(cached));
+          }
+        }
+
+        final branchNames = _allBranches
+            .where((branch) => car.branchIds.contains(branch['id']?.toString()))
+            .map((branch) {
+              final name = branch['name']?.toString() ?? '';
+              final city = branch['city']?.toString() ?? '';
+              return city.isEmpty ? name : '$name, $city';
+            })
+            .where((value) => value.trim().isNotEmpty)
+            .toList();
+
+        document.addPage(
+          pw.MultiPage(
+            pageFormat: pdf.PdfPageFormat.a4,
+            margin: pw.EdgeInsets.all(28),
+            header: (context) => pw.Container(
+              margin: pw.EdgeInsets.only(bottom: 12),
+              padding: pw.EdgeInsets.only(bottom: 10),
+              decoration: pw.BoxDecoration(
+                border: pw.Border(
+                  bottom: pw.BorderSide(
+                    color: pdf.PdfColors.grey300,
+                    width: .8,
+                  ),
+                ),
+              ),
+              child: pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                children: [
+                  pw.Text(
+                    'VEHICLE AVAILABILITY',
+                    style: pw.TextStyle(
+                      fontSize: 14,
+                      fontWeight: pw.FontWeight.bold,
+                      color: pdf.PdfColors.teal800,
+                    ),
+                  ),
+                  pw.Text(
+                    'Generated ${_formatDateTime(generatedAt)}',
+                    style: pw.TextStyle(
+                      fontSize: 8,
+                      color: pdf.PdfColors.grey600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            footer: (context) => pw.Align(
+              alignment: pw.Alignment.centerRight,
+              child: pw.Text(
+                'Page ${context.pageNumber} / ${context.pagesCount}',
+                style: pw.TextStyle(
+                  fontSize: 8,
+                  color: pdf.PdfColors.grey600,
+                ),
+              ),
+            ),
+            build: (context) => [
+              pw.Text(
+                car.name,
+                style: pw.TextStyle(
+                  fontSize: 24,
+                  fontWeight: pw.FontWeight.bold,
+                  color: pdf.PdfColors.grey900,
+                ),
+              ),
+              pw.SizedBox(height: 5),
+              pw.Text(
+                '${car.type} • ${car.transmission} • ${car.fuel}',
+                style: pw.TextStyle(
+                  fontSize: 10,
+                  color: pdf.PdfColors.grey600,
+                ),
+              ),
+              pw.SizedBox(height: 14),
+
+              if (images.isNotEmpty) ...[
+                pw.Text(
+                  'Vehicle Images (${images.length})',
+                  style: pw.TextStyle(
+                    fontSize: 13,
+                    fontWeight: pw.FontWeight.bold,
+                  ),
+                ),
+                pw.SizedBox(height: 8),
+                pw.Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: images.map(
+                    (image) => pw.Container(
+                      width: 165,
+                      height: 118,
+                      decoration: pw.BoxDecoration(
+                        border: pw.Border.all(
+                          color: pdf.PdfColors.grey300,
+                        ),
+                      ),
+                      padding: pw.EdgeInsets.all(3),
+                      child: pw.Image(
+                        image,
+                        fit: pw.BoxFit.cover,
+                      ),
+                    ),
+                  ).toList(),
+                ),
+                pw.SizedBox(height: 16),
+              ],
+
+              _pdfVehicleSection(
+                'Vehicle details',
+                [
+                  ['Vehicle name', _pdfSafe(car.name)],
+                  ['Car ID', _pdfSafe(car.id)],
+                  ['Registration number', _pdfSafe(car.registrationNumber)],
+                  ['Vehicle type', _pdfSafe(car.type)],
+                  ['Transmission', _pdfSafe(car.transmission)],
+                  ['Fuel', _pdfSafe(car.fuel)],
+                  ['Seats', _pdfSafe(car.seats)],
+                  ['Pricing profile', _pdfSafe(car.pricingProfileId)],
+                  ['Tenant', _pdfSafe(car.tenantId)],
+                  ['Active', car.isActive ? 'Yes' : 'No'],
+                  ['Sort order', _pdfSafe(car.sortOrder)],
+                  ['Assigned branches', branchNames.isEmpty ? '—' : branchNames.join(' | ')],
+                ],
+              ),
+
+              pw.SizedBox(height: 12),
+              _pdfVehicleSection(
+                'Requested rental period',
+                [
+                  ['Rental type', _rentalTypeLabel],
+                  ['Pickup', _formatDateTime(_pickupDateTime)],
+                  ['Return', _formatDateTime(_returnDateTime)],
+                  ['Availability', 'Available for the selected period'],
+                  [
+                    'Included KM package',
+                    'Will be selected during booking',
+                  ],
+                ],
+              ),
+
+              if (rawDetails.isNotEmpty) ...[
+                pw.SizedBox(height: 12),
+                _pdfVehicleSection(
+                  'Additional vehicle information',
+                  rawDetails.entries
+                      .where((entry) {
+                        final key = entry.key.toLowerCase();
+                        return !const {
+                          'image',
+                          'images',
+                          'imageurl',
+                          'imageurls',
+                          'image_url',
+                          'gallery',
+                          'galleryimages',
+                          'photos',
+                          'photourls',
+                          'carimages',
+                        }.contains(key);
+                      })
+                      .map(
+                        (entry) => [
+                          entry.key,
+                          _pdfSafe(entry.value),
+                        ],
+                      )
+                      .toList(),
+                ),
+              ],
+
+              pw.SizedBox(height: 12),
+              _pdfVehicleSection(
+                'Booking readiness',
+                [
+                  [
+                    'Vehicle selection',
+                    'Available and verified against live availability',
+                  ],
+                  [
+                    'Next step',
+                    'Select this vehicle to continue with branch, customer, KM package and pricing',
+                  ],
+                ],
+              ),
+
+              pw.SizedBox(height: 16),
+              pw.Container(
+                padding: pw.EdgeInsets.all(10),
+                decoration: pw.BoxDecoration(
+                  color: pdf.PdfColors.grey100,
+                  borderRadius: pw.BorderRadius.all(
+                    pw.Radius.circular(6),
+                  ),
+                ),
+                child: pw.Text(
+                  'This document is an availability/fleet presentation generated '
+                  'from the admin booking screen. Final booking availability '
+                  'is revalidated before a booking is created.',
+                  style: pw.TextStyle(
+                    fontSize: 8,
+                    color: pdf.PdfColors.grey700,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      }
+
+      final bytes = await document.save();
+
+      await Printing.sharePdf(
+        bytes: bytes,
+        filename:
+            'available_vehicles_${_pickupDate.year}${_pickupDate.month.toString().padLeft(2, '0')}${_pickupDate.day.toString().padLeft(2, '0')}.pdf',
+      );
+    } catch (e, stackTrace) {
+      developer.log(
+        'Selected vehicle PDF share failed',
+        name: 'AdminNewBooking',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      if (mounted) {
+        _showError('Unable to create the vehicle PDF.');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _sharingVehiclePdf = false);
+      }
+    }
+  }
+
+  pw.Widget _pdfVehicleSection(
+    String title,
+    List<List<String>> rows,
+  ) {
+    return pw.Column(
+      crossAxisAlignment: pw.CrossAxisAlignment.start,
+      children: [
+        pw.Text(
+          title,
+          style: pw.TextStyle(
+            fontSize: 13,
+            fontWeight: pw.FontWeight.bold,
+            color: pdf.PdfColors.teal800,
+          ),
+        ),
+        pw.SizedBox(height: 6),
+        pw.Table(
+          border: pw.TableBorder.all(
+            color: pdf.PdfColors.grey300,
+            width: .6,
+          ),
+          columnWidths: const {
+            0: pw.FlexColumnWidth(1.05),
+            1: pw.FlexColumnWidth(2),
+          },
+          children: rows
+              .map(
+                (row) => pw.TableRow(
+                  children: [
+                    pw.Padding(
+                      padding: pw.EdgeInsets.all(6),
+                      child: pw.Text(
+                        row[0],
+                        style: pw.TextStyle(
+                          fontSize: 8.5,
+                          fontWeight: pw.FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                    pw.Padding(
+                      padding: pw.EdgeInsets.all(6),
+                      child: pw.Text(
+                        row[1],
+                        style: pw.TextStyle(fontSize: 8.5),
+                      ),
+                    ),
+                  ],
+                ),
+              )
+              .toList(),
+        ),
+      ],
+    );
+  }
+
   Widget _buildVehicles() {
+    final visible = _filteredAvailableCars;
+    final selectedCount = _selectedVehicleIds.length;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _summaryCard(
           title: 'Vehicles available',
-          subtitle: '${_formatDateTime(_pickupDateTime)} → ${_formatDateTime(_returnDateTime)}',
+          subtitle:
+              '${_formatDateTime(_pickupDateTime)} → ${_formatDateTime(_returnDateTime)}',
           icon: Icons.directions_car_rounded,
           trailing: '${_availableCars.length}',
         ),
         const SizedBox(height: 14),
+
+        // Search + operational filters.
+        _sectionCard(
+          title: 'Search & filter vehicles',
+          subtitle:
+              'Search the available fleet by vehicle name, registration, ID, type or specifications.',
+          child: Column(
+            children: [
+              TextField(
+                controller: _vehicleSearchController,
+                onChanged: (_) => setState(() {}),
+                decoration: _inputDecoration('Search vehicles').copyWith(
+                  prefixIcon: const Icon(Icons.search_rounded),
+                  suffixIcon: _vehicleSearchController.text.isEmpty
+                      ? null
+                      : IconButton(
+                          tooltip: 'Clear search',
+                          onPressed: () {
+                            _vehicleSearchController.clear();
+                            setState(() {});
+                          },
+                          icon: const Icon(Icons.close_rounded),
+                        ),
+                ),
+              ),
+              const SizedBox(height: 10),
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final twoColumn = constraints.maxWidth >= 620;
+                  final width = twoColumn
+                      ? (constraints.maxWidth - 10) / 2
+                      : constraints.maxWidth;
+
+                  Widget filter<T>({
+                    required String label,
+                    required T value,
+                    required List<T> items,
+                    required ValueChanged<T?> onChanged,
+                  }) {
+                    return SizedBox(
+                      width: width,
+                      child: DropdownButtonFormField<T>(
+                        value: value,
+                        isExpanded: true,
+                        decoration: _inputDecoration(label),
+                        items: items
+                            .map(
+                              (item) => DropdownMenuItem<T>(
+                                value: item,
+                                child: Text(
+                                  item.toString(),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: onChanged,
+                      ),
+                    );
+                  }
+
+                  return Wrap(
+                    spacing: 10,
+                    runSpacing: 10,
+                    children: [
+                      filter<String>(
+                        label: 'Vehicle type',
+                        value: _vehicleTypeFilter,
+                        items: _vehicleTypeOptions,
+                        onChanged: (value) => setState(
+                          () => _vehicleTypeFilter = value ?? 'All',
+                        ),
+                      ),
+                      filter<String>(
+                        label: 'Transmission',
+                        value: _vehicleTransmissionFilter,
+                        items: _vehicleTransmissionOptions,
+                        onChanged: (value) => setState(
+                          () => _vehicleTransmissionFilter = value ?? 'All',
+                        ),
+                      ),
+                      filter<String>(
+                        label: 'Fuel',
+                        value: _vehicleFuelFilter,
+                        items: _vehicleFuelOptions,
+                        onChanged: (value) => setState(
+                          () => _vehicleFuelFilter = value ?? 'All',
+                        ),
+                      ),
+                      filter<String>(
+                        label: 'Branch',
+                        value: _vehicleBranchFilter,
+                        items: [
+                          'All',
+                          ..._allBranches
+                              .map(
+                                (branch) =>
+                                    branch['id']?.toString() ?? '',
+                              )
+                              .where((id) => id.isNotEmpty),
+                        ],
+                        onChanged: (value) => setState(
+                          () => _vehicleBranchFilter = value ?? 'All',
+                        ),
+                      ),
+                      filter<String>(
+                        label: 'Sort by',
+                        value: _vehicleSort,
+                        items: const [
+                          'sortOrder',
+                          'name',
+                          'registration',
+                          'type',
+                        ],
+                        onChanged: (value) => setState(
+                          () => _vehicleSort = value ?? 'sortOrder',
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  TextButton.icon(
+                    onPressed: _clearVehicleFilters,
+                    icon: const Icon(Icons.filter_alt_off_rounded, size: 17),
+                    label: const Text('Clear filters'),
+                  ),
+                  const Spacer(),
+                  Text(
+                    '${visible.length} shown',
+                    style: GoogleFonts.manrope(
+                      color: muted,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+
+        const SizedBox(height: 12),
+
+        // Bulk selection / PDF sharing toolbar.
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: card,
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: border),
+          ),
+          child: Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Checkbox(
+                    value: _allVisibleVehiclesSelected,
+                    onChanged: visible.isEmpty
+                        ? null
+                        : (_) => _toggleSelectAllVisible(),
+                    activeColor: primary,
+                  ),
+                  Text(
+                    'Select all',
+                    style: GoogleFonts.manrope(
+                      color: heading,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ],
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 9,
+                  vertical: 6,
+                ),
+                decoration: BoxDecoration(
+                  color: softAccent,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  '$selectedCount selected',
+                  style: GoogleFonts.manrope(
+                    color: primary,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+              ElevatedButton.icon(
+                onPressed: selectedCount == 0 || _sharingVehiclePdf
+                    ? null
+                    : _shareSelectedVehiclesPdf,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: primary,
+                  foregroundColor: Colors.white,
+                  disabledBackgroundColor: border,
+                  disabledForegroundColor: muted,
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 13,
+                    vertical: 11,
+                  ),
+                ),
+                icon: _sharingVehiclePdf
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.picture_as_pdf_rounded, size: 17),
+                label: Text(
+                  _sharingVehiclePdf
+                      ? 'Creating PDF...'
+                      : 'Share selected',
+                ),
+              ),
+            ],
+          ),
+        ),
+
+        const SizedBox(height: 14),
+
         if (_availableCars.isEmpty)
-          _emptyCard('No vehicles available', 'Try another rental period.'),
-        ..._availableCars.map(_vehicleCard),
+          _emptyCard(
+            'No vehicles available',
+            'Try another rental period.',
+          )
+        else if (visible.isEmpty)
+          _emptyCard(
+            'No matching vehicles',
+            'Change the search or filters to see available vehicles.',
+          )
+        else
+          ...visible.map(_vehicleCard),
       ],
     );
   }
 
   Widget _vehicleCard(Car car) {
+    final selected = _selectedVehicleIds.contains(car.id);
+
     return GestureDetector(
       onTap: () => _selectVehicle(car),
       child: Container(
         margin: const EdgeInsets.only(bottom: 11),
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
-          color: card,
+          color: selected ? softAccent : card,
           borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: border),
+          border: Border.all(
+            color: selected ? primary : border,
+            width: selected ? 1.4 : 1,
+          ),
           boxShadow: const [
             BoxShadow(
               color: Color(0x10000000),
@@ -3066,30 +3987,68 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
         ),
         child: Row(
           children: [
+            Checkbox(
+              value: selected,
+              onChanged: (value) =>
+                  _toggleVehicleSelection(car, value ?? false),
+              activeColor: primary,
+            ),
             _carImage(car, 88, 70),
             const SizedBox(width: 13),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(car.name, style: GoogleFonts.manrope(color: heading, fontSize: 15, fontWeight: FontWeight.w900)),
+                  Text(
+                    car.name,
+                    style: GoogleFonts.manrope(
+                      color: heading,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
                   const SizedBox(height: 4),
                   Text(
-                    car.registrationNumber.isEmpty ? '${car.type} • ${car.transmission}' : car.registrationNumber,
-                    style: GoogleFonts.manrope(color: body, fontSize: 11, fontWeight: FontWeight.w600),
+                    car.registrationNumber.isEmpty
+                        ? '${car.type} • ${car.transmission}'
+                        : car.registrationNumber,
+                    style: GoogleFonts.manrope(
+                      color: body,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                   const SizedBox(height: 9),
-                  Row(
+                  Wrap(
+                    spacing: 5,
+                    runSpacing: 5,
                     children: [
-                      _tag(Icons.people_outline_rounded, '${car.seats}'),
-                      const SizedBox(width: 5),
-                      _tag(Icons.local_gas_station_outlined, car.fuel),
+                      _tag(
+                        Icons.badge_outlined,
+                        car.id,
+                      ),
+                      _tag(
+                        Icons.people_outline_rounded,
+                        '${car.seats}',
+                      ),
+                      _tag(
+                        Icons.local_gas_station_outlined,
+                        car.fuel,
+                      ),
+                      _tag(
+                        Icons.settings_rounded,
+                        car.transmission,
+                      ),
                     ],
                   ),
                 ],
               ),
             ),
-            const Icon(Icons.chevron_right_rounded, color: muted),
+            const SizedBox(width: 8),
+            const Icon(
+              Icons.chevron_right_rounded,
+              color: muted,
+            ),
           ],
         ),
       ),

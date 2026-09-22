@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/config/app_config.dart';
 import '../../booking/screens/my_bookings_screen.dart';
 import '../../customer/screens/profile_screen.dart';
+import 'explore_screen.dart';
 import '../widgets/active_booking.dart';
 import '../widgets/featured_cars.dart';
 import '../widgets/home_bottom_nav.dart';
@@ -19,19 +21,24 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  // Keep the tenant explicit here for the current white-label prototype.
-  // This will later come from the app/bootstrap configuration.
-  static const String _tenantId = 'tenant_001';
-
   static const Color background = Color(0xFFF8FAF9);
   static const Color softAccent = Color(0xFFE6FFFB);
   static const Color primary = Color(0xFF0F766E);
   static const Color heading = Color(0xFF17201F);
   static const Color body = Color(0xFF66706E);
 
+  String get _tenantId {
+    try {
+      return AppConfig.tenant.tenantId.trim();
+    } catch (_) {
+      return '';
+    }
+  }
+
   int _selectedNav = 0;
 
-  // Ready for the real Firebase booking count later.
+  // Kept here for the current bottom-nav API.
+  // Replace with a live booking-count stream later if desired.
   int _bookingCount = 0;
 
   @override
@@ -45,14 +52,13 @@ class _HomeScreenState extends State<HomeScreen> {
           children: [
             _buildHome(),
 
-            _buildPlaceholder(
-              icon: Icons.directions_car_outlined,
-              title: 'Explore',
-              subtitle: 'Discover your next ride.',
+            // REAL CUSTOMER EXPLORE
+            ExploreScreen(
+              tenantId: _tenantId,
             ),
 
             // REAL CUSTOMER BOOKINGS
-            const MyBookingsScreen(
+            MyBookingsScreen(
               tenantId: _tenantId,
             ),
 
@@ -61,8 +67,6 @@ class _HomeScreenState extends State<HomeScreen> {
           ],
         ),
       ),
-
-      // Bottom navigation remains controlled by HomeScreen.
       bottomNavigationBar: HomeBottomNav(
         selectedIndex: _selectedNav,
         bookingCount: _bookingCount,
@@ -92,31 +96,24 @@ class _HomeScreenState extends State<HomeScreen> {
         SliverToBoxAdapter(
           child: HomeHeader(),
         ),
-
         SliverToBoxAdapter(
           child: HomeHero(),
         ),
-
         SliverToBoxAdapter(
           child: HomeSearch(),
         ),
-
         SliverToBoxAdapter(
           child: HomeCategories(),
         ),
-
         SliverToBoxAdapter(
           child: ActiveBooking(),
         ),
-
         SliverToBoxAdapter(
           child: FeaturedCars(),
         ),
-
         SliverToBoxAdapter(
           child: WhyChooseUs(),
         ),
-
         SliverToBoxAdapter(
           child: SizedBox(height: 32),
         ),
