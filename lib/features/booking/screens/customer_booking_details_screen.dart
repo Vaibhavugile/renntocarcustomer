@@ -622,6 +622,9 @@ class _CustomerBookingDetailsScreenState
           _amountRow('Tax', _booking.taxAmount),
           _amountRow('Discount', -_booking.discountAmount, valueColor: success),
           _amountRow('Security deposit', _booking.securityDeposit),
+          _detailWidget('Deposit type', _depositLabel(_booking.securityDepositType)),
+          if (_booking.securityDepositDetails.trim().isNotEmpty)
+            _detailWidget('Deposit details', _booking.securityDepositDetails.trim()),
           const Divider(color: border, height: 20),
           _amountRow('Total booking value', _booking.totalAmount, strong: true),
           if ((_booking.couponCode ?? '').trim().isNotEmpty) _infoRow('Coupon', _booking.couponCode ?? '', valueColor: success),
@@ -950,6 +953,53 @@ class _CustomerBookingDetailsScreenState
     return ClipRRect(borderRadius: BorderRadius.circular(15), child: SizedBox(width: 112, height: 88, child: image.isEmpty ? Container(color: background, child: const Icon(Icons.directions_car_filled_rounded, color: muted, size: 34)) : Image.network(image, fit: BoxFit.cover, errorBuilder: (_, __, ___) => Container(color: background, child: const Icon(Icons.directions_car_filled_rounded, color: muted, size: 34)))));
   }
 
+  Widget _detailWidget(
+    String label,
+    String value, {
+    Color? valueColor,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(11),
+        border: Border.all(color: border),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: _text(label, size: 8.5, color: muted, weight: FontWeight.w800),
+          ),
+          const SizedBox(width: 8),
+          Flexible(
+            child: _text(
+              value,
+              size: 10.5,
+              color: valueColor ?? heading,
+              weight: FontWeight.w900,
+              align: TextAlign.right,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _depositLabel(String type) {
+    switch (type.trim().toLowerCase()) {
+      case 'cash': return 'Cash';
+      case 'upi': return 'UPI';
+      case 'bank_transfer': return 'Bank Transfer';
+      case 'bike': return 'Bike';
+      case 'car': return 'Car';
+      case 'other': return 'Other';
+      case 'none':
+      case '': return 'No Deposit';
+      default: return _pretty(type);
+    }
+  }
+
   Widget _text(String value, {double size = 12, Color color = heading, FontWeight weight = FontWeight.w700, TextAlign align = TextAlign.left, double height = 1.2, double letterSpacing = 0}) {
     return Text(value, textAlign: align, style: TextStyle(fontFamily: 'Manrope', fontSize: size, fontWeight: weight, color: color, height: height, letterSpacing: letterSpacing));
   }
@@ -1240,6 +1290,26 @@ class _CustomerInspectionDialog extends StatelessWidget {
         );
       },
     );
+  }
+
+  String _depositLabel(String type) {
+    switch (type.trim().toLowerCase()) {
+      case 'cash':
+        return 'Cash';
+      case 'upi':
+        return 'UPI';
+      case 'bank_transfer':
+        return 'Bank Transfer';
+      case 'bike':
+        return 'Bike';
+      case 'car':
+        return 'Car';
+      case 'other':
+        return 'Other';
+      case 'none':
+      default:
+        return 'No Deposit';
+    }
   }
 
   Widget _detailGrid(List<_CustomerDetail> details) {

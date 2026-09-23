@@ -285,6 +285,137 @@ class _PaymentScreenState extends State<PaymentScreen> {
     return '${date.day} ${months[date.month - 1]} ${date.year}';
   }
 
+
+  String _depositLabel(String type) {
+    switch (type.trim().toLowerCase()) {
+      case 'cash':
+        return 'Cash';
+      case 'upi':
+        return 'UPI';
+      case 'bank_transfer':
+        return 'Bank Transfer';
+      case 'bike':
+        return 'Bike';
+      case 'car':
+        return 'Car';
+      case 'other':
+        return 'Other';
+      case 'none':
+      case '':
+        return 'No Deposit';
+      default:
+        return type
+            .replaceAll('_', ' ')
+            .split(' ')
+            .where((e) => e.isNotEmpty)
+            .map((e) => '${e[0].toUpperCase()}${e.substring(1)}')
+            .join(' ');
+    }
+  }
+
+  bool _isMonetaryDeposit(Booking booking) {
+    final type = booking.securityDepositType.trim().toLowerCase();
+    return type == 'cash' || type == 'upi' || type == 'bank_transfer';
+  }
+
+  Widget _buildSecurityDeposit(Booking booking) {
+    final type = booking.securityDepositType.trim().toLowerCase();
+    final amount = booking.securityDeposit;
+    final details = booking.securityDepositDetails.trim();
+    final hasDeposit = type.isNotEmpty && type != 'none';
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: card,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Security deposit',
+            style: TextStyle(
+              fontFamily: 'Manrope',
+              fontSize: 16,
+              fontWeight: FontWeight.w800,
+              color: heading,
+            ),
+          ),
+          const SizedBox(height: 5),
+          Text(
+            hasDeposit
+                ? 'Deposit is kept separate from the rental charges.'
+                : 'No security deposit selected.',
+            style: const TextStyle(
+              fontFamily: 'Manrope',
+              fontSize: 11,
+              color: body,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: 14),
+          _depositRow('Deposit type', _depositLabel(type)),
+          if (hasDeposit && _isMonetaryDeposit(booking)) ...[
+            const SizedBox(height: 10),
+            _depositRow('Deposit amount', _formatAmount(amount)),
+          ],
+          if (hasDeposit && details.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            _depositRow('Deposit details', details),
+          ],
+          if (hasDeposit && !_isMonetaryDeposit(booking) &&
+              details.isEmpty) ...[
+            const SizedBox(height: 10),
+            const Text(
+              'No monetary deposit amount is attached to this deposit type.',
+              style: TextStyle(
+                fontFamily: 'Manrope',
+                fontSize: 11,
+                color: muted,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _depositRow(String label, String value) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: Text(
+            label,
+            style: const TextStyle(
+              fontFamily: 'Manrope',
+              fontSize: 12,
+              color: body,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+        const SizedBox(width: 14),
+        Flexible(
+          child: Text(
+            value,
+            textAlign: TextAlign.right,
+            style: const TextStyle(
+              fontFamily: 'Manrope',
+              fontSize: 13,
+              color: heading,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final booking = _activeBooking;
@@ -348,6 +479,8 @@ class _PaymentScreenState extends State<PaymentScreen> {
                     _buildBookingSummary(booking),
                     const SizedBox(height: 20),
                     _buildAmountCard(total, outstanding),
+                    const SizedBox(height: 20),
+                    _buildSecurityDeposit(booking),
                     const SizedBox(height: 20),
                     _buildPaymentStatus(booking, outstanding),
                     const SizedBox(height: 20),
@@ -538,7 +671,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
           ),
           const SizedBox(height: 5),
           const Text(
-            'Including applicable charges and security deposit',
+            'Final amount payable for this booking',
             style: TextStyle(
               fontFamily: 'Manrope',
               fontSize: 12,
@@ -546,6 +679,18 @@ class _PaymentScreenState extends State<PaymentScreen> {
               fontWeight: FontWeight.w500,
             ),
           ),
+          if (booking.securityDeposit > 0) ...[
+            const SizedBox(height: 10),
+            Text(
+              'Security deposit included: ${_formatAmount(booking.securityDeposit)}',
+              style: const TextStyle(
+                fontFamily: 'Manrope',
+                fontSize: 11,
+                color: Colors.white70,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -766,7 +911,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
         const SizedBox(width: 10),
         Expanded(
           child: Text(
-            'Your payment is recorded as a transaction against this booking. When the full balance is paid, the booking is confirmed.',
+            'Your payment is recorded as a transaction against this booking. The security deposit is tracked separately from the rental charges, and the full payable balance is shown above.',
             style: const TextStyle(
               fontFamily: 'Manrope',
               fontSize: 12,

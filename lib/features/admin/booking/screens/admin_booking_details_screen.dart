@@ -1664,6 +1664,126 @@ class _AdminBookingDetailsScreenState
     return '$days ${days == 1 ? 'day' : 'days'}';
   }
 
+  Future<void> _editTotalBookingAmount() async {
+    if (_actionBusy) return;
+
+    final result = await showDialog<double>(
+      context: context,
+      useRootNavigator: true,
+      barrierDismissible: false,
+      builder: (_) => _SingleAmountEditDialog(
+        title: 'Edit Total Booking Amount',
+        label: 'Total booking value',
+        initialAmount: _booking.totalAmount,
+      ),
+    );
+
+    if (result == null || !mounted) return;
+    if ((result - _booking.totalAmount).abs() <= 0.009) {
+      _showMessage('No total amount change was made.');
+      return;
+    }
+
+    final confirmed = await _confirm(
+      title: 'Update total booking amount?',
+      message:
+          'The booking total will be changed and the paid, refund, balance, payment status, and admin audit will be recalculated from the new total.',
+      confirmText: 'Update Total',
+      color: primary,
+    );
+    if (!confirmed || !mounted) return;
+
+    final reasonController = TextEditingController();
+    final reason = await showDialog<String>(
+      context: context,
+      useRootNavigator: true,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: card,
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+        ),
+        title: _text(
+          'Reason for total change',
+          size: 18,
+          weight: FontWeight.w900,
+        ),
+        content: TextField(
+          controller: reasonController,
+          maxLines: 3,
+          decoration: InputDecoration(
+            hintText: 'Example: Corrected rental total / admin adjustment',
+            filled: true,
+            fillColor: background,
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(14),
+              borderSide: const BorderSide(color: border),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: _text('Cancel', color: muted, weight: FontWeight.w800),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(dialogContext).pop(
+              reasonController.text.trim().isEmpty
+                  ? 'Admin updated total booking amount'
+                  : reasonController.text.trim(),
+            ),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: primary,
+              foregroundColor: Colors.white,
+              elevation: 0,
+            ),
+            child: _text(
+              'Continue',
+              color: Colors.white,
+              weight: FontWeight.w900,
+            ),
+          ),
+        ],
+      ),
+    );
+    reasonController.dispose();
+
+    if (reason == null || !mounted) return;
+    if (_actionBusy) return;
+
+    setState(() => _actionBusy = true);
+    try {
+      await _revalidateBookingBeforeAction();
+
+      await _bookingService.updateBookingAmountsForAdmin(
+        tenantId: _tenantId,
+        bookingId: _booking.bookingId,
+        amounts: {
+          'baseAmount': _booking.baseAmount,
+          'extraKmAmount': _booking.extraKmAmount,
+          'extraTimeAmount': _booking.extraTimeAmount,
+          'addOnsAmount': _booking.addOnsAmount,
+          'protectionAmount': _booking.protectionAmount,
+          'taxAmount': _booking.taxAmount,
+          'discountAmount': _booking.discountAmount,
+          'securityDeposit': _booking.securityDeposit,
+          'totalAmount': result,
+        },
+        reason: reason,
+      );
+
+      await _loadAll(showLoader: false);
+      if (!mounted) return;
+      _showMessage('Total booking amount updated. Payment balance recalculated.');
+    } catch (e) {
+      if (!mounted) return;
+      _showMessage(_cleanError(e.toString()), error: true);
+    } finally {
+      if (mounted) setState(() => _actionBusy = false);
+    }
+  }
+
   Future<void> _editBookingAmounts() async {
     if (_actionBusy) return;
 
@@ -3083,6 +3203,11 @@ class _AdminBookingDetailsScreenState
                 ),
               ),
               IconButton(
+                tooltip: 'Edit total booking amount',
+                onPressed: _actionBusy ? null : _editTotalBookingAmount,
+                icon: const Icon(Icons.edit_note_rounded, color: primary),
+              ),
+              IconButton(
                 tooltip: 'Refresh payment history',
                 onPressed: _paymentsLoading || _actionBusy ? null : _refreshPayments,
                 icon: _paymentsLoading
@@ -3128,13 +3253,15 @@ class _AdminBookingDetailsScreenState
             ],
           ),
           const SizedBox(height: 10),
-          if (!_booking.isFinished && _booking.hasBalance)
+          if (!_booking.isFinished)
             _actionButton(
-              'Add Payment',
-              'Record an admin-collected payment through the ledger.',
+              _booking.hasBalance ? 'Add Payment' : 'Add Payment',
+              _booking.hasBalance
+                  ? 'Record another partial or full payment through the ledger.'
+                  : 'Fully paid. Edit the total amount if another payment becomes due.',
               Icons.add_card_rounded,
               primary,
-              _actionBusy ? null : _addPayment,
+              _actionBusy || !_booking.hasBalance ? null : _addPayment,
             ),
           if (!_booking.isFinished && refundable > 0) ...[
             const SizedBox(height: 9),
@@ -3163,13 +3290,18 @@ class _AdminBookingDetailsScreenState
               weight: FontWeight.w700,
             )
           else
-            ..._paymentTransactions.map(_paymentTransactionTile),
+            ..._paymentTransactions.asMap().entries.map(
+              (entry) => _paymentTransactionTile(
+                entry.value,
+                sequence: _paymentTransactions.length - entry.key,
+              ),
+            ),
         ],
       ),
     );
   }
 
-  Widget _paymentTransactionTile(PaymentTransaction transaction) {
+  Widget _paymentTransactionTile(PaymentTransaction transaction, {int? sequence}) {
     final refund = transaction.isRefund;
     final color = refund ? purple : success;
 
@@ -3198,7 +3330,7 @@ class _AdminBookingDetailsScreenState
                   children: [
                     Expanded(
                       child: _text(
-                        refund ? 'Refund' : 'Payment',
+                        '${refund ? 'Refund' : 'Payment'}${sequence == null ? '' : ' #$sequence'}',
                         size: 11,
                         weight: FontWeight.w900,
                       ),
@@ -4562,6 +4694,108 @@ class _AdminBookingDetailsScreenState
 
 }
 
+class _SingleAmountEditDialog extends StatefulWidget {
+  const _SingleAmountEditDialog({
+    required this.title,
+    required this.label,
+    required this.initialAmount,
+  });
+
+  final String title;
+  final String label;
+  final double initialAmount;
+
+  @override
+  State<_SingleAmountEditDialog> createState() => _SingleAmountEditDialogState();
+}
+
+class _SingleAmountEditDialogState extends State<_SingleAmountEditDialog> {
+  static const Color primaryColor = Color(0xFF315CF6);
+  static const Color borderColor = Color(0xFFE7EBF1);
+  static const Color backgroundColor = Color(0xFFF6F8FB);
+  static const Color dangerColor = Color(0xFFEF4444);
+
+  late final TextEditingController _controller;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(
+      text: widget.initialAmount.toStringAsFixed(2),
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final value = double.tryParse(_controller.text.trim());
+    if (value == null || !value.isFinite || value < 0) {
+      setState(() => _error = 'Enter a valid non-negative amount.');
+      return;
+    }
+    FocusManager.instance.primaryFocus?.unfocus();
+    Navigator.of(context, rootNavigator: true).pop(value);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: Colors.white,
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(24),
+      ),
+      title: Text(
+        widget.title,
+        style: const TextStyle(fontWeight: FontWeight.w900),
+      ),
+      content: SizedBox(
+        width: 430,
+        child: TextField(
+          controller: _controller,
+          autofocus: true,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: InputDecoration(
+            labelText: widget.label,
+            prefixText: '₹ ',
+            filled: true,
+            fillColor: backgroundColor,
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(14),
+              borderSide: const BorderSide(color: borderColor),
+            ),
+            errorText: _error,
+          ),
+          onSubmitted: (_) => _submit(),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context, rootNavigator: true).pop(),
+          child: const Text('Cancel'),
+        ),
+        ElevatedButton(
+          onPressed: _submit,
+          style: ElevatedButton.styleFrom(
+            backgroundColor: primaryColor,
+            foregroundColor: Colors.white,
+            elevation: 0,
+          ),
+          child: const Text(
+            'Continue',
+            style: TextStyle(fontWeight: FontWeight.w900),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class _BookingAmountsEditDialog extends StatefulWidget {
   const _BookingAmountsEditDialog({required this.booking});
 
@@ -5580,9 +5814,7 @@ class _PaymentEntryDialogState extends State<_PaymentEntryDialog> {
   @override
   void initState() {
     super.initState();
-    _amountController = TextEditingController(
-      text: widget.maxAmount.toStringAsFixed(0),
-    );
+    _amountController = TextEditingController();
     _referenceController = TextEditingController();
     _noteController = TextEditingController();
   }
@@ -5710,7 +5942,7 @@ class _PaymentEntryDialogState extends State<_PaymentEntryDialog> {
                     SizedBox(width: 9),
                     Expanded(
                       child: Text(
-                        'This payment will be recorded in the booking payment ledger.',
+                        'This payment will be recorded as a separate ledger transaction. You can record multiple partial payments until the outstanding balance is cleared.',
                         style: TextStyle(
                           fontSize: 11,
                           fontWeight: FontWeight.w700,

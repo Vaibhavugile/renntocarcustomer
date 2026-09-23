@@ -730,7 +730,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> {
                     ),
                     Text(
                       '₹${_money(booking.totalAmount)}',
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontFamily: 'Manrope',
                         fontSize: 14,
                         fontWeight: FontWeight.w800,

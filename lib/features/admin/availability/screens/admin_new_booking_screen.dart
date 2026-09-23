@@ -777,6 +777,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     _invalidateAvailabilityCalendar();
 
     _availableCars = [];
+    _selectedVehicleIds.clear();
     _selectedCar = null;
     _selectedBranchId = null;
     _pricingProfile = null;
@@ -831,6 +832,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       setState(() {
         _fleetCars = fleet;
         _availableCars = available;
+        _selectedVehicleIds.clear();
         _availabilitySnapshot = snapshot;
         _selectedCar = null;
         _selectedBranchId = null;
@@ -1464,8 +1466,9 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     _adminTotal = result.total;
     _adminTotalManuallyEdited = false;
     if (_depositMethod == 'none' ||
-        _depositMethod == 'vehicle_asset' ||
-        _depositMethod == 'other_asset') {
+        _depositMethod == 'bike' ||
+        _depositMethod == 'car' ||
+        _depositMethod == 'other') {
       _depositAmount = 0;
     } else if (_depositAmount <= 0) {
       _depositAmount = result.securityDeposit;
@@ -1713,7 +1716,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       return;
     }
 
-    if ((_depositMethod == 'vehicle_asset' || _depositMethod == 'other_asset') &&
+    if ((_depositMethod == 'bike' || _depositMethod == 'car' || _depositMethod == 'other') &&
         _depositAssetDetails.trim().isEmpty) {
       _showError('Please enter the security asset details.');
       return;
@@ -1848,6 +1851,8 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       discountAmount: _effectiveDiscountAmount,
       taxAmount: _effectiveTaxAmount,
       securityDeposit: depositAmount,
+      securityDepositType: _depositMethod,
+      securityDepositDetails: _depositAssetDetails.trim(),
       // totalAmount is the full receivable for this booking, including a monetary security deposit.
       totalAmount: _effectiveAmountPayable,
       pricing: pricingSnapshot,
@@ -1862,7 +1867,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
         'Rental Type: $_rentalTypeLabel',
         'Deposit Method: $_depositMethod',
         if (depositAmount > 0) 'Deposit Amount: ${depositAmount.toStringAsFixed(2)}',
-        if (_depositAssetDetails.trim().isNotEmpty) 'Deposit Asset: ${_depositAssetDetails.trim()}',
+        if (_depositAssetDetails.trim().isNotEmpty) 'Deposit Details: ${_depositAssetDetails.trim()}',
         if (_bookingNote.trim().isNotEmpty) 'Admin Note: ${_bookingNote.trim()}',
       ].join('\n'),
       cancellationReason: '',
@@ -3692,6 +3697,49 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     );
   }
 
+  Future<void> _openVehicleFilters() async {
+    FocusScope.of(context).unfocus();
+
+    final result = await showModalBottomSheet<Map<String, String>>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _VehicleFilterSheet(
+        typeValue: _vehicleTypeFilter,
+        transmissionValue: _vehicleTransmissionFilter,
+        fuelValue: _vehicleFuelFilter,
+        branchValue: _vehicleBranchFilter,
+        sortValue: _vehicleSort,
+        typeOptions: _vehicleTypeOptions,
+        transmissionOptions: _vehicleTransmissionOptions,
+        fuelOptions: _vehicleFuelOptions,
+        branchOptions: [
+          'All',
+          ..._allBranches
+              .map((branch) => branch['id']?.toString() ?? '')
+              .where((id) => id.isNotEmpty),
+        ],
+        branchLabels: {
+          for (final branch in _allBranches)
+            branch['id']?.toString() ?? '':
+                (branch['name']?.toString().trim().isNotEmpty == true
+                    ? branch['name'].toString()
+                    : branch['id']?.toString() ?? 'Branch'),
+        },
+      ),
+    );
+
+    if (result == null || !mounted) return;
+
+    setState(() {
+      _vehicleTypeFilter = result['type'] ?? 'All';
+      _vehicleTransmissionFilter = result['transmission'] ?? 'All';
+      _vehicleFuelFilter = result['fuel'] ?? 'All';
+      _vehicleBranchFilter = result['branch'] ?? 'All';
+      _vehicleSort = result['sort'] ?? 'sortOrder';
+    });
+  }
+
   Widget _buildVehicles() {
     final visible = _filteredAvailableCars;
     final selectedCount = _selectedVehicleIds.length;
@@ -3733,101 +3781,54 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
                 ),
               ),
               const SizedBox(height: 10),
-              LayoutBuilder(
-                builder: (context, constraints) {
-                  final twoColumn = constraints.maxWidth >= 620;
-                  final width = twoColumn
-                      ? (constraints.maxWidth - 10) / 2
-                      : constraints.maxWidth;
-
-                  Widget filter<T>({
-                    required String label,
-                    required T value,
-                    required List<T> items,
-                    required ValueChanged<T?> onChanged,
-                  }) {
-                    return SizedBox(
-                      width: width,
-                      child: DropdownButtonFormField<T>(
-                        value: value,
-                        isExpanded: true,
-                        decoration: _inputDecoration(label),
-                        items: items
-                            .map(
-                              (item) => DropdownMenuItem<T>(
-                                value: item,
-                                child: Text(
-                                  item.toString(),
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                            )
-                            .toList(),
-                        onChanged: onChanged,
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: _openVehicleFilters,
+                      icon: const Icon(Icons.tune_rounded, size: 18),
+                      label: Text(
+                        (_vehicleTypeFilter == 'All' &&
+                                _vehicleTransmissionFilter == 'All' &&
+                                _vehicleFuelFilter == 'All' &&
+                                _vehicleBranchFilter == 'All' &&
+                                _vehicleSort == 'sortOrder')
+                            ? 'Filters'
+                            : 'Filters applied',
                       ),
-                    );
-                  }
-
-                  return Wrap(
-                    spacing: 10,
-                    runSpacing: 10,
-                    children: [
-                      filter<String>(
-                        label: 'Vehicle type',
-                        value: _vehicleTypeFilter,
-                        items: _vehicleTypeOptions,
-                        onChanged: (value) => setState(
-                          () => _vehicleTypeFilter = value ?? 'All',
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: primary,
+                        side: const BorderSide(color: border),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 12,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
                         ),
                       ),
-                      filter<String>(
-                        label: 'Transmission',
-                        value: _vehicleTransmissionFilter,
-                        items: _vehicleTransmissionOptions,
-                        onChanged: (value) => setState(
-                          () => _vehicleTransmissionFilter = value ?? 'All',
-                        ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 11,
+                      vertical: 9,
+                    ),
+                    decoration: BoxDecoration(
+                      color: softAccent,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      '${visible.length} shown',
+                      style: GoogleFonts.manrope(
+                        color: primary,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w900,
                       ),
-                      filter<String>(
-                        label: 'Fuel',
-                        value: _vehicleFuelFilter,
-                        items: _vehicleFuelOptions,
-                        onChanged: (value) => setState(
-                          () => _vehicleFuelFilter = value ?? 'All',
-                        ),
-                      ),
-                      filter<String>(
-                        label: 'Branch',
-                        value: _vehicleBranchFilter,
-                        items: [
-                          'All',
-                          ..._allBranches
-                              .map(
-                                (branch) =>
-                                    branch['id']?.toString() ?? '',
-                              )
-                              .where((id) => id.isNotEmpty),
-                        ],
-                        onChanged: (value) => setState(
-                          () => _vehicleBranchFilter = value ?? 'All',
-                        ),
-                      ),
-                      filter<String>(
-                        label: 'Sort by',
-                        value: _vehicleSort,
-                        items: const [
-                          'sortOrder',
-                          'name',
-                          'registration',
-                          'type',
-                        ],
-                        onChanged: (value) => setState(
-                          () => _vehicleSort = value ?? 'sortOrder',
-                        ),
-                      ),
-                    ],
-                  );
-                },
+                    ),
+                  ),
+                ],
               ),
               const SizedBox(height: 10),
               Row(
@@ -4478,21 +4479,26 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
                   decoration: _inputDecoration('Deposit type'),
                   items: const [
                     DropdownMenuItem(value: 'cash', child: Text('Cash')),
-                    DropdownMenuItem(value: 'upi', child: Text('UPI / Online')),
+                    DropdownMenuItem(value: 'upi', child: Text('UPI')),
                     DropdownMenuItem(value: 'bank_transfer', child: Text('Bank Transfer')),
-                    DropdownMenuItem(value: 'vehicle_asset', child: Text('Vehicle / Bike as Security')),
-                    DropdownMenuItem(value: 'other_asset', child: Text('Other Asset')),
+                    DropdownMenuItem(value: 'bike', child: Text('Bike')),
+                    DropdownMenuItem(value: 'car', child: Text('Car')),
+                    DropdownMenuItem(value: 'other', child: Text('Other')),
                     DropdownMenuItem(value: 'none', child: Text('No Deposit')),
                   ],
                   onChanged: (value) {
-                    final method = value ?? 'cash';
+                    final method = value ?? 'none';
                     setState(() {
                       _depositMethod = method;
-                      if (method == 'none' || method == 'vehicle_asset' || method == 'other_asset') {
+                      if (method == 'none' ||
+                          method == 'bike' ||
+                          method == 'car' ||
+                          method == 'other') {
                         _depositAmount = 0;
                       } else if (_depositAmount <= 0) {
                         _depositAmount = result.securityDeposit;
                       }
+                      if (method == 'none') _depositAssetDetails = '';
                     });
                   },
                 ),
@@ -4501,16 +4507,25 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
                   TextFormField(
                     initialValue: _depositAmount.toStringAsFixed(2),
                     keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                    decoration: _inputDecoration('Deposit amount (separate from trip total)'),
-                    onChanged: (value) => setState(() => _depositAmount = double.tryParse(value) ?? 0),
+                    decoration: _inputDecoration(
+                      'Deposit amount (separate from trip total)',
+                    ),
+                    onChanged: (value) =>
+                        setState(() => _depositAmount = double.tryParse(value) ?? 0),
                   ),
                 ],
-                if (_depositMethod == 'vehicle_asset' || _depositMethod == 'other_asset') ...[
+                if (_depositMethod == 'bike' ||
+                    _depositMethod == 'car' ||
+                    _depositMethod == 'other') ...[
                   const SizedBox(height: 10),
                   TextFormField(
-                    maxLines: 3,
+                    maxLines: 2,
                     decoration: _inputDecoration(
-                      _depositMethod == 'vehicle_asset' ? 'Vehicle / bike security details *' : 'Asset security details *',
+                      _depositMethod == 'bike'
+                          ? 'Bike deposit details *'
+                          : _depositMethod == 'car'
+                              ? 'Car deposit details *'
+                              : 'Other deposit details *',
                     ),
                     onChanged: (value) => _depositAssetDetails = value,
                   ),
@@ -4518,8 +4533,12 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
                   Align(
                     alignment: Alignment.centerLeft,
                     child: Text(
-                      'Asset security is recorded for reference only and adds ₹0 to the trip total.',
-                      style: GoogleFonts.manrope(color: primary, fontSize: 10, fontWeight: FontWeight.w700),
+                      'Bike, Car and Other deposits are recorded as details only. No asset value is required and Rs 0 is added to the rental total.',
+                      style: GoogleFonts.manrope(
+                        color: primary,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                      ),
                     ),
                   ),
                 ],
@@ -5817,6 +5836,282 @@ class _BookingSuccessDialog extends StatelessWidget {
         Text('${customer.fullName} • ${car.name}', textAlign: TextAlign.center, style: GoogleFonts.manrope(color: const Color(0xFF66706E), fontSize: 11, fontWeight: FontWeight.w600)),
       ]),
       actions: [Center(child: ElevatedButton(onPressed: () => Navigator.pop(context), style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF0F766E), foregroundColor: Colors.white), child: const Text('Done')))],
+    );
+  }
+}
+
+
+class _VehicleFilterSheet extends StatefulWidget {
+  final String typeValue;
+  final String transmissionValue;
+  final String fuelValue;
+  final String branchValue;
+  final String sortValue;
+  final List<String> typeOptions;
+  final List<String> transmissionOptions;
+  final List<String> fuelOptions;
+  final List<String> branchOptions;
+  final Map<String, String> branchLabels;
+
+  const _VehicleFilterSheet({
+    required this.typeValue,
+    required this.transmissionValue,
+    required this.fuelValue,
+    required this.branchValue,
+    required this.sortValue,
+    required this.typeOptions,
+    required this.transmissionOptions,
+    required this.fuelOptions,
+    required this.branchOptions,
+    required this.branchLabels,
+  });
+
+  @override
+  State<_VehicleFilterSheet> createState() => _VehicleFilterSheetState();
+}
+
+class _VehicleFilterSheetState extends State<_VehicleFilterSheet> {
+  late String _type;
+  late String _transmission;
+  late String _fuel;
+  late String _branch;
+  late String _sort;
+
+  static const Color primary = Color(0xFF0F766E);
+  static const Color heading = Color(0xFF17201F);
+  static const Color body = Color(0xFF66706E);
+  static const Color muted = Color(0xFF94A09D);
+  static const Color border = Color(0xFFE5EBE9);
+  static const Color softAccent = Color(0xFFE6FFFB);
+
+  @override
+  void initState() {
+    super.initState();
+    _type = widget.typeValue;
+    _transmission = widget.transmissionValue;
+    _fuel = widget.fuelValue;
+    _branch = widget.branchValue;
+    _sort = widget.sortValue;
+  }
+
+  void _reset() {
+    setState(() {
+      _type = 'All';
+      _transmission = 'All';
+      _fuel = 'All';
+      _branch = 'All';
+      _sort = 'sortOrder';
+    });
+  }
+
+  void _apply() {
+    Navigator.of(context).pop(<String, String>{
+      'type': _type,
+      'transmission': _transmission,
+      'fuel': _fuel,
+      'branch': _branch,
+      'sort': _sort,
+    });
+  }
+
+  Widget _dropdown({
+    required String label,
+    required String value,
+    required List<String> items,
+    required ValueChanged<String?> onChanged,
+    Map<String, String>? labels,
+  }) {
+    return DropdownButtonFormField<String>(
+      value: value,
+      isExpanded: true,
+      decoration: InputDecoration(
+        labelText: label,
+        labelStyle: GoogleFonts.manrope(
+          color: body,
+          fontSize: 12,
+          fontWeight: FontWeight.w700,
+        ),
+        filled: true,
+        fillColor: const Color(0xFFF8FAF9),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(13),
+          borderSide: const BorderSide(color: border),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(13),
+          borderSide: const BorderSide(color: border),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(13),
+          borderSide: const BorderSide(color: primary, width: 1.3),
+        ),
+      ),
+      items: items
+          .map(
+            (item) => DropdownMenuItem<String>(
+              value: item,
+              child: Text(
+                item == 'All' ? 'All' : (labels?[item] ?? item),
+                overflow: TextOverflow.ellipsis,
+                style: GoogleFonts.manrope(
+                  color: heading,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          )
+          .toList(),
+      onChanged: onChanged,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bottom = MediaQuery.of(context).viewInsets.bottom;
+
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(bottom: bottom),
+        child: Container(
+          margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+          padding: const EdgeInsets.fromLTRB(18, 18, 18, 14),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(color: border),
+          ),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      width: 38,
+                      height: 38,
+                      decoration: BoxDecoration(
+                        color: softAccent,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Icon(Icons.tune_rounded, color: primary, size: 20),
+                    ),
+                    const SizedBox(width: 11),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Vehicle filters',
+                            style: GoogleFonts.manrope(
+                              color: heading,
+                              fontSize: 16,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                          Text(
+                            'All vehicle filters in one place',
+                            style: GoogleFonts.manrope(
+                              color: muted,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      icon: const Icon(Icons.close_rounded),
+                      color: muted,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                _dropdown(
+                  label: 'Vehicle type',
+                  value: _type,
+                  items: widget.typeOptions,
+                  onChanged: (v) => setState(() => _type = v ?? 'All'),
+                ),
+                const SizedBox(height: 10),
+                _dropdown(
+                  label: 'Transmission',
+                  value: _transmission,
+                  items: widget.transmissionOptions,
+                  onChanged: (v) => setState(() => _transmission = v ?? 'All'),
+                ),
+                const SizedBox(height: 10),
+                _dropdown(
+                  label: 'Fuel',
+                  value: _fuel,
+                  items: widget.fuelOptions,
+                  onChanged: (v) => setState(() => _fuel = v ?? 'All'),
+                ),
+                const SizedBox(height: 10),
+                _dropdown(
+                  label: 'Branch',
+                  value: _branch,
+                  items: widget.branchOptions,
+                  labels: widget.branchLabels,
+                  onChanged: (v) => setState(() => _branch = v ?? 'All'),
+                ),
+                const SizedBox(height: 10),
+                _dropdown(
+                  label: 'Sort by',
+                  value: _sort,
+                  items: const ['sortOrder', 'name', 'registration', 'type'],
+                  labels: const {
+                    'sortOrder': 'Default order',
+                    'name': 'Vehicle name',
+                    'registration': 'Registration',
+                    'type': 'Vehicle type',
+                  },
+                  onChanged: (v) => setState(() => _sort = v ?? 'sortOrder'),
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: _reset,
+                        icon: const Icon(Icons.restart_alt_rounded, size: 17),
+                        label: const Text('Reset'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: body,
+                          side: const BorderSide(color: border),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(13),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        onPressed: _apply,
+                        icon: const Icon(Icons.check_rounded, size: 17),
+                        label: const Text('Apply filters'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: primary,
+                          foregroundColor: Colors.white,
+                          elevation: 0,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(13),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

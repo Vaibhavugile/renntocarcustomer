@@ -169,6 +169,14 @@ class BookingPricingSnapshot {
   final double discountAmount;
   final double taxAmount;
   final double securityDeposit;
+
+  /// Simple security-deposit mode selected for this booking.
+  /// Examples: cash, upi, bank_transfer, bike, car, other, none.
+  final String securityDepositType;
+
+  /// Free-text details for non-monetary deposits such as Bike/Car/Other.
+  final String securityDepositDetails;
+
   final double totalAmount;
 
   // New rental/pricing metadata. These are snapshots and therefore remain
@@ -196,6 +204,8 @@ class BookingPricingSnapshot {
     required this.discountAmount,
     required this.taxAmount,
     required this.securityDeposit,
+    this.securityDepositType = 'none',
+    this.securityDepositDetails = '',
     required this.totalAmount,
     this.rentalType,
     this.pricingVersion = 1,
@@ -254,6 +264,8 @@ class BookingPricingSnapshot {
       'discountAmount': discountAmount,
       'taxAmount': taxAmount,
       'securityDeposit': securityDeposit,
+      'securityDepositType': securityDepositType,
+      'securityDepositDetails': securityDepositDetails,
       'totalAmount': totalAmount,
       'rentalType': rentalType,
       'pricingVersion': pricingVersion,
@@ -453,6 +465,14 @@ class Booking {
   final double taxAmount;
 
   final double securityDeposit;
+
+  /// Simple security-deposit mode selected for this booking.
+  /// Examples: cash, upi, bank_transfer, bike, car, other, none.
+  final String securityDepositType;
+
+  /// Free-text details for non-monetary deposits such as Bike/Car/Other.
+  final String securityDepositDetails;
+
   final double totalAmount;
 
   /// Complete pricing snapshot for future admin/invoice reporting.
@@ -538,6 +558,8 @@ class Booking {
     required this.discountAmount,
     required this.taxAmount,
     required this.securityDeposit,
+    this.securityDepositType = 'none',
+    this.securityDepositDetails = '',
     required this.totalAmount,
     this.pricing,
     required this.paidAmount,
@@ -787,6 +809,14 @@ class Booking {
       securityDeposit:
           _toDouble(map['securityDeposit']),
 
+      securityDepositType:
+          map['securityDepositType']?.toString().trim().isEmpty == true
+              ? 'none'
+              : (map['securityDepositType']?.toString() ?? 'none'),
+
+      securityDepositDetails:
+          map['securityDepositDetails']?.toString() ?? '',
+
       totalAmount:
           _toDouble(map['totalAmount']),
 
@@ -920,6 +950,8 @@ class Booking {
       'discountAmount': discountAmount,
       'taxAmount': taxAmount,
       'securityDeposit': securityDeposit,
+      'securityDepositType': securityDepositType,
+      'securityDepositDetails': securityDepositDetails,
       'totalAmount': totalAmount,
 
       'pricing':
@@ -1005,6 +1037,8 @@ class Booking {
     double? discountAmount,
     double? taxAmount,
     double? securityDeposit,
+    String? securityDepositType,
+    String? securityDepositDetails,
     double? totalAmount,
     BookingPricingSnapshot? pricing,
     double? paidAmount,
@@ -1144,6 +1178,14 @@ class Booking {
       securityDeposit:
           securityDeposit ??
           this.securityDeposit,
+
+      securityDepositType:
+          securityDepositType ??
+          this.securityDepositType,
+
+      securityDepositDetails:
+          securityDepositDetails ??
+          this.securityDepositDetails,
 
       totalAmount:
           totalAmount ??
