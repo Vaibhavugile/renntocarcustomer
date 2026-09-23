@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../../../core/config/app_config.dart';
+import '../../../core/notifications/notification_service.dart';
 import '../services/auth_service.dart';
 import '../../home/screens/home_screen.dart';
 import '../../customer/services/customer_service.dart';
@@ -386,6 +387,27 @@ class _OtpScreenState extends State<OtpScreen> {
         );
 
         // ======================================================
+        // REGISTER THIS DEVICE FOR FCM NOTIFICATIONS
+        // ======================================================
+        // Notification registration must not block a successful
+        // login if permission/token registration fails.
+
+        try {
+          await NotificationService.instance.initialize(
+            tenantId: tenantId,
+            isAdmin: true,
+          );
+
+          debugPrint(
+            'Admin FCM notification device registered successfully.',
+          );
+        } catch (error) {
+          debugPrint(
+            'Admin notification registration failed: $error',
+          );
+        }
+
+        // ======================================================
         // ADMIN DASHBOARD
         // ======================================================
 
@@ -453,6 +475,27 @@ class _OtpScreenState extends State<OtpScreen> {
           .createCustomerIfNotExists(
         tenantId: tenantId,
       );
+
+      // ========================================================
+      // REGISTER THIS DEVICE FOR FCM NOTIFICATIONS
+      // ========================================================
+      // Notification registration must not block a successful
+      // customer login if permission/token registration fails.
+
+      try {
+        await NotificationService.instance.initialize(
+          tenantId: tenantId,
+          isAdmin: false,
+        );
+
+        debugPrint(
+          'Customer FCM notification device registered successfully.',
+        );
+      } catch (error) {
+        debugPrint(
+          'Customer notification registration failed: $error',
+        );
+      }
 
       if (!mounted) return;
 

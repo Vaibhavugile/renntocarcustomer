@@ -56,6 +56,7 @@ dependencies:
   printing: ^5.14.2
   http: ^1.5.0
   share_plus: any
+  device_info_plus: ^12.1.0
 
 dev_dependencies:
   flutter_test:

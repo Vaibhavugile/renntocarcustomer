@@ -93,6 +93,7 @@ class _AdminBookingDetailsScreenState
 
   List<PaymentTransaction> _paymentTransactions = <PaymentTransaction>[];
   List<Map<String, dynamic>> _auditLogs = <Map<String, dynamic>>[];
+  Map<String, dynamic> _discountAudit = <String, dynamic>{};
   DateTime? _lastVerifiedAt;
   int _loadGeneration = 0;
 
@@ -144,6 +145,10 @@ class _AdminBookingDetailsScreenState
           tenantId: _tenantId,
           bookingId: _booking.bookingId,
         ),
+        _bookingService.getBookingDiscountAuditForAdmin(
+          tenantId: _tenantId,
+          bookingId: _booking.bookingId,
+        ),
       ]);
 
       if (!mounted || generation != _loadGeneration) return;
@@ -154,6 +159,8 @@ class _AdminBookingDetailsScreenState
       final payments = results[3] as List<PaymentTransaction>;
       final auditLogs =
           results[4] as List<Map<String, dynamic>>;
+      final discountAudit =
+          (results[5] as Map<String, dynamic>?) ?? <String, dynamic>{};
 
       if (freshBooking == null) {
         throw Exception('Booking not found.');
@@ -170,6 +177,7 @@ class _AdminBookingDetailsScreenState
         _customerRaw = raw;
         _paymentTransactions = payments;
         _auditLogs = auditLogs;
+        _discountAudit = discountAudit;
         _loading = false;
         _refreshing = false;
         _lastVerifiedAt = DateTime.now();
@@ -668,7 +676,19 @@ class _AdminBookingDetailsScreenState
   // ============================================================
 
   Future<void> _addPayment() async {
-    if (_actionBusy || _booking.isFinished || !_booking.hasBalance) return;
+    if (_actionBusy) return;
+
+    // Keep Add Payment visible for the full booking lifecycle. If there is no
+    // outstanding balance, the admin must first increase/edit the booking
+    // total before another payment can be recorded. This also allows a
+    // legitimate late payment to be recorded after the rental is completed.
+    if (!_booking.hasBalance) {
+      _showMessage(
+        'There is no outstanding balance. Edit the total booking amount first if another payment is due.',
+        error: true,
+      );
+      return;
+    }
 
     final result = await _showPaymentDialog(
       maxAmount: _booking.balanceAmount,
@@ -1551,6 +1571,10 @@ class _AdminBookingDetailsScreenState
             ['Security deposit', money(b.securityDeposit)],
             ['Total booking value', money(b.totalAmount)],
             if ((b.couponCode ?? '').trim().isNotEmpty) ['Coupon', (b.couponCode ?? '').trim()],
+            if ((_discountAudit['discountedByName'] ?? '').toString().trim().isNotEmpty)
+              ['Discounted by', (_discountAudit['discountedByName'] ?? '').toString().trim()],
+            if ((_discountAudit['discountReason'] ?? '').toString().trim().isNotEmpty)
+              ['Discount reason', (_discountAudit['discountReason'] ?? '').toString().trim()],
           ]),
 
           sectionTitle('Payment summary', 'Current booking payment position'),
@@ -1662,6 +1686,80 @@ class _AdminBookingDetailsScreenState
     if (duration.inHours < 24) return '${duration.inHours} hours';
     final days = duration.inDays;
     return '$days ${days == 1 ? 'day' : 'days'}';
+  }
+
+  Future<void> _applyDiscount() async {
+    if (_actionBusy) return;
+
+    final result = await showDialog<Map<String, dynamic>>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _DiscountDialog(
+        currentDiscount: _booking.discountAmount,
+        currentTotal: _booking.totalAmount,
+      ),
+    );
+
+    if (result == null || !mounted) return;
+
+    final discount = (result['discountAmount'] as num).toDouble();
+    final reason = (result['reason'] ?? '').toString().trim();
+    final oldDiscount = _booking.discountAmount;
+    final newTotal =
+        (_booking.totalAmount - discount + oldDiscount).clamp(0.0, double.infinity).toDouble();
+
+    if (discount < 0) {
+      _showMessage('Discount cannot be negative.', error: true);
+      return;
+    }
+    if (newTotal < _booking.paidAmount - _booking.refundAmount) {
+      _showMessage(
+        'Discount would make the booking total lower than the amount already paid.',
+        error: true,
+      );
+      return;
+    }
+
+    setState(() => _actionBusy = true);
+    try {
+      await _revalidateBookingBeforeAction();
+
+      final latestOldDiscount = _booking.discountAmount;
+      final latestTotal = _booking.totalAmount;
+      final latestNewTotal =
+          (latestTotal - discount + latestOldDiscount).clamp(0.0, double.infinity).toDouble();
+
+      if (latestNewTotal < _booking.paidAmount - _booking.refundAmount) {
+        throw Exception('Discount would make the total lower than the effective amount already paid.');
+      }
+
+      await _bookingService.updateBookingAmountsForAdmin(
+        tenantId: _tenantId,
+        bookingId: _booking.bookingId,
+        amounts: {
+          'baseAmount': _booking.baseAmount,
+          'extraKmAmount': _booking.extraKmAmount,
+          'extraTimeAmount': _booking.extraTimeAmount,
+          'addOnsAmount': _booking.addOnsAmount,
+          'protectionAmount': _booking.protectionAmount,
+          'taxAmount': _booking.taxAmount,
+          'discountAmount': discount,
+          'securityDeposit': _booking.securityDeposit,
+          'totalAmount': latestNewTotal,
+        },
+        reason: reason.isEmpty ? 'Admin applied booking discount' : reason,
+      );
+
+      await _loadAll(showLoader: false);
+      if (!mounted) return;
+      final who = (_discountAudit['discountedByName'] ?? 'Admin').toString();
+      _showMessage('Discount saved: ${_money(discount)} by $who.');
+    } catch (e) {
+      if (!mounted) return;
+      _showMessage(_cleanError(e.toString()), error: true);
+    } finally {
+      if (mounted) setState(() => _actionBusy = false);
+    }
   }
 
   Future<void> _editTotalBookingAmount() async {
@@ -3203,6 +3301,11 @@ class _AdminBookingDetailsScreenState
                 ),
               ),
               IconButton(
+                tooltip: 'Apply discount',
+                onPressed: _actionBusy ? null : _applyDiscount,
+                icon: const Icon(Icons.local_offer_outlined, color: success),
+              ),
+              IconButton(
                 tooltip: 'Edit total booking amount',
                 onPressed: _actionBusy ? null : _editTotalBookingAmount,
                 icon: const Icon(Icons.edit_note_rounded, color: primary),
@@ -3223,6 +3326,8 @@ class _AdminBookingDetailsScreenState
               ),
             ],
           ),
+          const SizedBox(height: 12),
+          _discountSummaryCard(),
           const SizedBox(height: 12),
           Row(
             children: [
@@ -3253,16 +3358,19 @@ class _AdminBookingDetailsScreenState
             ],
           ),
           const SizedBox(height: 10),
-          if (!_booking.isFinished)
-            _actionButton(
-              _booking.hasBalance ? 'Add Payment' : 'Add Payment',
-              _booking.hasBalance
-                  ? 'Record another partial or full payment through the ledger.'
-                  : 'Fully paid. Edit the total amount if another payment becomes due.',
-              Icons.add_card_rounded,
-              primary,
-              _actionBusy || !_booking.hasBalance ? null : _addPayment,
-            ),
+          // Always keep Add Payment visible. Multiple payment transactions
+          // are supported by the payment ledger. When the booking is already
+          // fully paid, tapping the button explains that the total must first
+          // be increased/edited before another payment can be recorded.
+          _actionButton(
+            'Add Payment',
+            _booking.hasBalance
+                ? 'Record another partial or full payment through the ledger.'
+                : 'No balance is currently due. Edit the total amount if another payment is required.',
+            Icons.add_card_rounded,
+            primary,
+            _actionBusy ? null : _addPayment,
+          ),
           if (!_booking.isFinished && refundable > 0) ...[
             const SizedBox(height: 9),
             _outlineAction(
@@ -3296,6 +3404,96 @@ class _AdminBookingDetailsScreenState
                 sequence: _paymentTransactions.length - entry.key,
               ),
             ),
+        ],
+      ),
+    );
+  }
+
+  Widget _discountSummaryCard() {
+    final amount = _booking.discountAmount;
+    final byName = (_discountAudit['discountedByName'] ?? '').toString().trim();
+    final byEmail = (_discountAudit['discountedByEmail'] ?? '').toString().trim();
+    final role = (_discountAudit['discountedByRole'] ?? '').toString().trim();
+    final reason = (_discountAudit['discountReason'] ?? '').toString().trim();
+    final at = _auditDate(_discountAudit['discountedAt']);
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(13),
+      decoration: BoxDecoration(
+        color: amount > 0 ? const Color(0xFFF0FDF4) : background,
+        borderRadius: BorderRadius.circular(15),
+        border: Border.all(color: amount > 0 ? const Color(0xFFBBF7D0) : border),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            amount > 0 ? Icons.local_offer_rounded : Icons.local_offer_outlined,
+            color: amount > 0 ? success : muted,
+            size: 20,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: _text(
+                        'Discount',
+                        size: 10.5,
+                        color: heading,
+                        weight: FontWeight.w900,
+                      ),
+                    ),
+                    _text(
+                      amount > 0 ? '-${_money(amount)}' : 'No discount',
+                      size: 12,
+                      color: amount > 0 ? success : muted,
+                      weight: FontWeight.w900,
+                    ),
+                  ],
+                ),
+                if (amount > 0 && byName.isNotEmpty) ...[
+                  const SizedBox(height: 5),
+                  _text(
+                    'Discounted by: $byName${role.isEmpty ? '' : ' • $role'}',
+                    size: 8.8,
+                    color: body,
+                    weight: FontWeight.w700,
+                  ),
+                ],
+                if (amount > 0 && byEmail.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  _text(byEmail, size: 8.5, color: muted, weight: FontWeight.w600),
+                ],
+                if (amount > 0 && at != 'Pending time') ...[
+                  const SizedBox(height: 2),
+                  _text('Applied at: $at', size: 8.5, color: muted, weight: FontWeight.w600),
+                ],
+                if (reason.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  _text('Reason: $reason', size: 8.8, color: body, weight: FontWeight.w700),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          OutlinedButton.icon(
+            onPressed: _actionBusy ? null : _applyDiscount,
+            icon: const Icon(Icons.edit_rounded, size: 14),
+            label: Text(amount > 0 ? 'Edit' : 'Add'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: primary,
+              side: const BorderSide(color: border),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+          ),
         ],
       ),
     );
@@ -4789,6 +4987,200 @@ class _SingleAmountEditDialogState extends State<_SingleAmountEditDialog> {
           child: const Text(
             'Continue',
             style: TextStyle(fontWeight: FontWeight.w900),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _DiscountDialog extends StatefulWidget {
+  const _DiscountDialog({
+    required this.currentDiscount,
+    required this.currentTotal,
+  });
+
+  final double currentDiscount;
+  final double currentTotal;
+
+  @override
+  State<_DiscountDialog> createState() => _DiscountDialogState();
+}
+
+class _DiscountDialogState extends State<_DiscountDialog> {
+  static const Color backgroundColor = Color(0xFFF6F8FB);
+  static const Color borderColor = Color(0xFFE7EBF1);
+  static const Color primaryColor = Color(0xFF315CF6);
+  static const Color successColor = Color(0xFF16A34A);
+  static const Color dangerColor = Color(0xFFEF4444);
+
+  late final TextEditingController _discountController;
+  late final TextEditingController _reasonController;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _discountController = TextEditingController(
+      text: widget.currentDiscount > 0
+          ? widget.currentDiscount.toStringAsFixed(2)
+          : '',
+    );
+    _reasonController = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    _discountController.dispose();
+    _reasonController.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final discount = double.tryParse(_discountController.text.trim());
+    if (discount == null || !discount.isFinite || discount < 0) {
+      setState(() => _error = 'Enter a valid non-negative discount amount.');
+      return;
+    }
+
+    if (discount > widget.currentTotal + widget.currentDiscount + 0.009) {
+      setState(() => _error = 'Discount is higher than the booking value.');
+      return;
+    }
+
+    FocusManager.instance.primaryFocus?.unfocus();
+    Navigator.of(context, rootNavigator: true).pop(<String, dynamic>{
+      'discountAmount': discount,
+      'reason': _reasonController.text.trim(),
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final current = widget.currentDiscount;
+    return AlertDialog(
+      backgroundColor: Colors.white,
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+      title: Row(
+        children: [
+          Container(
+            width: 38,
+            height: 38,
+            decoration: BoxDecoration(
+              color: const Color(0xFFECFDF5),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: const Icon(Icons.local_offer_rounded, color: successColor),
+          ),
+          const SizedBox(width: 10),
+          const Expanded(
+            child: Text(
+              'Apply Discount',
+              style: TextStyle(fontWeight: FontWeight.w900),
+            ),
+          ),
+        ],
+      ),
+      content: SizedBox(
+        width: 440,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: backgroundColor,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: borderColor),
+              ),
+              child: Text(
+                'Current discount: ₹${current.toStringAsFixed(2)}\n'
+                'Enter the final discount amount. The booking total will be adjusted by the difference.',
+                style: const TextStyle(
+                  fontSize: 11,
+                  height: 1.45,
+                  color: Color(0xFF425066),
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: _discountController,
+              autofocus: true,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              decoration: InputDecoration(
+                labelText: 'Discount amount',
+                prefixText: '₹ ',
+                filled: true,
+                fillColor: backgroundColor,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  borderSide: const BorderSide(color: borderColor),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  borderSide: const BorderSide(color: borderColor),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  borderSide: const BorderSide(color: primaryColor, width: 1.4),
+                ),
+              ),
+              onChanged: (_) {
+                if (_error != null) setState(() => _error = null);
+              },
+              onSubmitted: (_) => _submit(),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _reasonController,
+              maxLines: 3,
+              decoration: InputDecoration(
+                labelText: 'Discount reason / note',
+                hintText: 'Example: Corporate customer discount',
+                filled: true,
+                fillColor: backgroundColor,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  borderSide: const BorderSide(color: borderColor),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  borderSide: const BorderSide(color: borderColor),
+                ),
+              ),
+            ),
+            if (_error != null) ...[
+              const SizedBox(height: 9),
+              Text(
+                _error!,
+                style: const TextStyle(
+                  color: dangerColor,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context, rootNavigator: true).pop(),
+          child: const Text('Cancel'),
+        ),
+        ElevatedButton.icon(
+          onPressed: _submit,
+          icon: const Icon(Icons.save_rounded, size: 16),
+          label: const Text('Save Discount'),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: primaryColor,
+            foregroundColor: Colors.white,
+            elevation: 0,
           ),
         ),
       ],

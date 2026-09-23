@@ -823,8 +823,11 @@ class BookingService {
     );
     _validateTenant(booking, tenantId);
 
-    if (booking.isFinished) {
-      throw Exception('Payments cannot be added to a finished booking.');
+    // Admins may record a legitimate late/outstanding payment even after
+    // the rental lifecycle is completed. Customer-side payment flows remain
+    // responsible for blocking terminal bookings.
+    if (booking.isFinished && source != PaymentSource.admin) {
+      throw Exception('Customer payments cannot be added to a finished booking.');
     }
 
     if (method == PaymentMethodType.razorpay &&
@@ -2779,6 +2782,20 @@ class BookingService {
     };
 
     final adminName = update['lastActionByName'].toString();
+    final oldDiscount = booking.discountAmount;
+    final newDiscount = amounts['discountAmount']!;
+    if ((oldDiscount - newDiscount).abs() > 0.009) {
+      update.addAll({
+        'discountedBy': adminUser.uid,
+        'discountedByName': adminName,
+        'discountedByEmail': adminUser.email,
+        'discountedByRole': 'admin',
+        'discountedAt': FieldValue.serverTimestamp(),
+        'discountReason': reason.trim().isEmpty
+            ? 'Admin applied booking discount'
+            : reason.trim(),
+      });
+    }
 
     final auditRef = reference.collection('auditLogs').doc();
     final batch = _firestore.batch();
@@ -2817,6 +2834,26 @@ class BookingService {
     }
 
     return Booking.fromMap(saved.id, saved.data()!);
+  }
+
+  Future<Map<String, dynamic>?> getBookingDiscountAuditForAdmin({
+    required String tenantId,
+    required String bookingId,
+  }) async {
+    await _requireTenantAdmin(tenantId: tenantId);
+
+    final doc = await _bookings(tenantId).doc(bookingId).get();
+    if (!doc.exists || doc.data() == null) return null;
+
+    final data = doc.data()!;
+    return {
+      'discountedBy': data['discountedBy'],
+      'discountedByName': data['discountedByName'],
+      'discountedByEmail': data['discountedByEmail'],
+      'discountedByRole': data['discountedByRole'],
+      'discountedAt': data['discountedAt'],
+      'discountReason': data['discountReason'],
+    };
   }
 
   Future<List<Map<String, dynamic>>> getBookingAuditLogsForAdmin({
