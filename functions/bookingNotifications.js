@@ -423,11 +423,11 @@ async function sendNewBookingNotification({
 
     pickupDateTime:
       pickupDateTime &&
-      typeof pickupDateTime.toDate === "function"
-        ? pickupDateTime.toDate().toISOString()
-        : cleanString(
+      typeof pickupDateTime.toDate === "function" ?
+        pickupDateTime.toDate().toISOString() :
+        cleanString(
             pickupDateTime,
-          ),
+        ),
 
     pickupBranch:
       cleanString(
@@ -519,8 +519,9 @@ async function sendNewBookingNotification({
                     token:
                       tokenChunk[index],
                     error:
-                      result.error?.message ||
-                      "Unknown FCM error",
+  result.error && result.error.message ?
+    result.error.message :
+    "Unknown FCM error",
                   },
               );
             }
@@ -533,8 +534,10 @@ async function sendNewBookingNotification({
             tenantId,
             bookingId,
             error:
-              error?.message ||
-              String(error),
+        error &&
+        error.message ?
+          error.message :
+          String(error),
           },
       );
 

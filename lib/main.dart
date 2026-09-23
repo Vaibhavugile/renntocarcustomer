@@ -1,10 +1,12 @@
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 
 import 'core/config/app_config.dart';
 import 'core/data/dummy_config.dart';
 import 'core/services/firebase_config_service.dart';
 import 'core/theme/app_theme.dart';
+import 'core/notifications/notification_service.dart';
 import 'features/auth/screens/login_screen.dart';
 import 'features/pricing/manager/pricing_manager.dart';
 import 'firebase_options.dart';
@@ -21,7 +23,32 @@ Future<void> main() async {
   );
 
   // ============================================================
-  // 2. CURRENT WHITE-LABEL TENANT
+  // 2. REGISTER FCM BACKGROUND HANDLER
+  // ============================================================
+  //
+  // IMPORTANT:
+  // This must be registered before runApp().
+  //
+  // It allows Firebase Messaging to process messages when the
+  // application is:
+  //
+  //   • In background
+  //   • Completely closed
+  //   • Running in a background isolate
+  //
+  // The handler itself is defined in:
+  //
+  // core/notifications/notification_service.dart
+  //
+  // @pragma('vm:entry-point') is already present there.
+  //
+
+  FirebaseMessaging.onBackgroundMessage(
+    firebaseMessagingBackgroundHandler,
+  );
+
+  // ============================================================
+  // 3. CURRENT WHITE-LABEL TENANT
   // ============================================================
   //
   // For now this is fixed to Rentocar.
@@ -39,7 +66,7 @@ Future<void> main() async {
   const tenantId = 'tenant_001';
 
   // ============================================================
-  // 3. LOAD TENANT CONFIGURATION FROM FIREBASE
+  // 4. LOAD TENANT CONFIGURATION FROM FIREBASE
   // ============================================================
 
   final firebaseService = FirebaseConfigService();
@@ -50,7 +77,7 @@ Future<void> main() async {
   );
 
   // ============================================================
-  // 4. INITIALIZE APP CONFIGURATION
+  // 5. INITIALIZE APP CONFIGURATION
   // ============================================================
 
   if (firebaseConfig != null) {
@@ -60,7 +87,7 @@ Future<void> main() async {
   }
 
   // ============================================================
-  // 5. INITIALIZE PRICING
+  // 6. INITIALIZE PRICING
   // ============================================================
   //
   // Pricing is loaded once and kept in memory.
@@ -81,11 +108,17 @@ Future<void> main() async {
   );
 
   // ============================================================
-  // 6. START APPLICATION
+  // 7. START APPLICATION
   // ============================================================
 
-  runApp(const CarRentalApp());
+  runApp(
+    const CarRentalApp(),
+  );
 }
+
+// =================================================================
+// APPLICATION
+// =================================================================
 
 class CarRentalApp extends StatelessWidget {
   const CarRentalApp({

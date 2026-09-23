@@ -1,79 +1,65 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
-/// ================================================================
-/// FIREBASE BACKGROUND MESSAGE HANDLER
-/// ================================================================
-///
-/// IMPORTANT:
-/// This must remain a TOP-LEVEL function.
-///
-/// Do not move this inside NotificationService or another class.
-///
-/// Firebase can execute this while the application is in the
-/// background/terminated state.
-///
-/// At this stage we do not perform navigation here.
-/// We only log/prepare the message.
-///
-/// Navigation is handled when the user taps the notification.
-/// ================================================================
+
+// ================================================================
+// GLOBAL FCM BACKGROUND HANDLER
+// ================================================================
+//
+// IMPORTANT:
+// This MUST remain a top-level function.
+//
+// Firebase Messaging can execute this while the application is
+// running in a background isolate.
+//
+// For messages containing a notification payload, Android/iOS can
+// display the notification automatically.
+//
+// This handler is mainly required for data/background processing.
+// ================================================================
 
 @pragma('vm:entry-point')
 Future<void> firebaseMessagingBackgroundHandler(
   RemoteMessage message,
 ) async {
   try {
-    debugPrintNotification(
-      '========================================',
+    print(
+      '[FCM BACKGROUND] Message ID: '
+      '${message.messageId}',
     );
 
-    debugPrintNotification(
-      'FCM BACKGROUND MESSAGE RECEIVED',
+    print(
+      '[FCM BACKGROUND] Title: '
+      '${message.notification?.title}',
     );
 
-    debugPrintNotification(
-      'Message ID: ${message.messageId}',
+    print(
+      '[FCM BACKGROUND] Body: '
+      '${message.notification?.body}',
     );
 
-    debugPrintNotification(
-      'Title: ${message.notification?.title}',
-    );
-
-    debugPrintNotification(
-      'Body: ${message.notification?.body}',
-    );
-
-    debugPrintNotification(
-      'Data: ${message.data}',
-    );
-
-    debugPrintNotification(
-      '========================================',
+    print(
+      '[FCM BACKGROUND] Data: '
+      '${message.data}',
     );
   } catch (error) {
-    debugPrintNotification(
-      'FCM background handler error: $error',
+    print(
+      '[FCM BACKGROUND] Handler error: $error',
     );
   }
 }
 
-/// Small top-level logger.
-///
-/// Kept outside NotificationService so the background isolate can
-/// safely use it.
-void debugPrintNotification(String message) {
-  print('[NotificationService] $message');
-}
 
-/// ================================================================
-/// NOTIFICATION TAP DATA
-/// ================================================================
+// ================================================================
+// NOTIFICATION TAP DATA
+// ================================================================
 
 class NotificationTapData {
   final String? type;
@@ -102,7 +88,8 @@ class NotificationTapData {
   factory NotificationTapData.fromRemoteMessage(
     RemoteMessage message,
   ) {
-    final rawData = <String, dynamic>{};
+    final rawData =
+        <String, dynamic>{};
 
     message.data.forEach(
       (key, value) {
@@ -110,12 +97,15 @@ class NotificationTapData {
       },
     );
 
-    String? cleanValue(dynamic value) {
+    String? cleanValue(
+      dynamic value,
+    ) {
       if (value == null) {
         return null;
       }
 
-      final text = value.toString().trim();
+      final text =
+          value.toString().trim();
 
       if (text.isEmpty) {
         return null;
@@ -143,16 +133,84 @@ class NotificationTapData {
       customerId: cleanValue(
         rawData['customerId'],
       ),
-      title: message.notification?.title ??
-          cleanValue(
-            rawData['title'],
-          ),
-      body: message.notification?.body ??
-          cleanValue(
-            rawData['body'],
-          ),
+      title:
+          message.notification?.title ??
+              cleanValue(
+                rawData['title'],
+              ),
+      body:
+          message.notification?.body ??
+              cleanValue(
+                rawData['body'],
+              ),
       data: rawData,
     );
+  }
+
+  factory NotificationTapData.fromPayload(
+    String payload,
+  ) {
+    try {
+      final decoded =
+          jsonDecode(payload);
+
+      if (decoded is Map) {
+        String? value(
+          dynamic item,
+        ) {
+          if (item == null) {
+            return null;
+          }
+
+          final text =
+              item.toString().trim();
+
+          return text.isEmpty
+              ? null
+              : text;
+        }
+
+        final map =
+            Map<String, dynamic>.from(
+          decoded,
+        );
+
+        return NotificationTapData(
+          type: value(
+            map['type'],
+          ),
+          tenantId: value(
+            map['tenantId'],
+          ),
+          bookingId: value(
+            map['bookingId'],
+          ),
+          status: value(
+            map['status'],
+          ),
+          paymentStatus: value(
+            map['paymentStatus'],
+          ),
+          customerId: value(
+            map['customerId'],
+          ),
+          title: value(
+            map['title'],
+          ),
+          body: value(
+            map['body'],
+          ),
+          data: map,
+        );
+      }
+    } catch (error) {
+      print(
+        'Unable to decode notification payload: '
+        '$error',
+      );
+    }
+
+    return const NotificationTapData();
   }
 
   @override
@@ -170,15 +228,21 @@ class NotificationTapData {
   }
 }
 
-/// ================================================================
-/// NOTIFICATION SERVICE
-/// ================================================================
+
+// ================================================================
+// NOTIFICATION SERVICE
+// ================================================================
 
 class NotificationService {
   NotificationService._();
 
   static final NotificationService instance =
       NotificationService._();
+
+
+  // ==============================================================
+  // FIREBASE
+  // ==============================================================
 
   final FirebaseMessaging _messaging =
       FirebaseMessaging.instance;
@@ -188,6 +252,11 @@ class NotificationService {
 
   final FirebaseAuth _auth =
       FirebaseAuth.instance;
+
+
+  // ==============================================================
+  // DEVICE
+  // ==============================================================
 
   final DeviceInfoPlugin _deviceInfo =
       DeviceInfoPlugin();
@@ -202,42 +271,72 @@ class NotificationService {
 
   bool _initialized = false;
 
-  /// Prevents two initialize() calls from running simultaneously.
+
+  // ==============================================================
+  // INITIALIZATION LOCK
+  // ==============================================================
+
   Future<void>? _initializationFuture;
 
-  /// FCM token refresh listener.
-  StreamSubscription<String>? _tokenRefreshSubscription;
 
-  /// Foreground message listener.
-  StreamSubscription<RemoteMessage>? _foregroundMessageSubscription;
+  // ==============================================================
+  // STREAM SUBSCRIPTIONS
+  // ==============================================================
 
-  /// Notification opened/tapped listener.
-  StreamSubscription<RemoteMessage>? _notificationOpenedSubscription;
+  StreamSubscription<String>?
+      _tokenRefreshSubscription;
 
-  /// Callback fired when a notification is received while the app
-  /// is in the foreground.
-  ///
-  /// Example:
-  ///
-  /// NotificationService.instance.onForegroundMessage = (message) {
-  ///   ...
-  /// };
-  ///
+  StreamSubscription<RemoteMessage>?
+      _foregroundMessageSubscription;
+
+  StreamSubscription<RemoteMessage>?
+      _notificationOpenedSubscription;
+
+
+  // ==============================================================
+  // LOCAL NOTIFICATIONS
+  // ==============================================================
+
+  final FlutterLocalNotificationsPlugin
+      _localNotifications =
+      FlutterLocalNotificationsPlugin();
+
+  bool _localNotificationsInitialized =
+      false;
+
+
+  // ==============================================================
+  // ANDROID CHANNEL
+  // ==============================================================
+
+  static const AndroidNotificationChannel
+      _bookingChannel =
+      AndroidNotificationChannel(
+    'booking_notifications',
+    'Booking Notifications',
+    description:
+        'Notifications for new bookings and booking updates.',
+    importance: Importance.max,
+    playSound: true,
+    enableVibration: true,
+    showBadge: true,
+  );
+
+
+  // ==============================================================
+  // CALLBACKS
+  // ==============================================================
+
+  /// Called when an FCM notification arrives while the app is
+  /// in the foreground.
   void Function(RemoteMessage message)?
       onForegroundMessage;
 
-  /// Callback fired when the user taps a notification.
-  ///
-  /// This will be used later by the application/router to navigate
-  /// to:
-  ///
-  /// - booking details
-  /// - payment
-  /// - pickup pending
-  /// - return pending
-  /// - etc.
+
+  /// Called when the user taps a notification.
   void Function(NotificationTapData data)?
       onNotificationTap;
+
 
   // ==============================================================
   // INITIALIZE
@@ -252,7 +351,8 @@ class NotificationService {
       return;
     }
 
-    _initializationFuture = _initializeInternal(
+    _initializationFuture =
+        _initializeInternal(
       tenantId: tenantId,
       isAdmin: isAdmin,
     );
@@ -264,11 +364,13 @@ class NotificationService {
     }
   }
 
+
   Future<void> _initializeInternal({
     required String tenantId,
     required bool isAdmin,
   }) async {
-    final user = _auth.currentUser;
+    final user =
+        _auth.currentUser;
 
     if (user == null) {
       throw Exception(
@@ -276,7 +378,8 @@ class NotificationService {
       );
     }
 
-    final cleanTenantId = tenantId.trim();
+    final cleanTenantId =
+        tenantId.trim();
 
     if (cleanTenantId.isEmpty) {
       throw Exception(
@@ -284,46 +387,61 @@ class NotificationService {
       );
     }
 
+
     // ------------------------------------------------------------
-    // If already initialized for the same session, just update
-    // last seen and return.
+    // Already initialized
     // ------------------------------------------------------------
 
     if (_initialized &&
-        _currentTenantId == cleanTenantId &&
-        _currentUserId == user.uid &&
-        _isAdmin == isAdmin) {
+        _currentTenantId ==
+            cleanTenantId &&
+        _currentUserId ==
+            user.uid &&
+        _isAdmin ==
+            isAdmin) {
       try {
         await updateLastSeen();
       } catch (error) {
         print(
-          'Unable to update notification last seen: $error',
+          'Notification last seen update failed: '
+          '$error',
         );
       }
 
       return;
     }
 
-    _currentTenantId = cleanTenantId;
 
-    _currentUserId = user.uid;
+    _currentTenantId =
+        cleanTenantId;
 
-    _isAdmin = isAdmin;
+    _currentUserId =
+        user.uid;
+
+    _isAdmin =
+        isAdmin;
+
 
     // ------------------------------------------------------------
-    // Request notification permission.
-    //
-    // Permission failure should not destroy the login session.
-    // The caller already catches initialize() failures.
+    // Local notification system
+    // ------------------------------------------------------------
+
+    await _initializeLocalNotifications();
+
+
+    // ------------------------------------------------------------
+    // Firebase permission
     // ------------------------------------------------------------
 
     await requestPermission();
 
+
     // ------------------------------------------------------------
-    // Get device ID.
+    // Get device ID
     // ------------------------------------------------------------
 
-    final deviceId = await getDeviceId();
+    final deviceId =
+        await getDeviceId();
 
     if (deviceId.trim().isEmpty) {
       throw Exception(
@@ -331,11 +449,13 @@ class NotificationService {
       );
     }
 
+
     // ------------------------------------------------------------
-    // Get FCM token.
+    // Get FCM token
     // ------------------------------------------------------------
 
-    final token = await _messaging.getToken();
+    final token =
+        await _messaging.getToken();
 
     if (token == null ||
         token.trim().isEmpty) {
@@ -344,8 +464,9 @@ class NotificationService {
       );
     }
 
+
     // ------------------------------------------------------------
-    // Save device.
+    // Save device
     // ------------------------------------------------------------
 
     await saveDevice(
@@ -356,29 +477,37 @@ class NotificationService {
       fcmToken: token,
     );
 
+
     // ------------------------------------------------------------
-    // Register message listeners.
+    // Register FCM listeners
     // ------------------------------------------------------------
 
     await _registerMessageListeners();
 
+
     // ------------------------------------------------------------
-    // Token refresh listener.
+    // Register token refresh
     // ------------------------------------------------------------
 
     await _registerTokenRefreshListener();
 
+
     // ------------------------------------------------------------
-    // Handle notification that opened the app from a terminated
-    // state.
+    // Handle terminated-app notification
     // ------------------------------------------------------------
 
     await _handleInitialMessage();
 
+
     _initialized = true;
 
+
     print(
-      'NotificationService initialized successfully.',
+      '========================================',
+    );
+
+    print(
+      'NotificationService initialized',
     );
 
     print(
@@ -386,29 +515,277 @@ class NotificationService {
     );
 
     print(
-      'User: ${user.uid}',
+      'UID: ${user.uid}',
     );
 
     print(
-      'Role: ${isAdmin ? 'admin' : 'customer'}',
+      'Role: '
+      '${isAdmin ? 'admin' : 'customer'}',
+    );
+
+    print(
+      '========================================',
     );
   }
 
+
   // ==============================================================
-  // MESSAGE LISTENERS
+  // LOCAL NOTIFICATIONS INITIALIZATION
   // ==============================================================
 
-  Future<void> _registerMessageListeners() async {
+  Future<void>
+      _initializeLocalNotifications() async {
+    if (_localNotificationsInitialized) {
+      return;
+    }
+
+
     // ------------------------------------------------------------
-    // Cancel old listeners first.
-    //
-    // This prevents duplicate callbacks if initialize() is called
-    // again during the same application session.
+    // Android initialization
     // ------------------------------------------------------------
 
-    await _foregroundMessageSubscription?.cancel();
+    const androidSettings =
+        AndroidInitializationSettings(
+      '@mipmap/ic_launcher',
+    );
 
-    await _notificationOpenedSubscription?.cancel();
+
+    // ------------------------------------------------------------
+    // iOS initialization
+    // ------------------------------------------------------------
+
+    final darwinSettings =
+        DarwinInitializationSettings(
+      requestAlertPermission: false,
+      requestBadgePermission: false,
+      requestSoundPermission: false,
+    );
+
+
+    // ------------------------------------------------------------
+    // Combined settings
+    // ------------------------------------------------------------
+
+    final settings =
+        InitializationSettings(
+      android: androidSettings,
+      iOS: darwinSettings,
+    );
+
+
+    // ------------------------------------------------------------
+    // Initialize plugin
+    // ------------------------------------------------------------
+
+    await _localNotifications.initialize(
+      settings: settings,
+      onDidReceiveNotificationResponse:
+          _onLocalNotificationTap,
+    );
+
+
+    // ------------------------------------------------------------
+    // Android channel
+    // ------------------------------------------------------------
+
+    final androidPlugin =
+        _localNotifications
+            .resolvePlatformSpecificImplementation<
+                AndroidFlutterLocalNotificationsPlugin>();
+
+    if (androidPlugin != null) {
+      await androidPlugin
+          .createNotificationChannel(
+        _bookingChannel,
+      );
+
+      await androidPlugin
+          .requestNotificationsPermission();
+    }
+
+
+    // ------------------------------------------------------------
+    // iOS foreground presentation
+    // ------------------------------------------------------------
+
+    await _messaging
+        .setForegroundNotificationPresentationOptions(
+      alert: true,
+      badge: true,
+      sound: true,
+    );
+
+
+    _localNotificationsInitialized =
+        true;
+
+
+    print(
+      'Local notification system initialized.',
+    );
+  }
+
+
+  // ==============================================================
+  // LOCAL NOTIFICATION TAP
+  // ==============================================================
+
+  void _onLocalNotificationTap(
+    NotificationResponse response,
+  ) {
+    try {
+      final payload =
+          response.payload;
+
+      if (payload == null ||
+          payload.trim().isEmpty) {
+        return;
+      }
+
+      final data =
+          NotificationTapData
+              .fromPayload(
+        payload,
+      );
+
+      _handleNotificationTapData(
+        data,
+      );
+    } catch (error) {
+      print(
+        'Local notification tap failed: '
+        '$error',
+      );
+    }
+  }
+
+
+  // ==============================================================
+  // SHOW FOREGROUND NOTIFICATION
+  // ==============================================================
+
+  Future<void> _showForegroundNotification(
+    RemoteMessage message,
+  ) async {
+    if (!_localNotificationsInitialized) {
+      await _initializeLocalNotifications();
+    }
+
+
+    final notification =
+        message.notification;
+
+
+    final title =
+        notification?.title ??
+            _stringValue(
+              message.data['title'],
+            ) ??
+            'Rentocar';
+
+
+    final body =
+        notification?.body ??
+            _stringValue(
+              message.data['body'],
+            ) ??
+            'You have a new notification.';
+
+
+    final notificationData =
+        <String, dynamic>{
+      ...message.data,
+      'title': title,
+      'body': body,
+    };
+
+
+    final payload =
+        jsonEncode(
+      notificationData,
+    );
+
+
+    // ------------------------------------------------------------
+    // Generate a unique notification ID
+    // ------------------------------------------------------------
+
+    final notificationId =
+        DateTime.now()
+            .millisecondsSinceEpoch %
+            2147483647;
+
+
+    // ------------------------------------------------------------
+    // Android notification details
+    // ------------------------------------------------------------
+
+    final androidDetails =
+        AndroidNotificationDetails(
+      _bookingChannel.id,
+      _bookingChannel.name,
+      channelDescription:
+          _bookingChannel.description,
+      importance: Importance.max,
+      priority: Priority.high,
+      playSound: true,
+      enableVibration: true,
+      showWhen: true,
+      ticker: title,
+      icon: '@mipmap/ic_launcher',
+    );
+
+
+    // ------------------------------------------------------------
+    // iOS notification details
+    // ------------------------------------------------------------
+
+    const darwinDetails =
+        DarwinNotificationDetails(
+      presentAlert: true,
+      presentBadge: true,
+      presentSound: true,
+    );
+
+
+    final details =
+        NotificationDetails(
+      android: androidDetails,
+      iOS: darwinDetails,
+    );
+
+
+    // ------------------------------------------------------------
+    // Display
+    // ------------------------------------------------------------
+
+    await _localNotifications.show(
+      id: notificationId,
+      title: title,
+      body: body,
+      notificationDetails: details,
+      payload: payload,
+    );
+
+
+    print(
+      'Foreground local notification displayed.',
+    );
+  }
+
+
+  // ==============================================================
+  // REGISTER MESSAGE LISTENERS
+  // ==============================================================
+
+  Future<void>
+      _registerMessageListeners() async {
+    await _foregroundMessageSubscription
+        ?.cancel();
+
+    await _notificationOpenedSubscription
+        ?.cancel();
+
 
     // ------------------------------------------------------------
     // FOREGROUND
@@ -416,7 +793,7 @@ class NotificationService {
 
     _foregroundMessageSubscription =
         FirebaseMessaging.onMessage.listen(
-      (RemoteMessage message) {
+      (RemoteMessage message) async {
         try {
           print(
             '========================================',
@@ -427,24 +804,46 @@ class NotificationService {
           );
 
           print(
-            'Message ID: ${message.messageId}',
+            'Message ID: '
+            '${message.messageId}',
           );
 
           print(
-            'Title: ${message.notification?.title}',
+            'Title: '
+            '${message.notification?.title}',
           );
 
           print(
-            'Body: ${message.notification?.body}',
+            'Body: '
+            '${message.notification?.body}',
           );
 
           print(
-            'Data: ${message.data}',
+            'Data: '
+            '${message.data}',
           );
 
           print(
             '========================================',
           );
+
+
+          // ------------------------------------------------------
+          // IMPORTANT:
+          // FCM does not automatically show a notification while
+          // Flutter is in the foreground.
+          //
+          // Therefore we explicitly display a local notification.
+          // ------------------------------------------------------
+
+          await _showForegroundNotification(
+            message,
+          );
+
+
+          // ------------------------------------------------------
+          // Application callback
+          // ------------------------------------------------------
 
           final callback =
               onForegroundMessage;
@@ -454,38 +853,50 @@ class NotificationService {
           }
         } catch (error) {
           print(
-            'Foreground notification callback failed: $error',
+            'Foreground notification handling failed: '
+            '$error',
           );
         }
       },
     );
+
 
     // ------------------------------------------------------------
     // BACKGROUND → USER TAPS NOTIFICATION
     // ------------------------------------------------------------
 
     _notificationOpenedSubscription =
-        FirebaseMessaging.onMessageOpenedApp.listen(
+        FirebaseMessaging.onMessageOpenedApp
+            .listen(
       (RemoteMessage message) {
         try {
+          print(
+            'FCM BACKGROUND NOTIFICATION TAPPED',
+          );
+
           _handleNotificationTap(
             message,
           );
         } catch (error) {
           print(
-            'Notification tap handling failed: $error',
+            'Notification tap handling failed: '
+            '$error',
           );
         }
       },
     );
   }
 
+
   // ==============================================================
-  // TOKEN REFRESH LISTENER
+  // TOKEN REFRESH
   // ==============================================================
 
-  Future<void> _registerTokenRefreshListener() async {
-    await _tokenRefreshSubscription?.cancel();
+  Future<void>
+      _registerTokenRefreshListener() async {
+    await _tokenRefreshSubscription
+        ?.cancel();
+
 
     _tokenRefreshSubscription =
         _messaging.onTokenRefresh.listen(
@@ -500,18 +911,22 @@ class NotificationService {
           final activeDevice =
               _deviceId;
 
+
           if (activeUser == null ||
               activeTenant == null ||
               activeDevice == null) {
             return;
           }
 
+
           final cleanToken =
               newToken.trim();
+
 
           if (cleanToken.isEmpty) {
             return;
           }
+
 
           await saveDevice(
             tenantId: activeTenant,
@@ -521,31 +936,37 @@ class NotificationService {
             fcmToken: cleanToken,
           );
 
+
           print(
             'FCM token refreshed and saved.',
           );
         } catch (error) {
-          // Token refresh must NEVER break the user's session.
           print(
-            'FCM token refresh save failed: $error',
+            'FCM token refresh save failed: '
+            '$error',
           );
         }
       },
     );
   }
 
+
   // ==============================================================
-  // TERMINATED APP MESSAGE
+  // TERMINATED APP
   // ==============================================================
 
-  Future<void> _handleInitialMessage() async {
+  Future<void>
+      _handleInitialMessage() async {
     try {
-      final RemoteMessage? message =
-          await _messaging.getInitialMessage();
+      final message =
+          await _messaging
+              .getInitialMessage();
+
 
       if (message == null) {
         return;
       }
+
 
       print(
         '========================================',
@@ -556,47 +977,68 @@ class NotificationService {
       );
 
       print(
-        'Message ID: ${message.messageId}',
+        'Message ID: '
+        '${message.messageId}',
       );
 
       print(
-        'Title: ${message.notification?.title}',
+        'Title: '
+        '${message.notification?.title}',
       );
 
       print(
-        'Body: ${message.notification?.body}',
+        'Body: '
+        '${message.notification?.body}',
       );
 
       print(
-        'Data: ${message.data}',
+        'Data: '
+        '${message.data}',
       );
 
       print(
         '========================================',
       );
 
+
       _handleNotificationTap(
         message,
       );
     } catch (error) {
       print(
-        'Unable to handle initial FCM message: $error',
+        'Unable to handle initial FCM message: '
+        '$error',
       );
     }
   }
 
+
   // ==============================================================
-  // NOTIFICATION TAP
+  // FCM NOTIFICATION TAP
   // ==============================================================
 
   void _handleNotificationTap(
     RemoteMessage message,
   ) {
-    final notificationData =
-        NotificationTapData.fromRemoteMessage(
+    final data =
+        NotificationTapData
+            .fromRemoteMessage(
       message,
     );
 
+    _handleNotificationTapData(
+      data,
+    );
+  }
+
+
+  // ==============================================================
+  // COMMON TAP HANDLER
+  // ==============================================================
+
+  void _handleNotificationTapData(
+    NotificationTapData data,
+  ) {
     print(
       '========================================',
     );
@@ -606,52 +1048,48 @@ class NotificationService {
     );
 
     print(
-      'Type: ${notificationData.type}',
+      'Type: ${data.type}',
     );
 
     print(
-      'Tenant: ${notificationData.tenantId}',
+      'Tenant: ${data.tenantId}',
     );
 
     print(
-      'Booking: ${notificationData.bookingId}',
+      'Booking: ${data.bookingId}',
     );
 
     print(
-      'Status: ${notificationData.status}',
+      'Status: ${data.status}',
     );
 
     print(
       'Payment Status: '
-      '${notificationData.paymentStatus}',
-    );
-
-    print(
-      'Data: ${notificationData.data}',
+      '${data.paymentStatus}',
     );
 
     print(
       '========================================',
     );
 
+
     // ------------------------------------------------------------
-    // Security check:
-    //
-    // If the notification contains a tenant ID and it does not
-    // match the currently logged-in tenant, do not route it.
+    // Tenant security
     // ------------------------------------------------------------
 
     final notificationTenant =
-        notificationData.tenantId?.trim();
+        data.tenantId?.trim();
 
     final currentTenant =
         _currentTenantId?.trim();
+
 
     if (notificationTenant != null &&
         notificationTenant.isNotEmpty &&
         currentTenant != null &&
         currentTenant.isNotEmpty &&
-        notificationTenant != currentTenant) {
+        notificationTenant !=
+            currentTenant) {
       print(
         'Notification ignored due to tenant mismatch.',
       );
@@ -659,21 +1097,24 @@ class NotificationService {
       return;
     }
 
+
     // ------------------------------------------------------------
-    // Send to application/router.
+    // Application callback
     // ------------------------------------------------------------
 
     final callback =
         onNotificationTap;
 
+
     if (callback != null) {
-      callback(notificationData);
+      callback(data);
     } else {
       print(
         'No notification tap callback registered.',
       );
     }
   }
+
 
   // ==============================================================
   // REQUEST PERMISSION
@@ -682,7 +1123,8 @@ class NotificationService {
   Future<NotificationSettings>
       requestPermission() async {
     final settings =
-        await _messaging.requestPermission(
+        await _messaging
+            .requestPermission(
       alert: true,
       badge: true,
       sound: true,
@@ -692,13 +1134,16 @@ class NotificationService {
       criticalAlert: false,
     );
 
+
     print(
       'FCM authorization status: '
       '${settings.authorizationStatus}',
     );
 
+
     return settings;
   }
+
 
   // ==============================================================
   // DEVICE ID
@@ -710,17 +1155,16 @@ class NotificationService {
       return _deviceId!;
     }
 
-    try {
-      // ----------------------------------------------------------
-      // ANDROID
-      // ----------------------------------------------------------
 
+    try {
       if (Platform.isAndroid) {
         final androidInfo =
-            await _deviceInfo.androidInfo;
+            await _deviceInfo
+                .androidInfo;
 
         final id =
             androidInfo.id.trim();
+
 
         if (id.isNotEmpty) {
           _deviceId = id;
@@ -729,17 +1173,17 @@ class NotificationService {
         }
       }
 
-      // ----------------------------------------------------------
-      // IOS
-      // ----------------------------------------------------------
 
       if (Platform.isIOS) {
         final iosInfo =
-            await _deviceInfo.iosInfo;
+            await _deviceInfo
+                .iosInfo;
 
         final id =
-            (iosInfo.identifierForVendor ?? '')
+            (iosInfo.identifierForVendor ??
+                    '')
                 .trim();
+
 
         if (id.isNotEmpty) {
           _deviceId = id;
@@ -749,18 +1193,15 @@ class NotificationService {
       }
     } catch (error) {
       print(
-        'Unable to get device ID: $error',
+        'Unable to get device ID: '
+        '$error',
       );
     }
 
-    // ------------------------------------------------------------
-    // FALLBACK
-    //
-    // This should rarely be required.
-    // ------------------------------------------------------------
 
     final fallbackToken =
         await _messaging.getToken();
+
 
     if (fallbackToken != null &&
         fallbackToken.trim().isNotEmpty) {
@@ -770,10 +1211,12 @@ class NotificationService {
       return _deviceId!;
     }
 
+
     throw Exception(
       'Unable to generate a device identifier.',
     );
   }
+
 
   // ==============================================================
   // SAVE DEVICE
@@ -798,9 +1241,6 @@ class NotificationService {
     final cleanToken =
         fcmToken.trim();
 
-    // ------------------------------------------------------------
-    // Validate
-    // ------------------------------------------------------------
 
     if (cleanTenantId.isEmpty ||
         cleanUserId.isEmpty ||
@@ -811,69 +1251,64 @@ class NotificationService {
       );
     }
 
-    // ------------------------------------------------------------
-    // Role
-    // ------------------------------------------------------------
 
-    final String role =
-        isAdmin ? 'admin' : 'customer';
+    final role =
+        isAdmin
+            ? 'admin'
+            : 'customer';
 
-    // ------------------------------------------------------------
-    // Parent collection
-    // ------------------------------------------------------------
 
-    final String userCollection =
+    final userCollection =
         isAdmin
             ? 'admins'
             : 'customers';
 
-    // ------------------------------------------------------------
-    // User reference
-    //
-    // tenants/{tenantId}/admins/{uid}
-    //
-    // OR
-    //
-    // tenants/{tenantId}/customers/{uid}
-    // ------------------------------------------------------------
 
-    final userRef = _firestore
-        .collection('tenants')
-        .doc(cleanTenantId)
-        .collection(userCollection)
-        .doc(cleanUserId);
+    final userRef =
+        _firestore
+            .collection('tenants')
+            .doc(cleanTenantId)
+            .collection(userCollection)
+            .doc(cleanUserId);
 
-    // ------------------------------------------------------------
-    // Device reference
-    //
-    // tenants/{tenantId}/{admins|customers}/{uid}
-    //     /notificationDevices/{deviceId}
-    // ------------------------------------------------------------
 
-    final deviceRef = userRef
-        .collection('notificationDevices')
-        .doc(cleanDeviceId);
+    final deviceRef =
+        userRef
+            .collection(
+              'notificationDevices',
+            )
+            .doc(cleanDeviceId);
 
-    // ------------------------------------------------------------
-    // Existing device check
-    // ------------------------------------------------------------
 
     final existingDevice =
         await deviceRef.get();
 
-    // ------------------------------------------------------------
-    // Device data
-    // ------------------------------------------------------------
 
-    final Map<String, dynamic> deviceData = {
-      'deviceId': cleanDeviceId,
-      'fcmToken': cleanToken,
-      'firebaseUid': cleanUserId,
-      'tenantId': cleanTenantId,
-      'role': role,
-      'isAdmin': isAdmin,
-      'isActive': true,
-      'platform': _platformName(),
+    final Map<String, dynamic>
+        deviceData = {
+      'deviceId':
+          cleanDeviceId,
+
+      'fcmToken':
+          cleanToken,
+
+      'firebaseUid':
+          cleanUserId,
+
+      'tenantId':
+          cleanTenantId,
+
+      'role':
+          role,
+
+      'isAdmin':
+          isAdmin,
+
+      'isActive':
+          true,
+
+      'platform':
+          _platformName(),
 
       'updatedAt':
           FieldValue.serverTimestamp(),
@@ -882,18 +1317,12 @@ class NotificationService {
           FieldValue.serverTimestamp(),
     };
 
-    // ------------------------------------------------------------
-    // Only set createdAt once.
-    // ------------------------------------------------------------
 
     if (!existingDevice.exists) {
       deviceData['createdAt'] =
           FieldValue.serverTimestamp();
     }
 
-    // ------------------------------------------------------------
-    // Save
-    // ------------------------------------------------------------
 
     await deviceRef.set(
       deviceData,
@@ -902,9 +1331,6 @@ class NotificationService {
       ),
     );
 
-    // ------------------------------------------------------------
-    // Update local session
-    // ------------------------------------------------------------
 
     _deviceId =
         cleanDeviceId;
@@ -918,9 +1344,6 @@ class NotificationService {
     _isAdmin =
         isAdmin;
 
-    // ------------------------------------------------------------
-    // Debug
-    // ------------------------------------------------------------
 
     print(
       '========================================',
@@ -964,6 +1387,7 @@ class NotificationService {
     );
   }
 
+
   // ==============================================================
   // UPDATE LAST SEEN
   // ==============================================================
@@ -978,16 +1402,19 @@ class NotificationService {
     final deviceId =
         _deviceId;
 
+
     if (tenantId == null ||
         userId == null ||
         deviceId == null) {
       return;
     }
 
+
     final collection =
         _isAdmin
             ? 'admins'
             : 'customers';
+
 
     try {
       await _firestore
@@ -995,7 +1422,9 @@ class NotificationService {
           .doc(tenantId)
           .collection(collection)
           .doc(userId)
-          .collection('notificationDevices')
+          .collection(
+            'notificationDevices',
+          )
           .doc(deviceId)
           .set(
         {
@@ -1005,7 +1434,8 @@ class NotificationService {
           'updatedAt':
               FieldValue.serverTimestamp(),
 
-          'isActive': true,
+          'isActive':
+              true,
         },
         SetOptions(
           merge: true,
@@ -1019,11 +1449,13 @@ class NotificationService {
     }
   }
 
+
   // ==============================================================
   // DEACTIVATE CURRENT DEVICE
   // ==============================================================
 
-  Future<void> deactivateCurrentDevice() async {
+  Future<void>
+      deactivateCurrentDevice() async {
     final tenantId =
         _currentTenantId;
 
@@ -1033,11 +1465,13 @@ class NotificationService {
     final deviceId =
         _deviceId;
 
+
     if (tenantId == null ||
         userId == null ||
         deviceId == null) {
       return;
     }
+
 
     try {
       final collection =
@@ -1045,16 +1479,20 @@ class NotificationService {
               ? 'admins'
               : 'customers';
 
+
       await _firestore
           .collection('tenants')
           .doc(tenantId)
           .collection(collection)
           .doc(userId)
-          .collection('notificationDevices')
+          .collection(
+            'notificationDevices',
+          )
           .doc(deviceId)
           .set(
         {
-          'isActive': false,
+          'isActive':
+              false,
 
           'updatedAt':
               FieldValue.serverTimestamp(),
@@ -1074,40 +1512,29 @@ class NotificationService {
     }
   }
 
+
   // ==============================================================
   // LOGOUT CLEANUP
   // ==============================================================
 
   Future<void> clearSession() async {
-    // ------------------------------------------------------------
-    // Cancel FCM subscriptions.
-    // ------------------------------------------------------------
+    try {
+      await _tokenRefreshSubscription
+          ?.cancel();
+    } catch (_) {}
+
 
     try {
-      await _tokenRefreshSubscription?.cancel();
-    } catch (error) {
-      print(
-        'Token refresh listener cleanup failed: $error',
-      );
-    }
+      await _foregroundMessageSubscription
+          ?.cancel();
+    } catch (_) {}
+
 
     try {
-      await _foregroundMessageSubscription?.cancel();
-    } catch (error) {
-      print(
-        'Foreground notification listener cleanup failed: '
-        '$error',
-      );
-    }
+      await _notificationOpenedSubscription
+          ?.cancel();
+    } catch (_) {}
 
-    try {
-      await _notificationOpenedSubscription?.cancel();
-    } catch (error) {
-      print(
-        'Notification opened listener cleanup failed: '
-        '$error',
-      );
-    }
 
     _tokenRefreshSubscription =
         null;
@@ -1118,9 +1545,6 @@ class NotificationService {
     _notificationOpenedSubscription =
         null;
 
-    // ------------------------------------------------------------
-    // Clear session data.
-    // ------------------------------------------------------------
 
     _deviceId = null;
 
@@ -1132,14 +1556,34 @@ class NotificationService {
 
     _initialized = false;
 
+
     print(
       'NotificationService session cleared.',
     );
   }
 
+
   // ==============================================================
-  // PLATFORM
+  // HELPERS
   // ==============================================================
+
+  String? _stringValue(
+    dynamic value,
+  ) {
+    if (value == null) {
+      return null;
+    }
+
+    final text =
+        value.toString().trim();
+
+    if (text.isEmpty) {
+      return null;
+    }
+
+    return text;
+  }
+
 
   String _platformName() {
     if (Platform.isAndroid) {
@@ -1152,6 +1596,7 @@ class NotificationService {
 
     return 'unknown';
   }
+
 
   // ==============================================================
   // GETTERS
