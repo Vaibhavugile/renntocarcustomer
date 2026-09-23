@@ -17,13 +17,12 @@ class LoginScreen extends StatefulWidget {
 
 class _LoginScreenState
     extends State<LoginScreen> {
-
   final TextEditingController
       _phoneController =
       TextEditingController();
 
   final AuthService _authService =
-      AuthService();
+      AuthService.instance;
 
   bool _loading = false;
 
@@ -34,12 +33,16 @@ class _LoginScreenState
   }
 
   // ============================================================
-  // SEND OTP
+  // SEND MSG91 WHATSAPP OTP
   // ============================================================
 
   Future<void> _continue() async {
     final phone =
         _phoneController.text.trim();
+
+    // ----------------------------------------------------------
+    // Validate phone
+    // ----------------------------------------------------------
 
     if (phone.length != 10) {
       _showError(
@@ -48,52 +51,105 @@ class _LoginScreenState
       return;
     }
 
+    // ----------------------------------------------------------
+    // Validate Indian mobile format
+    // ----------------------------------------------------------
+
+    if (!RegExp(
+      r'^[6-9][0-9]{9}$',
+    ).hasMatch(phone)) {
+      _showError(
+        'Please enter a valid Indian mobile number.',
+      );
+      return;
+    }
+
     FocusScope.of(context).unfocus();
+
+    if (_loading) {
+      return;
+    }
 
     setState(() {
       _loading = true;
     });
 
-    await _authService.sendOtp(
-      phoneNumber:
-          '+91$phone',
+    try {
+      // --------------------------------------------------------
+      // Get tenant configuration
+      // --------------------------------------------------------
 
-      onCodeSent:
-          (verificationId) {
+      final tenantId =
+          AppConfig.tenant.tenantId.trim();
 
-        if (!mounted) return;
-
-        setState(() {
-          _loading = false;
-        });
-
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) =>
-                OtpScreen(
-              verificationId:
-                  verificationId,
-
-              phoneNumber:
-                  '+91$phone',
-            ),
-          ),
+      if (tenantId.isEmpty) {
+        throw const AuthServiceException(
+          'Tenant configuration is missing.',
         );
-      },
+      }
 
-      onError:
-          (message) {
+      // --------------------------------------------------------
+      // Send WhatsApp OTP
+      // --------------------------------------------------------
 
-        if (!mounted) return;
+      await _authService.sendOtp(
+        tenantId: tenantId,
+        phoneNumber: '+91$phone',
+      );
 
-        setState(() {
-          _loading = false;
-        });
+      if (!mounted) {
+        return;
+      }
 
-        _showError(message);
-      },
-    );
+      setState(() {
+        _loading = false;
+      });
+
+      // --------------------------------------------------------
+      // Navigate to OTP screen
+      // --------------------------------------------------------
+      //
+      // IMPORTANT:
+      //
+      // Firebase verificationId is no longer used.
+      //
+      // MSG91 OTP is verified by our Firebase Cloud Function.
+      //
+      // --------------------------------------------------------
+
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => OtpScreen(
+            phoneNumber: '+91$phone',
+          ),
+        ),
+      );
+    } on AuthServiceException catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _loading = false;
+      });
+
+      _showError(
+        error.message,
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _loading = false;
+      });
+
+      _showError(
+        'Unable to send WhatsApp OTP. Please try again.',
+      );
+    }
   }
 
   // ============================================================
@@ -103,12 +159,89 @@ class _LoginScreenState
   void _showError(
     String message,
   ) {
+    if (!mounted) {
+      return;
+    }
+
+    ScaffoldMessenger.of(
+      context,
+    ).hideCurrentSnackBar();
+
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(
       SnackBar(
+        behavior:
+            SnackBarBehavior.floating,
+
+        margin:
+            const EdgeInsets.fromLTRB(
+          16,
+          0,
+          16,
+          16,
+        ),
+
+        backgroundColor:
+            const Color(
+          0xFF17201F,
+        ),
+
+        elevation:
+            8,
+
+        duration:
+            const Duration(
+          seconds: 4,
+        ),
+
+        shape:
+            RoundedRectangleBorder(
+          borderRadius:
+              BorderRadius.circular(
+            14,
+          ),
+        ),
+
         content:
-            Text(message),
+            Row(
+          children: [
+
+            const Icon(
+              Icons
+                  .error_outline_rounded,
+
+              color:
+                  Colors.white,
+
+              size:
+                  20,
+            ),
+
+            const SizedBox(
+              width: 10,
+            ),
+
+            Expanded(
+              child:
+                  Text(
+                message,
+
+                style:
+                    GoogleFonts.manrope(
+                  fontSize:
+                      12.5,
+
+                  fontWeight:
+                      FontWeight.w600,
+
+                  color:
+                      Colors.white,
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -121,7 +254,6 @@ class _LoginScreenState
   Widget build(
     BuildContext context,
   ) {
-
     final config =
         AppConfig.tenant;
 
@@ -141,8 +273,10 @@ class _LoginScreenState
         0xFFF8FAF9,
       ),
 
-      body: SafeArea(
-        child: Stack(
+      body:
+          SafeArea(
+        child:
+            Stack(
           children: [
 
             // ==================================================
@@ -150,13 +284,19 @@ class _LoginScreenState
             // ==================================================
 
             Positioned(
-              top: -150,
-              right: -110,
+              top:
+                  -150,
+
+              right:
+                  -110,
 
               child:
                   Container(
-                width: 330,
-                height: 330,
+                width:
+                    330,
+
+                height:
+                    330,
 
                 decoration:
                     BoxDecoration(
@@ -165,7 +305,8 @@ class _LoginScreenState
 
                   color:
                       secondary.withValues(
-                    alpha: 0.07,
+                    alpha:
+                        0.07,
                   ),
                 ),
               ),
@@ -176,13 +317,19 @@ class _LoginScreenState
             // ==================================================
 
             Positioned(
-              top: 300,
-              left: -190,
+              top:
+                  300,
+
+              left:
+                  -190,
 
               child:
                   Container(
-                width: 300,
-                height: 300,
+                width:
+                    300,
+
+                height:
+                    300,
 
                 decoration:
                     BoxDecoration(
@@ -191,7 +338,8 @@ class _LoginScreenState
 
                   color:
                       primary.withValues(
-                    alpha: 0.035,
+                    alpha:
+                        0.035,
                   ),
                 ),
               ),
@@ -228,8 +376,11 @@ class _LoginScreenState
                     children: [
 
                       Container(
-                        width: 48,
-                        height: 48,
+                        width:
+                            48,
+
+                        height:
+                            48,
 
                         decoration:
                             BoxDecoration(
@@ -242,11 +393,13 @@ class _LoginScreenState
                             15,
                           ),
 
-                          boxShadow: [
+                          boxShadow:
+                              [
                             BoxShadow(
                               color:
                                   primary.withValues(
-                                alpha: 0.20,
+                                alpha:
+                                    0.20,
                               ),
 
                               blurRadius:
@@ -269,12 +422,14 @@ class _LoginScreenState
                           color:
                               Colors.white,
 
-                          size: 24,
+                          size:
+                              24,
                         ),
                       ),
 
                       const SizedBox(
-                        width: 12,
+                        width:
+                            12,
                       ),
 
                       Text(
@@ -285,7 +440,8 @@ class _LoginScreenState
 
                         style:
                             GoogleFonts.manrope(
-                          fontSize: 16,
+                          fontSize:
+                              16,
 
                           fontWeight:
                               FontWeight.w900,
@@ -303,7 +459,8 @@ class _LoginScreenState
                   ),
 
                   const SizedBox(
-                    height: 58,
+                    height:
+                        58,
                   ),
 
                   // =================================================
@@ -312,11 +469,14 @@ class _LoginScreenState
 
                   Text(
                     'Find your\nperfect drive.',
+
                     style:
                         GoogleFonts.manrope(
-                      fontSize: 42,
+                      fontSize:
+                          42,
 
-                      height: 1.03,
+                      height:
+                          1.03,
 
                       fontWeight:
                           FontWeight.w900,
@@ -332,17 +492,21 @@ class _LoginScreenState
                   ),
 
                   const SizedBox(
-                    height: 18,
+                    height:
+                        18,
                   ),
 
                   Text(
                     'Premium cars. Simple booking.\n'
                     'A better way to move.',
+
                     style:
                         GoogleFonts.manrope(
-                      fontSize: 15.5,
+                      fontSize:
+                          15.5,
 
-                      height: 1.55,
+                      height:
+                          1.55,
 
                       fontWeight:
                           FontWeight.w500,
@@ -355,7 +519,8 @@ class _LoginScreenState
                   ),
 
                   const SizedBox(
-                    height: 42,
+                    height:
+                        42,
                   ),
 
                   // =================================================
@@ -389,13 +554,15 @@ class _LoginScreenState
                         ),
                       ),
 
-                      boxShadow: [
+                      boxShadow:
+                          [
                         BoxShadow(
                           color:
                               const Color(
                             0xFF17201F,
                           ).withValues(
-                            alpha: 0.045,
+                            alpha:
+                                0.045,
                           ),
 
                           blurRadius:
@@ -419,9 +586,11 @@ class _LoginScreenState
 
                         Text(
                           'WELCOME',
+
                           style:
                               GoogleFonts.manrope(
-                            fontSize: 11,
+                            fontSize:
+                                11,
 
                             fontWeight:
                                 FontWeight.w900,
@@ -437,14 +606,17 @@ class _LoginScreenState
                         ),
 
                         const SizedBox(
-                          height: 9,
+                          height:
+                              9,
                         ),
 
                         Text(
                           'Enter your mobile number',
+
                           style:
                               GoogleFonts.manrope(
-                            fontSize: 18,
+                            fontSize:
+                                18,
 
                             fontWeight:
                                 FontWeight.w800,
@@ -457,14 +629,20 @@ class _LoginScreenState
                         ),
 
                         const SizedBox(
-                          height: 5,
+                          height:
+                              5,
                         ),
 
                         Text(
-                          'We will send a secure verification code.',
+                          'We will send a secure verification code on WhatsApp.',
+
                           style:
                               GoogleFonts.manrope(
-                            fontSize: 12.5,
+                            fontSize:
+                                12.5,
+
+                            height:
+                                1.45,
 
                             fontWeight:
                                 FontWeight.w500,
@@ -477,7 +655,8 @@ class _LoginScreenState
                         ),
 
                         const SizedBox(
-                          height: 20,
+                          height:
+                              20,
                         ),
 
                         // =============================================
@@ -485,7 +664,8 @@ class _LoginScreenState
                         // =============================================
 
                         Container(
-                          height: 62,
+                          height:
+                              62,
 
                           decoration:
                               BoxDecoration(
@@ -513,7 +693,8 @@ class _LoginScreenState
                             children: [
 
                               const SizedBox(
-                                width: 15,
+                                width:
+                                    15,
                               ),
 
                               Container(
@@ -544,6 +725,7 @@ class _LoginScreenState
                                 child:
                                     Text(
                                   '+91',
+
                                   style:
                                       GoogleFonts.manrope(
                                     fontSize:
@@ -559,12 +741,16 @@ class _LoginScreenState
                               ),
 
                               const SizedBox(
-                                width: 10,
+                                width:
+                                    10,
                               ),
 
                               Container(
-                                width: 1,
-                                height: 26,
+                                width:
+                                    1,
+
+                                height:
+                                    26,
 
                                 color:
                                     const Color(
@@ -573,7 +759,8 @@ class _LoginScreenState
                               ),
 
                               const SizedBox(
-                                width: 10,
+                                width:
+                                    10,
                               ),
 
                               Expanded(
@@ -587,6 +774,19 @@ class _LoginScreenState
 
                                   maxLength:
                                       10,
+
+                                  enabled:
+                                      !_loading,
+
+                                  textInputAction:
+                                      TextInputAction.done,
+
+                                  onSubmitted:
+                                      (_) {
+                                    if (!_loading) {
+                                      _continue();
+                                    }
+                                  },
 
                                   style:
                                       GoogleFonts.manrope(
@@ -632,7 +832,8 @@ class _LoginScreenState
                         ),
 
                         const SizedBox(
-                          height: 16,
+                          height:
+                              16,
                         ),
 
                         // =============================================
@@ -643,7 +844,8 @@ class _LoginScreenState
                           width:
                               double.infinity,
 
-                          height: 58,
+                          height:
+                              58,
 
                           child:
                               ElevatedButton(
@@ -660,7 +862,8 @@ class _LoginScreenState
 
                               disabledBackgroundColor:
                                   primary.withValues(
-                                alpha: 0.55,
+                                alpha:
+                                    0.55,
                               ),
 
                               elevation:
@@ -680,6 +883,7 @@ class _LoginScreenState
                                     ? const SizedBox(
                                         width:
                                             22,
+
                                         height:
                                             22,
 
@@ -701,6 +905,7 @@ class _LoginScreenState
 
                                           Text(
                                             'Continue',
+
                                             style:
                                                 GoogleFonts.manrope(
                                               color:
@@ -738,7 +943,8 @@ class _LoginScreenState
                   ),
 
                   const SizedBox(
-                    height: 28,
+                    height:
+                        28,
                   ),
 
                   // =================================================
@@ -754,8 +960,11 @@ class _LoginScreenState
                       children: [
 
                         Container(
-                          width: 28,
-                          height: 28,
+                          width:
+                              28,
+
+                          height:
+                              28,
 
                           decoration:
                               BoxDecoration(
@@ -785,14 +994,17 @@ class _LoginScreenState
                         ),
 
                         const SizedBox(
-                          width: 9,
+                          width:
+                              9,
                         ),
 
                         Text(
-                          'Secure OTP authentication',
+                          'Secure WhatsApp OTP authentication',
+
                           style:
                               GoogleFonts.manrope(
-                            fontSize: 12,
+                            fontSize:
+                                12,
 
                             fontWeight:
                                 FontWeight.w600,
@@ -808,20 +1020,24 @@ class _LoginScreenState
                   ),
 
                   const SizedBox(
-                    height: 16,
+                    height:
+                        16,
                   ),
 
                   Text(
                     'By continuing, you agree to our '
                     'Terms of Service and Privacy Policy.',
+
                     textAlign:
                         TextAlign.center,
 
                     style:
                         GoogleFonts.manrope(
-                      fontSize: 10.5,
+                      fontSize:
+                          10.5,
 
-                      height: 1.45,
+                      height:
+                          1.45,
 
                       color:
                           const Color(

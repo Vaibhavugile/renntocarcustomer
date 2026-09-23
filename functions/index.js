@@ -93,6 +93,56 @@ const {
 
 
 // ============================================================
+// MSG91 WHATSAPP OTP
+// ============================================================
+//
+// msg91Otp.js contains:
+//
+// SEND OTP:
+//
+// Flutter
+//      ↓
+// sendMsg91Otp()
+//      ↓
+// tenants/{tenantId}.msg91
+//      ↓
+// Generate secure 6-digit OTP
+//      ↓
+// Store HASHED OTP
+//      ↓
+// Send WhatsApp template through MSG91
+//
+// VERIFY OTP:
+//
+// Flutter
+//      ↓
+// verifyMsg91Otp()
+//      ↓
+// Read hashed OTP
+//      ↓
+// Validate OTP
+//      ↓
+// Check expiry
+//      ↓
+// Check maximum attempts
+//      ↓
+// Find existing Firebase Auth user by phone
+//      ↓
+// Create Firebase user if required
+//      ↓
+// Create Firebase Custom Token
+//      ↓
+// Flutter signInWithCustomToken()
+//
+// ============================================================
+
+const {
+  sendMsg91Otp,
+  verifyMsg91Otp,
+} = require("./msg91Otp");
+
+
+// ============================================================
 // FIREBASE ADMIN INITIALIZATION
 // ============================================================
 
@@ -274,17 +324,21 @@ exports.createCustomer = onCall(
       try {
         firebaseUser =
         await auth.createUser({
-          phoneNumber: phone,
+          phoneNumber:
+            phone,
 
           ...(email ?
             {
-              email: email,
+              email:
+                  email,
             } :
             {}),
 
-          displayName: fullName,
+          displayName:
+            fullName,
 
-          disabled: false,
+          disabled:
+            false,
         });
       } catch (error) {
         console.error(
@@ -347,35 +401,51 @@ exports.createCustomer = onCall(
 
       try {
         await customerRef.set({
-          customerId: uid,
 
-          tenantId: tenantId,
+          customerId:
+          uid,
 
-          fullName: fullName,
+          tenantId:
+          tenantId,
 
-          phone: phone,
+          fullName:
+          fullName,
 
-          email: email,
+          phone:
+          phone,
 
-          profileImageUrl: "",
+          email:
+          email,
 
-          dateOfBirth: "",
+          profileImageUrl:
+          "",
 
-          gender: "",
+          dateOfBirth:
+          "",
 
-          address: null,
+          gender:
+          "",
 
-          emergencyContact: null,
+          address:
+          null,
 
-          kycStatus: "not_started",
+          emergencyContact:
+          null,
 
-          profileCompleted: false,
+          kycStatus:
+          "not_started",
 
-          isActive: true,
+          profileCompleted:
+          false,
 
-          totalBookings: 0,
+          isActive:
+          true,
 
-          completedBookings: 0,
+          totalBookings:
+          0,
+
+          completedBookings:
+          0,
 
           createdAt:
           FieldValue.serverTimestamp(),
@@ -396,13 +466,18 @@ exports.createCustomer = onCall(
         // -----------------------------------------------------
 
         return {
-          success: true,
 
-          customerId: uid,
+          success:
+          true,
 
-          firebaseUid: uid,
+          customerId:
+          uid,
 
-          tenantId: tenantId,
+          firebaseUid:
+          uid,
+
+          tenantId:
+          tenantId,
 
           message:
           "Customer created successfully.",
@@ -419,7 +494,9 @@ exports.createCustomer = onCall(
         // -----------------------------------------------------
 
         try {
-          await auth.deleteUser(uid);
+          await auth.deleteUser(
+              uid,
+          );
         } catch (deleteError) {
           console.error(
               "Failed to rollback Firebase Auth user:",
@@ -508,3 +585,36 @@ exports.notifyAdminsOnNewBooking =
 
 exports.notifyCustomerOnBookingUpdate =
   notifyCustomerOnBookingUpdate;
+
+
+// ============================================================
+// EXPORT MSG91 WHATSAPP OTP
+// ============================================================
+//
+// SEND:
+//
+// Flutter
+//      ↓
+// sendMsg91Otp()
+//      ↓
+// MSG91 WhatsApp
+//
+// VERIFY:
+//
+// Flutter
+//      ↓
+// verifyMsg91Otp()
+//      ↓
+// Verify hashed OTP
+//      ↓
+// Firebase Auth user lookup
+//      ↓
+// Firebase Custom Token
+//
+// ============================================================
+
+exports.sendMsg91Otp =
+  sendMsg91Otp;
+
+exports.verifyMsg91Otp =
+  verifyMsg91Otp;

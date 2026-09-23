@@ -12,12 +12,10 @@ import '../../customer/services/customer_service.dart';
 import '../../admin/dashboard/screens/admin_dashboard_screen.dart';
 
 class OtpScreen extends StatefulWidget {
-  final String verificationId;
   final String phoneNumber;
 
   const OtpScreen({
     super.key,
-    required this.verificationId,
     required this.phoneNumber,
   });
 
@@ -41,24 +39,13 @@ class _OtpScreenState extends State<OtpScreen> {
   // ============================================================
 
   final AuthService _authService =
-      AuthService();
+      AuthService.instance;
 
   final CustomerService _customerService =
       CustomerService();
 
   final FirebaseFirestore _firestore =
       FirebaseFirestore.instance;
-
-  // ============================================================
-  // VERIFICATION ID
-  // ============================================================
-  //
-  // This must remain mutable because Firebase gives us a new
-  // verification ID when OTP is resent.
-  //
-  // ============================================================
-
-  late String _verificationId;
 
   // ============================================================
   // STATE
@@ -68,13 +55,11 @@ class _OtpScreenState extends State<OtpScreen> {
 
   bool _resending = false;
 
-  int _seconds = 30;
+  bool _verificationStarted = false;
+
+  int _seconds = 60;
 
   Timer? _timer;
-
-  // Prevent automatic verification from being triggered
-  // multiple times while typing the 6th digit.
-  bool _verificationStarted = false;
 
   // ============================================================
   // FIXED PREMIUM PALETTE
@@ -111,9 +96,6 @@ class _OtpScreenState extends State<OtpScreen> {
   @override
   void initState() {
     super.initState();
-
-    _verificationId =
-        widget.verificationId;
 
     _startTimer();
 
@@ -159,7 +141,7 @@ class _OtpScreenState extends State<OtpScreen> {
   void _startTimer() {
     _timer?.cancel();
 
-    _seconds = 30;
+    _seconds = 60;
 
     if (mounted) {
       setState(() {});
@@ -189,7 +171,7 @@ class _OtpScreenState extends State<OtpScreen> {
   }
 
   // ============================================================
-  // VERIFY
+  // VERIFY OTP
   // ============================================================
 
   Future<void> _verify() async {
@@ -202,7 +184,9 @@ class _OtpScreenState extends State<OtpScreen> {
     final otp =
         _otpController.text.trim();
 
-    if (otp.length != 6) {
+    if (!RegExp(
+      r'^\d{6}$',
+    ).hasMatch(otp)) {
       _showError(
         'Please enter the 6-digit OTP.',
       );
@@ -220,14 +204,28 @@ class _OtpScreenState extends State<OtpScreen> {
     });
 
     try {
+      final tenantId =
+          _tenantId;
+
+      // ========================================================
+      // VERIFY MSG91 OTP
+      // ========================================================
+
       final success =
           await _authService.verifyOtp(
-        verificationId:
-            _verificationId,
-        otp: otp,
+        tenantId:
+            tenantId,
+
+        phoneNumber:
+            widget.phoneNumber,
+
+        otp:
+            otp,
       );
 
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       if (!success) {
         setState(() {
@@ -239,25 +237,32 @@ class _OtpScreenState extends State<OtpScreen> {
           'Invalid OTP. Please check the code.',
         );
 
+        _otpController.clear();
+
+        _otpFocusNode.requestFocus();
+
         return;
       }
 
       // ========================================================
-      // OTP SUCCESS
+      // OTP VERIFIED
       // ========================================================
       //
-      // IMPORTANT:
+      // AuthService has already:
       //
-      // We DO NOT create a customer here immediately.
+      // 1. Called verifyMsg91Otp
+      // 2. Received Firebase Custom Token
+      // 3. Called signInWithCustomToken()
       //
-      // First we check whether this authenticated Firebase UID
-      // belongs to an admin for the current tenant.
+      // FirebaseAuth.currentUser is now available.
       //
       // ========================================================
 
       await _routeAfterLogin();
-    } catch (e) {
-      if (!mounted) return;
+    } on AuthServiceException catch (error) {
+      if (!mounted) {
+        return;
+      }
 
       setState(() {
         _loading = false;
@@ -265,8 +270,33 @@ class _OtpScreenState extends State<OtpScreen> {
       });
 
       _showError(
+        error.message,
+      );
+
+      _otpController.clear();
+
+      _otpFocusNode.requestFocus();
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _loading = false;
+        _verificationStarted = false;
+      });
+
+      debugPrint(
+        'OTP verification error: $error',
+      );
+
+      _showError(
         'Unable to verify OTP. Please try again.',
       );
+
+      _otpController.clear();
+
+      _otpFocusNode.requestFocus();
     }
   }
 
@@ -285,22 +315,51 @@ class _OtpScreenState extends State<OtpScreen> {
         );
       }
 
-      final tenantId = _tenantId;
+      final tenantId =
+          _tenantId;
 
-      final uid = user.uid;
+      final uid =
+          user.uid;
+
+      debugPrint(
+        '========================================',
+      );
+
+      debugPrint(
+        'MSG91 LOGIN SUCCESS',
+      );
+
+      debugPrint(
+        'UID: $uid',
+      );
+
+      debugPrint(
+        'Phone: ${user.phoneNumber}',
+      );
+
+      debugPrint(
+        'Tenant: $tenantId',
+      );
+
+      debugPrint(
+        '========================================',
+      );
 
       // ========================================================
       // CHECK ADMIN
       // ========================================================
 
-      final adminDoc = await _firestore
-          .collection('tenants')
-          .doc(tenantId)
-          .collection('admins')
-          .doc(uid)
-          .get();
+      final adminDoc =
+          await _firestore
+              .collection('tenants')
+              .doc(tenantId)
+              .collection('admins')
+              .doc(uid)
+              .get();
 
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       // ========================================================
       // ADMIN EXISTS
@@ -320,7 +379,8 @@ class _OtpScreenState extends State<OtpScreen> {
         // TENANT SECURITY CHECK
         // ------------------------------------------------------
 
-        if (storedTenantId != tenantId) {
+        if (storedTenantId !=
+            tenantId) {
           setState(() {
             _loading = false;
             _verificationStarted = false;
@@ -370,32 +430,40 @@ class _OtpScreenState extends State<OtpScreen> {
         debugPrint(
           '========================================',
         );
+
         debugPrint(
           'ADMIN LOGIN SUCCESS',
         );
+
         debugPrint(
           'UID: $uid',
         );
+
         debugPrint(
           'Tenant: $tenantId',
         );
+
         debugPrint(
           'Role: $roleId',
         );
+
         debugPrint(
           '========================================',
         );
 
         // ======================================================
-        // REGISTER THIS DEVICE FOR FCM NOTIFICATIONS
+        // REGISTER ADMIN FCM DEVICE
         // ======================================================
-        // Notification registration must not block a successful
-        // login if permission/token registration fails.
 
         try {
-          await NotificationService.instance.initialize(
-            tenantId: tenantId,
-            isAdmin: true,
+          await NotificationService
+              .instance
+              .initialize(
+            tenantId:
+                tenantId,
+
+            isAdmin:
+                true,
           );
 
           debugPrint(
@@ -411,6 +479,10 @@ class _OtpScreenState extends State<OtpScreen> {
         // ADMIN DASHBOARD
         // ======================================================
 
+        if (!mounted) {
+          return;
+        }
+
         Navigator.pushAndRemoveUntil(
           context,
           MaterialPageRoute(
@@ -424,18 +496,19 @@ class _OtpScreenState extends State<OtpScreen> {
       }
 
       // ========================================================
-      // NOT ADMIN
+      // NOT ADMIN → CUSTOMER
       // ========================================================
       //
-      // This user is treated as a customer.
-      //
-      // Only NOW do we create the customer record.
+      // Customer record is created only after successful
+      // authentication.
       //
       // ========================================================
 
       await _createCustomerRecord();
-    } catch (e) {
-      if (!mounted) return;
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
 
       setState(() {
         _loading = false;
@@ -443,7 +516,7 @@ class _OtpScreenState extends State<OtpScreen> {
       });
 
       debugPrint(
-        'Route after login error: $e',
+        'Route after login error: $error',
       );
 
       _showError(
@@ -458,34 +531,32 @@ class _OtpScreenState extends State<OtpScreen> {
 
   Future<void> _createCustomerRecord() async {
     try {
-      final tenantId = _tenantId;
+      final tenantId =
+          _tenantId;
 
       // ========================================================
-      // Customer registration is intentionally NOT mandatory.
-      //
-      // We create only the minimum customer identity after OTP:
-      //
-      // Firebase UID
-      // tenantId
-      // verified phone
-      //
+      // CREATE / UPDATE CUSTOMER
       // ========================================================
 
       await _customerService
           .createCustomerIfNotExists(
-        tenantId: tenantId,
+        tenantId:
+            tenantId,
       );
 
       // ========================================================
-      // REGISTER THIS DEVICE FOR FCM NOTIFICATIONS
+      // REGISTER CUSTOMER FCM DEVICE
       // ========================================================
-      // Notification registration must not block a successful
-      // customer login if permission/token registration fails.
 
       try {
-        await NotificationService.instance.initialize(
-          tenantId: tenantId,
-          isAdmin: false,
+        await NotificationService
+            .instance
+            .initialize(
+          tenantId:
+              tenantId,
+
+          isAdmin:
+              false,
         );
 
         debugPrint(
@@ -497,7 +568,13 @@ class _OtpScreenState extends State<OtpScreen> {
         );
       }
 
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
+
+      // ========================================================
+      // CUSTOMER HOME
+      // ========================================================
 
       Navigator.pushAndRemoveUntil(
         context,
@@ -507,8 +584,10 @@ class _OtpScreenState extends State<OtpScreen> {
         ),
         (route) => false,
       );
-    } catch (e) {
-      if (!mounted) return;
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
 
       setState(() {
         _loading = false;
@@ -516,49 +595,13 @@ class _OtpScreenState extends State<OtpScreen> {
       });
 
       debugPrint(
-        'Customer creation error: $e',
+        'Customer creation error: $error',
       );
-
-      // Authentication succeeded, but customer persistence
-      // failed. Do not silently continue because future
-      // booking/profile data depends on tenant-scoped identity.
 
       _showError(
         'Your number is verified, but we could not save your customer profile. Please try again.',
       );
     }
-  }
-
-  // ============================================================
-  // RESEND TIMER
-  // ============================================================
-
-  void _startResendTimer() {
-    _timer?.cancel();
-
-    if (!mounted) return;
-
-    setState(() {
-      _seconds = 30;
-    });
-
-    _timer = Timer.periodic(
-      const Duration(seconds: 1),
-      (timer) {
-        if (!mounted) {
-          timer.cancel();
-          return;
-        }
-
-        if (_seconds > 0) {
-          setState(() {
-            _seconds--;
-          });
-        } else {
-          timer.cancel();
-        }
-      },
-    );
   }
 
   // ============================================================
@@ -577,65 +620,70 @@ class _OtpScreenState extends State<OtpScreen> {
     });
 
     try {
+      final tenantId =
+          _tenantId;
+
       await _authService.sendOtp(
+        tenantId:
+            tenantId,
+
         phoneNumber:
             widget.phoneNumber,
-        onCodeSent: (
-          String verificationId,
-        ) {
-          if (!mounted) return;
-
-          _verificationId =
-              verificationId;
-
-          _otpController.clear();
-
-          _verificationStarted = false;
-
-          _startResendTimer();
-
-          setState(() {
-            _resending = false;
-          });
-
-          _showSuccess(
-            'A new OTP has been sent.',
-          );
-
-          Future.delayed(
-            const Duration(
-              milliseconds: 250,
-            ),
-            () {
-              if (mounted) {
-                _otpFocusNode
-                    .requestFocus();
-              }
-            },
-          );
-        },
-        onError: (
-          String message,
-        ) {
-          if (!mounted) return;
-
-          setState(() {
-            _resending = false;
-          });
-
-          _showError(
-            message.isEmpty
-                ? 'Unable to resend OTP. Please try again.'
-                : message,
-          );
-        },
       );
-    } catch (e) {
-      if (!mounted) return;
+
+      if (!mounted) {
+        return;
+      }
+
+      _otpController.clear();
+
+      _verificationStarted =
+          false;
 
       setState(() {
         _resending = false;
       });
+
+      _startTimer();
+
+      _showSuccess(
+        'A new OTP has been sent to WhatsApp.',
+      );
+
+      Future.delayed(
+        const Duration(
+          milliseconds: 250,
+        ),
+        () {
+          if (mounted) {
+            _otpFocusNode.requestFocus();
+          }
+        },
+      );
+    } on AuthServiceException catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _resending = false;
+      });
+
+      _showError(
+        error.message,
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _resending = false;
+      });
+
+      debugPrint(
+        'Resend OTP error: $error',
+      );
 
       _showError(
         'Unable to resend OTP. Please try again.',
@@ -650,7 +698,9 @@ class _OtpScreenState extends State<OtpScreen> {
   void _showSuccess(
     String message,
   ) {
-    if (!mounted) return;
+    if (!mounted) {
+      return;
+    }
 
     ScaffoldMessenger.of(context)
         .hideCurrentSnackBar();
@@ -666,7 +716,9 @@ class _OtpScreenState extends State<OtpScreen> {
               size: 19,
             ),
 
-            const SizedBox(width: 10),
+            const SizedBox(
+              width: 10,
+            ),
 
             Expanded(
               child: Text(
@@ -682,10 +734,16 @@ class _OtpScreenState extends State<OtpScreen> {
             ),
           ],
         ),
-        backgroundColor: primary,
+
+        backgroundColor:
+            primary,
+
         behavior:
             SnackBarBehavior.floating,
-        elevation: 0,
+
+        elevation:
+            0,
+
         margin:
             const EdgeInsets.fromLTRB(
           20,
@@ -693,23 +751,28 @@ class _OtpScreenState extends State<OtpScreen> {
           20,
           20,
         ),
+
         shape:
             RoundedRectangleBorder(
           borderRadius:
-              BorderRadius.circular(15),
+              BorderRadius.circular(
+            15,
+          ),
         ),
       ),
     );
   }
 
   // ============================================================
-  // ERROR
+  // ERROR MESSAGE
   // ============================================================
 
   void _showError(
     String message,
   ) {
-    if (!mounted) return;
+    if (!mounted) {
+      return;
+    }
 
     ScaffoldMessenger.of(context)
         .hideCurrentSnackBar();
@@ -725,7 +788,9 @@ class _OtpScreenState extends State<OtpScreen> {
               size: 19,
             ),
 
-            const SizedBox(width: 10),
+            const SizedBox(
+              width: 10,
+            ),
 
             Expanded(
               child: Text(
@@ -741,10 +806,16 @@ class _OtpScreenState extends State<OtpScreen> {
             ),
           ],
         ),
-        backgroundColor: heading,
+
+        backgroundColor:
+            heading,
+
         behavior:
             SnackBarBehavior.floating,
-        elevation: 0,
+
+        elevation:
+            0,
+
         margin:
             const EdgeInsets.fromLTRB(
           20,
@@ -752,10 +823,13 @@ class _OtpScreenState extends State<OtpScreen> {
           20,
           20,
         ),
+
         shape:
             RoundedRectangleBorder(
           borderRadius:
-              BorderRadius.circular(15),
+              BorderRadius.circular(
+            15,
+          ),
         ),
       ),
     );
@@ -773,7 +847,8 @@ class _OtpScreenState extends State<OtpScreen> {
       focusNode:
           _otpFocusNode,
 
-      autofocus: false,
+      autofocus:
+          false,
 
       keyboardType:
           TextInputType.number,
@@ -781,7 +856,8 @@ class _OtpScreenState extends State<OtpScreen> {
       textInputAction:
           TextInputAction.done,
 
-      maxLength: 6,
+      maxLength:
+          6,
 
       textAlign:
           TextAlign.center,
@@ -804,7 +880,8 @@ class _OtpScreenState extends State<OtpScreen> {
 
       decoration:
           InputDecoration(
-        counterText: '',
+        counterText:
+            '',
 
         hintText:
             '• • • • • •',
@@ -821,7 +898,8 @@ class _OtpScreenState extends State<OtpScreen> {
           ),
         ),
 
-        filled: true,
+        filled:
+            true,
 
         fillColor:
             Colors.white,
@@ -835,44 +913,54 @@ class _OtpScreenState extends State<OtpScreen> {
         border:
             OutlineInputBorder(
           borderRadius:
-              BorderRadius.circular(18),
-
+              BorderRadius.circular(
+            18,
+          ),
           borderSide:
               const BorderSide(
-            color: border,
+            color:
+                border,
           ),
         ),
 
         enabledBorder:
             OutlineInputBorder(
           borderRadius:
-              BorderRadius.circular(18),
-
+              BorderRadius.circular(
+            18,
+          ),
           borderSide:
               const BorderSide(
-            color: border,
+            color:
+                border,
           ),
         ),
 
         focusedBorder:
             OutlineInputBorder(
           borderRadius:
-              BorderRadius.circular(18),
-
+              BorderRadius.circular(
+            18,
+          ),
           borderSide:
               const BorderSide(
-            color: primary,
-            width: 1.4,
+            color:
+                primary,
+            width:
+                1.4,
           ),
         ),
 
         disabledBorder:
             OutlineInputBorder(
           borderRadius:
-              BorderRadius.circular(18),
+              BorderRadius.circular(
+            18,
+          ),
           borderSide:
               const BorderSide(
-            color: border,
+            color:
+                border,
           ),
         ),
       ),
@@ -885,7 +973,9 @@ class _OtpScreenState extends State<OtpScreen> {
           _verify();
         }
 
-        setState(() {});
+        if (mounted) {
+          setState(() {});
+        }
       },
 
       onSubmitted: (_) {
@@ -913,11 +1003,14 @@ class _OtpScreenState extends State<OtpScreen> {
             child:
                 CircularProgressIndicator(
               strokeWidth: 2,
-              color: primary,
+              color:
+                  primary,
             ),
           ),
 
-          const SizedBox(width: 8),
+          const SizedBox(
+            width: 8,
+          ),
 
           Text(
             'Sending new OTP...',
@@ -926,7 +1019,8 @@ class _OtpScreenState extends State<OtpScreen> {
               fontSize: 12,
               fontWeight:
                   FontWeight.w700,
-              color: primary,
+              color:
+                  primary,
             ),
           ),
         ],
@@ -945,11 +1039,14 @@ class _OtpScreenState extends State<OtpScreen> {
               fontSize: 12,
               fontWeight:
                   FontWeight.w500,
-              color: body,
+              color:
+                  body,
             ),
           ),
 
-          const SizedBox(width: 5),
+          const SizedBox(
+            width: 5,
+          ),
 
           Text(
             'Resend in 00:${_seconds.toString().padLeft(2, '0')}',
@@ -958,7 +1055,8 @@ class _OtpScreenState extends State<OtpScreen> {
               fontSize: 12,
               fontWeight:
                   FontWeight.w800,
-              color: primary,
+              color:
+                  primary,
             ),
           ),
         ],
@@ -976,17 +1074,22 @@ class _OtpScreenState extends State<OtpScreen> {
             fontSize: 12,
             fontWeight:
                 FontWeight.w500,
-            color: body,
+            color:
+                body,
           ),
         ),
 
-        const SizedBox(width: 5),
+        const SizedBox(
+          width: 5,
+        ),
 
         GestureDetector(
           onTap:
               _resendOtp,
+
           behavior:
               HitTestBehavior.opaque,
+
           child: Text(
             'Resend OTP',
             style:
@@ -994,7 +1097,8 @@ class _OtpScreenState extends State<OtpScreen> {
               fontSize: 12,
               fontWeight:
                   FontWeight.w800,
-              color: primary,
+              color:
+                  primary,
             ),
           ),
         ),
@@ -1008,8 +1112,12 @@ class _OtpScreenState extends State<OtpScreen> {
 
   Widget _buildButton() {
     return SizedBox(
-      width: double.infinity,
-      height: 56,
+      width:
+          double.infinity,
+
+      height:
+          56,
+
       child:
           ElevatedButton(
         onPressed:
@@ -1025,30 +1133,37 @@ class _OtpScreenState extends State<OtpScreen> {
 
           disabledBackgroundColor:
               primary.withValues(
-            alpha: 0.55,
+            alpha:
+                0.55,
           ),
 
           foregroundColor:
               Colors.white,
 
-          elevation: 0,
+          elevation:
+              0,
 
           shape:
               RoundedRectangleBorder(
             borderRadius:
-                BorderRadius.circular(17),
+                BorderRadius.circular(
+              17,
+            ),
           ),
         ),
 
         child: _loading
             ? const SizedBox(
-                width: 21,
-                height: 21,
+                width:
+                    21,
+                height:
+                    21,
                 child:
                     CircularProgressIndicator(
                   color:
                       Colors.white,
-                  strokeWidth: 2.2,
+                  strokeWidth:
+                      2.2,
                 ),
               )
             : Row(
@@ -1059,7 +1174,8 @@ class _OtpScreenState extends State<OtpScreen> {
                     'Verify & Continue',
                     style:
                         GoogleFonts.manrope(
-                      fontSize: 14.5,
+                      fontSize:
+                          14.5,
                       fontWeight:
                           FontWeight.w800,
                       color:
@@ -1068,13 +1184,15 @@ class _OtpScreenState extends State<OtpScreen> {
                   ),
 
                   const SizedBox(
-                    width: 9,
+                    width:
+                        9,
                   ),
 
                   const Icon(
                     Icons
                         .arrow_forward_rounded,
-                    size: 19,
+                    size:
+                        19,
                     color:
                         Colors.white,
                   ),
@@ -1094,21 +1212,31 @@ class _OtpScreenState extends State<OtpScreen> {
           MainAxisAlignment.center,
       children: [
         Container(
-          width: 28,
-          height: 28,
+          width:
+              28,
+
+          height:
+              28,
+
           decoration:
               BoxDecoration(
             color:
                 softAccent,
+
             borderRadius:
-                BorderRadius.circular(9),
+                BorderRadius.circular(
+              9,
+            ),
           ),
+
           child:
               const Icon(
             Icons
                 .verified_user_outlined,
-            color: primary,
-            size: 15,
+            color:
+                primary,
+            size:
+                15,
           ),
         ),
 
@@ -1117,13 +1245,15 @@ class _OtpScreenState extends State<OtpScreen> {
         ),
 
         Text(
-          'Secure OTP authentication',
+          'Secure WhatsApp OTP authentication',
           style:
               GoogleFonts.manrope(
-            fontSize: 11.5,
+            fontSize:
+                11.5,
             fontWeight:
                 FontWeight.w600,
-            color: body,
+            color:
+                body,
           ),
         ),
       ],
@@ -1142,8 +1272,10 @@ class _OtpScreenState extends State<OtpScreen> {
       backgroundColor:
           background,
 
-      body: SafeArea(
-        child: Column(
+      body:
+          SafeArea(
+        child:
+            Column(
           children: [
             // ==================================================
             // TOP BAR
@@ -1158,11 +1290,16 @@ class _OtpScreenState extends State<OtpScreen> {
                 0,
               ),
 
-              child: Row(
+              child:
+                  Row(
                 children: [
                   Container(
-                    width: 42,
-                    height: 42,
+                    width:
+                        42,
+
+                    height:
+                        42,
+
                     decoration:
                         BoxDecoration(
                       color:
@@ -1185,19 +1322,21 @@ class _OtpScreenState extends State<OtpScreen> {
                       padding:
                           EdgeInsets.zero,
 
-                      onPressed: _loading
-                          ? null
-                          : () {
-                              Navigator.pop(
-                                context,
-                              );
-                            },
+                      onPressed:
+                          _loading
+                              ? null
+                              : () {
+                                  Navigator.pop(
+                                    context,
+                                  );
+                                },
 
                       icon:
                           const Icon(
                         Icons
                             .arrow_back_ios_new_rounded,
-                        size: 16,
+                        size:
+                            16,
                         color:
                             heading,
                       ),
@@ -1210,7 +1349,8 @@ class _OtpScreenState extends State<OtpScreen> {
                     'OTP VERIFICATION',
                     style:
                         GoogleFonts.manrope(
-                      fontSize: 9.5,
+                      fontSize:
+                          9.5,
                       fontWeight:
                           FontWeight.w800,
                       letterSpacing:
@@ -1241,22 +1381,28 @@ class _OtpScreenState extends State<OtpScreen> {
                   24,
                 ),
 
-                child: Column(
+                child:
+                    Column(
                   crossAxisAlignment:
                       CrossAxisAlignment.center,
 
                   children: [
                     // ------------------------------------------
-                    // SMALL ICON
+                    // ICON
                     // ------------------------------------------
 
                     Container(
-                      width: 58,
-                      height: 58,
+                      width:
+                          58,
+
+                      height:
+                          58,
+
                       decoration:
                           BoxDecoration(
                         color:
                             softAccent,
+
                         borderRadius:
                             BorderRadius.circular(
                           18,
@@ -1269,12 +1415,14 @@ class _OtpScreenState extends State<OtpScreen> {
                             .lock_outline_rounded,
                         color:
                             primary,
-                        size: 27,
+                        size:
+                            27,
                       ),
                     ),
 
                     const SizedBox(
-                      height: 25,
+                      height:
+                          25,
                     ),
 
                     // ------------------------------------------
@@ -1288,8 +1436,10 @@ class _OtpScreenState extends State<OtpScreen> {
 
                       style:
                           GoogleFonts.manrope(
-                        fontSize: 32,
-                        height: 1.1,
+                        fontSize:
+                            32,
+                        height:
+                            1.1,
                         fontWeight:
                             FontWeight.w900,
                         letterSpacing:
@@ -1300,7 +1450,8 @@ class _OtpScreenState extends State<OtpScreen> {
                     ),
 
                     const SizedBox(
-                      height: 11,
+                      height:
+                          11,
                     ),
 
                     // ------------------------------------------
@@ -1308,13 +1459,14 @@ class _OtpScreenState extends State<OtpScreen> {
                     // ------------------------------------------
 
                     Text(
-                      'Enter the 6-digit code we sent to',
+                      'Enter the 6-digit code we sent to your WhatsApp',
                       textAlign:
                           TextAlign.center,
 
                       style:
                           GoogleFonts.manrope(
-                        fontSize: 13,
+                        fontSize:
+                            13,
                         fontWeight:
                             FontWeight.w500,
                         color:
@@ -1323,7 +1475,8 @@ class _OtpScreenState extends State<OtpScreen> {
                     ),
 
                     const SizedBox(
-                      height: 7,
+                      height:
+                          7,
                     ),
 
                     // ------------------------------------------
@@ -1337,7 +1490,8 @@ class _OtpScreenState extends State<OtpScreen> {
 
                       style:
                           GoogleFonts.manrope(
-                        fontSize: 14,
+                        fontSize:
+                            14,
                         fontWeight:
                             FontWeight.w800,
                         color:
@@ -1346,7 +1500,8 @@ class _OtpScreenState extends State<OtpScreen> {
                     ),
 
                     const SizedBox(
-                      height: 32,
+                      height:
+                          32,
                     ),
 
                     // ------------------------------------------
@@ -1356,7 +1511,8 @@ class _OtpScreenState extends State<OtpScreen> {
                     _buildOtpInput(),
 
                     const SizedBox(
-                      height: 16,
+                      height:
+                          16,
                     ),
 
                     // ------------------------------------------
@@ -1366,7 +1522,8 @@ class _OtpScreenState extends State<OtpScreen> {
                     _buildResend(),
 
                     const SizedBox(
-                      height: 34,
+                      height:
+                          34,
                     ),
 
                     // ------------------------------------------
@@ -1376,7 +1533,8 @@ class _OtpScreenState extends State<OtpScreen> {
                     _buildButton(),
 
                     const SizedBox(
-                      height: 24,
+                      height:
+                          24,
                     ),
 
                     // ------------------------------------------
@@ -1386,16 +1544,19 @@ class _OtpScreenState extends State<OtpScreen> {
                     _buildSecurityFooter(),
 
                     const SizedBox(
-                      height: 12,
+                      height:
+                          12,
                     ),
 
                     Text(
-                      'Your phone number is securely verified.',
+                      'Your phone number is securely verified through WhatsApp.',
                       textAlign:
                           TextAlign.center,
+
                       style:
                           GoogleFonts.manrope(
-                        fontSize: 10.5,
+                        fontSize:
+                            10.5,
                         fontWeight:
                             FontWeight.w500,
                         color:
