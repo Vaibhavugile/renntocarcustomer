@@ -288,7 +288,7 @@ class _AdminAddCarScreenState
                 ),
 
                 Text(
-                  'Select the reusable pricing profile for this vehicle.',
+                  'Choose an existing reusable pricing profile. You can change it later from the vehicle or pricing profile screen.',
                   style:
                       GoogleFonts.manrope(
                     fontSize: 11.5,
@@ -759,6 +759,48 @@ class _AdminAddCarScreenState
       final selectedProfile =
           _selectedPricingProfile;
 
+      if (selectedProfile != null) {
+        PricingProfile? verifiedProfile;
+
+        try {
+          verifiedProfile =
+              await PricingProfileService.instance
+                  .getPricingProfileById(
+            tenantId: tenantId,
+            pricingProfileId:
+                selectedProfile.id.trim(),
+          );
+        } catch (_) {
+          verifiedProfile = null;
+        }
+
+        if (verifiedProfile == null) {
+          if (!mounted) return;
+
+          setState(() {
+            _saving = false;
+          });
+
+          _showError(
+            'Selected pricing profile no longer exists.',
+          );
+          return;
+        }
+
+        if (!verifiedProfile.isActive) {
+          if (!mounted) return;
+
+          setState(() {
+            _saving = false;
+          });
+
+          _showError(
+            'Selected pricing profile is inactive.',
+          );
+          return;
+        }
+      }
+
       final pricePerDay =
           selectedProfile == null
               ? 0
@@ -795,9 +837,7 @@ class _AdminAddCarScreenState
         fuel: _selectedFuel,
 
         pricingProfileId:
-            _pricingProfileController
-                .text
-                .trim(),
+            selectedProfile?.id.trim() ?? '',
 
         pricePerDay:
             pricePerDay,
@@ -901,7 +941,9 @@ class _AdminAddCarScreenState
       });
 
       _showSuccess(
-        'Vehicle added successfully.',
+        selectedProfile == null
+          ? 'Vehicle added successfully. Connect a pricing profile later if needed.'
+          : 'Vehicle added successfully with the selected pricing profile.',
       );
 
       Navigator.pop(
@@ -1166,7 +1208,7 @@ class _AdminAddCarScreenState
                 title:
                     'Pricing',
                 subtitle:
-                    'Assign a reusable pricing profile to this vehicle.',
+                    'Assign an existing reusable pricing profile. Multiple vehicles can use the same profile.',
                 child:
                     _buildPricingSection(),
               ),
@@ -1493,7 +1535,7 @@ class _AdminAddCarScreenState
                                 GoogleFonts
                                     .manrope(
                               fontSize: 10,
-                              fontWeight: FontWeight.w600,
+                              fontWeight:FontWeight.w500,
                               color:
                                   muted,
                             ),
@@ -1552,7 +1594,7 @@ class _AdminAddCarScreenState
                                 GoogleFonts
                                     .manrope(
                               fontSize: 10,
-                              fontWeight: FontWeight.w600,
+                              fontWeight:FontWeight.w500,
                               color:
                                   muted,
                             ),
@@ -2141,7 +2183,7 @@ class _AdminAddCarScreenState
                         _pricingLoadError !=
                                 null
                             ? 'Unable to load pricing profiles'
-                            : 'Optional — assign pricing later',
+                            : 'Optional — assign now or connect later',
                         style:
                             GoogleFonts.manrope(
                           fontSize:
@@ -2216,7 +2258,7 @@ class _AdminAddCarScreenState
 
         Text(
           _pricingLoadError ??
-              'The pricing profile controls hourly/daily rates, KM limits, extra KM charges, special dates and security deposit.',
+              'The pricing profile is shared pricing. One profile can be connected to multiple vehicles. You can also leave this empty and connect the vehicle later.',
           style:
               GoogleFonts.manrope(
             fontSize: 10,
@@ -2256,6 +2298,48 @@ class _AdminAddCarScreenState
               foregroundColor:
                   primary,
             ),
+          ),
+        ),
+
+        const SizedBox(
+          height: 4,
+        ),
+
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(13),
+          decoration: BoxDecoration(
+            color: softAccent,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: primary.withOpacity(0.12),
+            ),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Icon(
+                Icons.link_rounded,
+                color: primary,
+                size: 18,
+              ),
+              const SizedBox(
+                width: 9,
+              ),
+              Expanded(
+                child: Text(
+                  'Shared pricing: connect this profile to multiple cars. '
+                  'If you do not select one now, you can connect this car later '
+                  'from the Pricing Profile screen.',
+                  style: GoogleFonts.manrope(
+                    fontSize: 10,
+                    height: 1.4,
+                    fontWeight: FontWeight.w600,
+                    color: body,
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ],

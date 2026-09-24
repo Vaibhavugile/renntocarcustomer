@@ -767,38 +767,33 @@ class _AdminEditCarScreenState
                 .trim() ??
             '';
 
-    if (pricingProfileId.isEmpty) {
-      _showError(
-        'Please select a pricing profile.',
-      );
-      return;
-    }
-
     PricingProfile? verifiedProfile;
 
-    try {
-      verifiedProfile =
-          await PricingProfileService
-              .instance
-              .getPricingProfileById(
-        tenantId: _tenantId,
-        pricingProfileId:
-            pricingProfileId,
-      );
-    } catch (_) {}
+    if (pricingProfileId.isNotEmpty) {
+      try {
+        verifiedProfile =
+            await PricingProfileService
+                .instance
+                .getPricingProfileById(
+          tenantId: _tenantId,
+          pricingProfileId:
+              pricingProfileId,
+        );
+      } catch (_) {}
 
-    if (verifiedProfile == null) {
-      _showError(
-        'Selected pricing profile no longer exists.',
-      );
-      return;
-    }
+      if (verifiedProfile == null) {
+        _showError(
+          'Selected pricing profile no longer exists.',
+        );
+        return;
+      }
 
-    if (!verifiedProfile.isActive) {
-      _showError(
-        'Selected pricing profile is inactive.',
-      );
-      return;
+      if (!verifiedProfile.isActive) {
+        _showError(
+          'Selected pricing profile is inactive.',
+        );
+        return;
+      }
     }
 
     setState(() {
@@ -1025,8 +1020,7 @@ class _AdminEditCarScreenState
               .trim() ??
           '';
 
-      if (savedPricingId !=
-          pricingProfileId) {
+      if (savedPricingId != pricingProfileId) {
         throw Exception(
           'Pricing profile connection could not be verified.',
         );
@@ -1042,7 +1036,9 @@ class _AdminEditCarScreenState
       });
 
       _showSuccess(
-        'Car updated successfully.',
+        pricingProfileId.isEmpty
+            ? 'Car updated successfully. No pricing profile is connected.'
+            : 'Car updated successfully with the selected pricing profile.',
       );
 
       Navigator.pop(
@@ -2257,7 +2253,7 @@ class _AdminEditCarScreenState
           Icons.link_rounded,
       children: [
         Text(
-          'Connect this vehicle to an existing pricing profile.',
+          'Connect this vehicle to a shared pricing profile. Multiple vehicles can use the same profile, and you can connect this vehicle later.',
           style:
               GoogleFonts.manrope(
             color: body,
@@ -3203,7 +3199,7 @@ class _PricingProfilePickerSheetState
                   ),
 
                   Text(
-                    'Choose the pricing configuration for this car.',
+                    'Choose a shared pricing configuration. Multiple cars can use the same profile.',
                     style:
                         GoogleFonts.manrope(
                       fontSize: 11,

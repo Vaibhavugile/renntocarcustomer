@@ -1,3 +1,4 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
 import '../../../../core/config/app_config.dart';
@@ -41,6 +42,11 @@ class _AdminPricingProfilesScreenState
   List<PricingProfile> _profiles = const [];
   List<PricingProfile> _filteredProfiles = const [];
 
+  /// Number of cars currently pointing to each pricing profile.
+  /// Loaded from the cars collection so the profile list reflects
+  /// the new reusable-profile architecture.
+  Map<String, int> _connectedCarCounts = const {};
+
   bool _loading = true;
   bool _refreshing = false;
   String? _error;
@@ -79,10 +85,13 @@ class _AdminPricingProfilesScreenState
         tenantId: tenantId,
       );
 
+      final counts = await _loadConnectedCarCounts(profiles);
+
       if (!mounted) return;
 
       setState(() {
         _profiles = profiles;
+        _connectedCarCounts = counts;
         _loading = false;
         _refreshing = false;
         _error = null;
@@ -99,6 +108,45 @@ class _AdminPricingProfilesScreenState
     }
   }
 
+  Future<Map<String, int>> _loadConnectedCarCounts(
+    List<PricingProfile> profiles,
+  ) async {
+    final counts = <String, int>{
+      for (final profile in profiles) profile.id.trim(): 0,
+    };
+
+    if (counts.isEmpty) return counts;
+
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('tenants')
+          .doc(tenantId)
+          .collection('cars')
+          .get();
+
+      for (final doc in snapshot.docs) {
+        final data = doc.data();
+        final profileId =
+            data['pricingProfileId']?.toString().trim() ?? '';
+
+        if (profileId.isNotEmpty &&
+            counts.containsKey(profileId)) {
+          counts[profileId] =
+              (counts[profileId] ?? 0) + 1;
+        }
+      }
+    } catch (_) {
+      // Connected-car count is supplementary. The profile list
+      // remains usable if this optional read fails.
+    }
+
+    return counts;
+  }
+
+  int _connectedCars(PricingProfile profile) {
+    return _connectedCarCounts[profile.id.trim()] ?? 0;
+  }
+
   void _applySearch() {
     final q = _searchController.text.trim().toLowerCase();
 
@@ -109,7 +157,6 @@ class _AdminPricingProfilesScreenState
         p.id,
         p.name,
         p.tenantId,
-        p.vehicleId,
         p.pricingGroupId,
         p.currency,
         ...p.hourlyPackages.map((x) => '${x.id} ${x.name}'),
@@ -514,7 +561,7 @@ class _AdminPricingProfilesScreenState
                 ),
                 SizedBox(height: 4),
                 Text(
-                  'Hourly and daily packages, special dates and security deposits.',
+                  'Shared hourly and daily pricing for multiple cars, with special dates and security deposits.',
                   style: TextStyle(
                     fontFamily: 'Manrope',
                     fontSize: 12.5,
@@ -531,15 +578,45 @@ class _AdminPricingProfilesScreenState
   }
 
   Widget _stats() {
+    final connectedCars =
+        _connectedCarCounts.values.fold<int>(
+      0,
+      (sum, count) => sum + count,
+    );
+
     return Row(
       children: [
-        Expanded(child: _stat('Total', '${_profiles.length}', Icons.price_change_outlined)),
+        Expanded(
+          child: _stat(
+            'Profiles',
+            '${_profiles.length}',
+            Icons.price_change_outlined,
+          ),
+        ),
         const SizedBox(width: 8),
-        Expanded(child: _stat('Active', '$_activeCount', Icons.check_circle_outline)),
+        Expanded(
+          child: _stat(
+            'Active',
+            '$_activeCount',
+            Icons.check_circle_outline,
+          ),
+        ),
         const SizedBox(width: 8),
-        Expanded(child: _stat('Groups', '$_groupCount', Icons.layers_outlined)),
+        Expanded(
+          child: _stat(
+            'Cars',
+            '$connectedCars',
+            Icons.directions_car_outlined,
+          ),
+        ),
         const SizedBox(width: 8),
-        Expanded(child: _stat('Special', '$_specialCount', Icons.event_available_outlined)),
+        Expanded(
+          child: _stat(
+            'Special',
+            '$_specialCount',
+            Icons.event_available_outlined,
+          ),
+        ),
       ],
     );
   }
@@ -708,6 +785,8 @@ class _AdminPricingProfilesScreenState
               _status(p.isActive),
             ],
           ),
+          const SizedBox(height: 12),
+          _connectionBanner(p),
           const SizedBox(height: 16),
           _packageSummary(
             title: 'Hourly',
@@ -740,8 +819,10 @@ class _AdminPricingProfilesScreenState
                 Icons.account_balance_wallet_outlined,
                 _depositLabel(p),
               ),
-              if (p.vehicleId.trim().isNotEmpty)
-                _chip(Icons.directions_car_outlined, p.vehicleId),
+              _chip(
+                Icons.directions_car_outlined,
+                '${_connectedCars(p)} connected',
+              ),
             ],
           ),
           if (specials.isNotEmpty) ...[
@@ -816,6 +897,83 @@ class _AdminPricingProfilesScreenState
                 ),
               ),
             ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _connectionBanner(PricingProfile profile) {
+    final count = _connectedCars(profile);
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(
+        horizontal: 12,
+        vertical: 11,
+      ),
+      decoration: BoxDecoration(
+        color: count > 0 ? softAccent : background,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: count > 0
+              ? accent.withValues(alpha: 0.20)
+              : border,
+        ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              color: count > 0 ? card : Colors.white,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Icon(
+              count > 0
+                  ? Icons.directions_car_rounded
+                  : Icons.link_off_rounded,
+              size: 18,
+              color: count > 0 ? primary : muted,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: [
+                Text(
+                  count == 0
+                      ? 'No cars connected'
+                      : '$count car${count == 1 ? '' : 's'} connected',
+                  style: const TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w800,
+                    color: heading,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  count == 0
+                      ? 'Connect cars from Edit Pricing Profile.'
+                      : 'All connected cars use this profile pricing.',
+                  style: const TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
+                    color: body,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Icon(
+            Icons.chevron_right_rounded,
+            size: 19,
+            color: muted,
           ),
         ],
       ),
@@ -1095,7 +1253,7 @@ class _AdminPricingProfilesScreenState
           Text(
             searched
                 ? 'Try another profile, group or package name.'
-                : 'Create your first pricing profile to get started.',
+                : 'Create a reusable pricing profile, then connect one or many cars to it.',
             textAlign: TextAlign.center,
             style: const TextStyle(
               fontFamily: 'Manrope',
