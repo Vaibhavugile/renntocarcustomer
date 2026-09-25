@@ -1324,6 +1324,8 @@ class _CarDetailsScreenState extends State<CarDetailsScreen> {
                       _isHourly = true;
                     });
                   },
+                  minimumBooking:
+                      'Minimum ${pricing.minimumHoursFor(hourly.id)} hour(s)',
                 ),
               ),
 
@@ -1352,6 +1354,8 @@ class _CarDetailsScreenState extends State<CarDetailsScreen> {
                       _isHourly = false;
                     });
                   },
+                  minimumBooking:
+                      'Minimum ${pricing.minimumDaysFor(daily.id)} day(s)',
                 ),
               ),
           ],
@@ -1371,6 +1375,7 @@ class _CarDetailsScreenState extends State<CarDetailsScreen> {
     required double extraKm,
     required bool selected,
     required VoidCallback onTap,
+    String? minimumBooking,
   }) {
     return GestureDetector(
       onTap: onTap,
@@ -1515,6 +1520,16 @@ class _CarDetailsScreenState extends State<CarDetailsScreen> {
                 : '₹${_formatAmount(extraKm)} / KM extra',
             positive: true,
           ),
+
+          if (minimumBooking != null && minimumBooking.isNotEmpty) ...[
+            const SizedBox(height: 7),
+            _kmLine(
+              icon: Icons.timelapse_rounded,
+              title: minimumBooking,
+              positive: true,
+            ),
+          ],
+
         ],
       ),
       ),
@@ -1634,6 +1649,10 @@ class _CarDetailsScreenState extends State<CarDetailsScreen> {
             ? 'No extra KM charge'
             : '₹${_formatAmount(package.safeExtraKmRate)} / KM extra';
 
+    final minimumText = isHourly
+        ? 'Minimum ${_pricingProfile?.minimumHoursFor(package.id) ?? 1} hour(s)'
+        : 'Minimum ${_pricingProfile?.minimumDaysFor(package.id) ?? 1} day(s)';
+
     return Container(
       width: double.infinity,
 
@@ -1745,6 +1764,18 @@ class _CarDetailsScreenState extends State<CarDetailsScreen> {
 
                 Text(
                   extraText,
+
+                  style: const TextStyle(
+                    color: muted,
+                    fontSize: 9,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+
+                const SizedBox(height: 3),
+
+                Text(
+                  minimumText,
 
                   style: const TextStyle(
                     color: muted,
@@ -2501,27 +2532,39 @@ class _CarDetailsScreenState extends State<CarDetailsScreen> {
   }
 
   void _bookNow() {
-    if (!_car.isAvailable) {
+    if (!_car.isAvailable) return;
+    if (_isPricingLoading) return;
+
+    final pricing = _pricingProfile;
+    if (pricing == null) return;
+
+    final package = _selectedPackage(pricing);
+    if (package == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please select an available rental package.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
       return;
     }
 
-    if (_isPricingLoading) {
-      return;
-    }
-
-    if (_pricingProfile == null) {
-      return;
-    }
-
-    Navigator.push(
-      context,
-
+    Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => DateTimeScreen(
           car: _car,
+          pricingProfile: pricing,
+          rentalType: _isHourly ? 'hourly' : 'daily',
+          selectedPackage: package,
         ),
       ),
     );
+  }
+
+  KmPricingPackage? _selectedPackage(PricingProfile pricing) {
+    return _isHourly
+        ? _firstHourlyPackage(pricing)
+        : _firstDailyPackage(pricing);
   }
 
   // ===========================================================================

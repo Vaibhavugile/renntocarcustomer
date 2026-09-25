@@ -415,6 +415,23 @@ class _AdminEditPricingProfileScreenState
 
 
 
+
+      draft.minimumHoursController.text =
+
+
+
+
+          profile.minimumHoursFor(package.id).toString();
+
+
+
+
+      draft.extraHourController.text =
+
+
+
+
+          _formatNumber(profile.extraHourRateFor(package.id));
     }
 
 
@@ -447,6 +464,33 @@ class _AdminEditPricingProfileScreenState
 
 
 
+
+      draft.minimumDaysController.text =
+
+
+
+
+          profile.minimumDaysFor(package.id).toString();
+
+
+
+
+      if (draft.extraHourController.text.trim().isEmpty) {
+
+
+
+
+        draft.extraHourController.text =
+
+
+
+
+            _formatNumber(profile.extraHourRateFor(package.id));
+
+
+
+
+      }
     }
 
 
@@ -1276,14 +1320,30 @@ class _AdminEditPricingProfileScreenState
 
 
       }
+      final minimumHoursByPackageId = <String, int>{};
+      final minimumDaysByPackageId = <String, int>{};
+      final extraHourRateByPackageId = <String, double>{};
 
+      for (final draft in _packages) {
+        final package = _buildPackage(draft);
+        final packageId = package.id.trim();
 
+        if (package.hourlyRate > 0) {
+          minimumHoursByPackageId[packageId] =
+              _positiveIntOrDefault(draft.minimumHoursController.text, 1);
+        }
 
+        if (package.dailyRate > 0) {
+          minimumDaysByPackageId[packageId] =
+              _positiveIntOrDefault(draft.minimumDaysController.text, 1);
+        }
 
+        extraHourRateByPackageId[packageId] =
+            _nonNegativeDouble(draft.extraHourController.text);
+      }
 
-
-
-      final updatedProfile = PricingProfile(
+      final updatedProfile =
+          PricingProfile(
 
 
 
@@ -1329,6 +1389,13 @@ class _AdminEditPricingProfileScreenState
 
 
 
+        
+        minimumHoursByPackageId:
+            Map<String, int>.unmodifiable(minimumHoursByPackageId),
+        minimumDaysByPackageId:
+            Map<String, int>.unmodifiable(minimumDaysByPackageId),
+        extraHourRateByPackageId:
+            Map<String, double>.unmodifiable(extraHourRateByPackageId),
         isActive: _isActive,
 
 
@@ -2090,6 +2157,31 @@ class _AdminEditPricingProfileScreenState
 
 
   }
+  String? _positiveIntegerValidator(String? value) {
+    if (value == null || value.trim().isEmpty) return 'Required';
+    final number = int.tryParse(value.trim());
+    return number == null || number < 1 ? 'Enter 1 or more' : null;
+  }
+
+  String? _nonNegativeValidator(String? value) {
+    if (value == null || value.trim().isEmpty) return 'Required';
+    final number = double.tryParse(value.trim());
+    return number == null || !number.isFinite || number < 0
+        ? 'Enter 0 or more'
+        : null;
+  }
+
+  int _positiveIntOrDefault(String value, int fallback) {
+    final parsed = int.tryParse(value.trim());
+    return parsed == null || parsed < 1 ? fallback : parsed;
+  }
+
+  double _nonNegativeDouble(String value) {
+    final parsed = double.tryParse(value.trim());
+    return parsed == null || !parsed.isFinite || parsed < 0 ? 0 : parsed;
+  }
+
+
 
 
 
@@ -3759,7 +3851,43 @@ class _AdminEditPricingProfileScreenState
 
 
 
-          const SizedBox(height: 8),
+          
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: _field(
+                  controller: package.minimumHoursController,
+                  label: 'Minimum hours',
+                  hint: '1',
+                  keyboardType: TextInputType.number,
+                  validator: _positiveIntegerValidator,
+                  helper: 'Minimum hourly booking',
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _field(
+                  controller: package.minimumDaysController,
+                  label: 'Minimum days',
+                  hint: '1',
+                  keyboardType: TextInputType.number,
+                  validator: _positiveIntegerValidator,
+                  helper: 'Minimum daily booking',
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          _field(
+            controller: package.extraHourController,
+            label: 'Extra hour charge',
+            hint: '300',
+            keyboardType: TextInputType.number,
+            validator: _nonNegativeValidator,
+            helper: '25 hours = 1 day + 1 extra hour, not 2 days.',
+          ),
+const SizedBox(height: 8),
 
 
 
@@ -5951,6 +6079,14 @@ class _EditPackageDraft {
 
 
 
+
+  final minimumHoursController =
+      TextEditingController(text: '1');
+  final minimumDaysController =
+      TextEditingController(text: '1');
+  final extraHourController =
+      TextEditingController(text: '0');
+
   bool unlimited = false;
 
 
@@ -6070,6 +6206,10 @@ class _EditPackageDraft {
     extraKmController.dispose();
 
 
+
+    minimumHoursController.dispose();
+    minimumDaysController.dispose();
+    extraHourController.dispose();
 
   }
 

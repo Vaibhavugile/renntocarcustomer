@@ -231,30 +231,7 @@ class PricingEngine {
 
 
     );
-
-
-
-
-
-
-
-    final rentalDays = rentalType == RentalType.hourly
-
-
-
-        ? 1
-
-
-
-        : duration.billableDays;
-
-
-
-
-
-
-
-    final kmForCalculation =
+final kmForCalculation =
 
 
 
@@ -298,7 +275,19 @@ class PricingEngine {
 
 
 
-    final rentalPrice = selectedPackage != null
+    
+
+    final durationAdjusted = _applyMinimumBookingRules(
+      profile,
+      duration,
+      rentalType: rentalType,
+      packageId: selectedKmPackage?.id,
+    );
+
+    final rentalDays = rentalType == RentalType.hourly
+        ? 1
+        : durationAdjusted.billableDays;
+final rentalPrice = selectedPackage != null
 
 
 
@@ -467,30 +456,12 @@ class PricingEngine {
 
 
     // "extra time" amount merely because the timestamps contain hours.
-
-
-
-    final extraTimeCharge = rentalType == RentalType.daily
-
-
-
-        ? 0.0
-
-
-
-        : _calculateHourlyExtraTimeCharge(
-
-
-
-            profile,
-
-
-
-            duration,
-
-
-
-          );
+    final extraTimeCharge = _calculateExtraTimeCharge(
+      profile,
+      durationAdjusted,
+      rentalType: rentalType,
+      packageId: selectedKmPackage?.id,
+    );
 
 
 
@@ -788,7 +759,13 @@ class PricingEngine {
 
       extraTimeCharge: extraTimeCharge,
 
-
+      minimumHours:
+          profile.minimumHoursFor(selectedKmPackage?.id ?? ''),
+      minimumDays:
+          profile.minimumDaysFor(selectedKmPackage?.id ?? ''),
+      fullDays: durationAdjusted.fullDays,
+      extraHours: durationAdjusted.extraHours,
+      extraMinutes: durationAdjusted.extraMinutes,
 
       addOnTotal: addOnTotal,
 
@@ -830,11 +807,8 @@ class PricingEngine {
 
 
 
-      durationHours: duration.totalHours,
-
-
-
-      durationMinutes: duration.totalMinutes,
+      durationHours: durationAdjusted.totalHours,
+      durationMinutes: durationAdjusted.totalMinutes,
 
 
 
@@ -1702,6 +1676,90 @@ class PricingEngine {
 
 
 
+
+  /// Keeps daily pricing based on complete 24-hour blocks and bills only
+  /// the remaining time as extra hours.
+  ///
+  /// Example:
+  /// 26 Sep 3 PM -> 27 Sep 4 PM = 25 hours
+  /// = 1 full day + 1 extra hour.
+  RentalDuration _applyMinimumBookingRules(
+    PricingProfile profile,
+    RentalDuration duration, {
+    required RentalType rentalType,
+    String? packageId,
+  }) {
+    if (duration.totalMinutes <= 0) {
+      return duration;
+    }
+
+    if (rentalType == RentalType.hourly) {
+      final minimumHours =
+          profile.minimumHoursFor(packageId ?? '');
+      final minimumMinutes = minimumHours * 60;
+
+      if (duration.totalMinutes < minimumMinutes) {
+        return RentalDuration(
+          totalMinutes: minimumMinutes,
+          totalHours: minimumHours.toDouble(),
+          billableDays: 1,
+          fullDays: 0,
+          extraHours: minimumHours,
+          extraMinutes: 0,
+        );
+      }
+
+      return duration;
+    }
+
+    final fullDays = duration.totalMinutes ~/ (24 * 60);
+    final remainingMinutes = duration.totalMinutes % (24 * 60);
+
+    final configuredMinimumDays =
+        profile.minimumDaysFor(packageId ?? '');
+    final minimumDays =
+        configuredMinimumDays < 1 ? 1 : configuredMinimumDays;
+
+    // Minimum days means the customer pays at least that many daily
+    // units. We still retain the real duration so extra-hour billing
+    // remains correct when the minimum is already satisfied.
+    final billableDays =
+        fullDays < minimumDays ? minimumDays : fullDays;
+
+    return RentalDuration(
+      totalMinutes: duration.totalMinutes,
+      totalHours: duration.totalHours,
+      billableDays: billableDays.clamp(1, 100000),
+      fullDays: fullDays,
+      extraHours: remainingMinutes ~/ 60,
+      extraMinutes: remainingMinutes % 60,
+    );
+  }
+
+  double _calculateExtraTimeCharge(
+    PricingProfile profile,
+    RentalDuration duration, {
+    required RentalType rentalType,
+    String? packageId,
+  }) {
+    if (duration.totalMinutes <= 0 || rentalType == RentalType.hourly) {
+      return 0;
+    }
+
+    final rate = profile.extraHourRateFor(packageId ?? '');
+    if (!rate.isFinite || rate <= 0) return 0;
+
+    if (duration.extraHours <= 0 && duration.extraMinutes <= 0) {
+      return 0;
+    }
+
+    // Any started extra hour is charged as one extra hour.
+    final extraHours =
+        duration.extraHours + (duration.extraMinutes > 0 ? 1 : 0);
+
+    return extraHours * rate;
+  }
+
   double _calculateHourlyExtraTimeCharge(
 
 
@@ -2526,34 +2584,19 @@ class PricingEngine {
 
 
 
-    final billableDays = (totalMinutes ~/ (24 * 60))
-
-
-
-        .clamp(1, 100000);
-
-
-
-
-
-
+    final fullDays = totalMinutes ~/ (24 * 60);
+    final remainingMinutes = totalMinutes % (24 * 60);
 
     return RentalDuration(
-
-
-
       totalMinutes: totalMinutes,
-
-
-
       totalHours: totalHours,
-
-
-
-      billableDays: billableDays,
-
-
-
+      // A daily booking has at least one billable day. Remaining time does
+      // not become another day; it is handled as extra-hour pricing.
+      // Example: 25 hours = 1 full day + 1 extra hour.
+      billableDays: fullDays < 1 ? 1 : fullDays,
+      fullDays: fullDays,
+      extraHours: remainingMinutes ~/ 60,
+      extraMinutes: remainingMinutes % 60,
     );
 
 
@@ -2656,28 +2699,17 @@ class RentalDuration {
 
   final int billableDays;
 
-
-
-
-
-
+  final int fullDays;
+  final int extraHours;
+  final int extraMinutes;
 
   const RentalDuration({
-
-
-
     required this.totalMinutes,
-
-
-
     required this.totalHours,
-
-
-
     required this.billableDays,
-
-
-
+    this.fullDays = 0,
+    this.extraHours = 0,
+    this.extraMinutes = 0,
   });
 
 
@@ -2816,7 +2848,11 @@ class PricingResult {
 
   final double extraTimeCharge;
 
-
+  final int minimumHours;
+  final int minimumDays;
+  final int fullDays;
+  final int extraHours;
+  final int extraMinutes;
 
   final double addOnTotal;
 
@@ -2982,6 +3018,26 @@ class PricingResult {
 
 
 
+    required this.minimumHours,
+
+
+
+    required this.minimumDays,
+
+
+
+    required this.fullDays,
+
+
+
+    required this.extraHours,
+
+
+
+    required this.extraMinutes,
+
+
+
     required this.addOnTotal,
 
 
@@ -3107,9 +3163,11 @@ class PricingResult {
 
 
       extraTimeCharge: 0,
-
-
-
+      minimumHours: 1,
+      minimumDays: 1,
+      fullDays: 0,
+      extraHours: 0,
+      extraMinutes: 0,
       addOnTotal: 0,
 
 

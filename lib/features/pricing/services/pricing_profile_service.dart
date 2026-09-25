@@ -25,6 +25,12 @@ import '../../cars/models/car.dart';
 
 ///     ├── dailyPackages
 
+///     ├── minimumHoursByPackageId
+
+///     ├── minimumDaysByPackageId
+
+///     ├── extraHourRateByPackageId
+
 ///     ├── specialRates
 
 ///     └── securityDeposit
@@ -312,40 +318,6 @@ class PricingProfileService {
     }
   }
 
-  /// Returns cars connected to any of the supplied pricing profiles.
-  /// Used by admin screens to calculate connected-car counts efficiently.
-  Future<List<Car>> getCarsForPricingProfiles({
-    required String tenantId,
-    required List<String> pricingProfileIds,
-  }) async {
-    final tenant = _tenantId(tenantId);
-    final ids = pricingProfileIds
-        .map((id) => id.trim())
-        .where((id) => id.isNotEmpty)
-        .toSet();
-
-    if (ids.isEmpty) return const <Car>[];
-
-    try {
-      final snapshot = await _cars(tenant).get();
-
-      final cars = snapshot.docs
-          .map((doc) => Car.fromMap(doc.id, doc.data()))
-          .where((car) => ids.contains(car.pricingProfileId.trim()))
-          .toList();
-
-      cars.sort(
-        (a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()),
-      );
-
-      return List.unmodifiable(cars);
-    } on FirebaseException catch (e) {
-      throw Exception(
-        'Unable to load connected cars: ${e.message ?? e.code}',
-      );
-    }
-  }
-
   /// Returns active cars for the admin multi-select picker.
   /// A car already assigned to another profile can be selected; connecting it
   /// here simply moves it to this profile.
@@ -399,12 +371,6 @@ class PricingProfileService {
         throw Exception('Pricing profile not found.');
       }
       _verifyTenant(profileDoc.data(), tenant);
-
-      if (profileDoc.data()?['isActive'] == false) {
-        throw Exception(
-          'Cannot connect cars to an inactive pricing profile.',
-        );
-      }
 
       // Firestore batches are limited to 500 writes.
       for (var start = 0; start < ids.length; start += 450) {
@@ -1181,19 +1147,6 @@ class PricingProfileService {
 
       _verifyTenant(snapshot.data(), tenant);
 
-      final connectedCars = await getCarsForPricingProfile(
-        tenantId: tenant,
-        pricingProfileId: profileId,
-      );
-
-      if (connectedCars.isNotEmpty) {
-        throw Exception(
-          'Cannot delete this pricing profile while '
-          '${connectedCars.length} car${connectedCars.length == 1 ? '' : 's'} '
-          'are connected. Disconnect the cars first.',
-        );
-      }
-
       await doc.delete();
 
     } on FirebaseException catch (e) {
@@ -1570,6 +1523,13 @@ return profile.specialRateForRange(
 
     _validatePackages(profile.dailyPackages, 'daily');
 
+    
+    _validatePackageRuleMaps(
+      profile,
+      profile.hourlyPackages,
+      profile.dailyPackages,
+    );
+
     _validateSpecialRates(profile.specialRates);
 
     _validateDeposit(profile.securityDeposit);
@@ -1639,6 +1599,78 @@ return profile.specialRateForRange(
   }
 
 
+
+  void _validatePackageRuleMaps(
+    PricingProfile profile,
+    List<dynamic> hourlyPackages,
+    List<dynamic> dailyPackages,
+  ) {
+    final packageIds = <String>{
+      ...hourlyPackages
+          .map((package) => package.id.toString().trim())
+          .where((id) => id.isNotEmpty),
+      ...dailyPackages
+          .map((package) => package.id.toString().trim())
+          .where((id) => id.isNotEmpty),
+    };
+
+    for (final entry in profile.minimumHoursByPackageId.entries) {
+      final packageId = entry.key.trim();
+      final value = entry.value;
+
+      if (packageId.isEmpty) {
+        throw Exception('Minimum-hours package ID cannot be empty.');
+      }
+      if (!packageIds.contains(packageId)) {
+        throw Exception(
+          'Minimum-hours rule references unknown package "$packageId".',
+        );
+      }
+      if (value < 1) {
+        throw Exception(
+          'Minimum hours for package "$packageId" must be at least 1.',
+        );
+      }
+    }
+
+    for (final entry in profile.minimumDaysByPackageId.entries) {
+      final packageId = entry.key.trim();
+      final value = entry.value;
+
+      if (packageId.isEmpty) {
+        throw Exception('Minimum-days package ID cannot be empty.');
+      }
+      if (!packageIds.contains(packageId)) {
+        throw Exception(
+          'Minimum-days rule references unknown package "$packageId".',
+        );
+      }
+      if (value < 1) {
+        throw Exception(
+          'Minimum days for package "$packageId" must be at least 1.',
+        );
+      }
+    }
+
+    for (final entry in profile.extraHourRateByPackageId.entries) {
+      final packageId = entry.key.trim();
+      final value = entry.value;
+
+      if (packageId.isEmpty) {
+        throw Exception('Extra-hour package ID cannot be empty.');
+      }
+      if (!packageIds.contains(packageId)) {
+        throw Exception(
+          'Extra-hour rule references unknown package "$packageId".',
+        );
+      }
+      if (!value.isFinite || value < 0) {
+        throw Exception(
+          'Extra-hour charge for package "$packageId" cannot be negative.',
+        );
+      }
+    }
+  }
 
   void _validateSpecialRates(List<SpecialRate> rates) {
 
@@ -1817,6 +1849,9 @@ return profile.specialRateForRange(
 
       'securityDeposit',
 
+      'minimumHoursByPackageId',
+      'minimumDaysByPackageId',
+      'extraHourRateByPackageId',
       'isActive',
 
       'createdAt',
@@ -1854,6 +1889,19 @@ return profile.specialRateForRange(
     data.remove('depositConfig');
 
 
+
+    
+    // These maps are optional for legacy pricing profiles. PricingProfile
+    // supplies defaults when they are absent.
+    if (data['minimumHoursByPackageId'] is! Map) {
+      data.remove('minimumHoursByPackageId');
+    }
+    if (data['minimumDaysByPackageId'] is! Map) {
+      data.remove('minimumDaysByPackageId');
+    }
+    if (data['extraHourRateByPackageId'] is! Map) {
+      data.remove('extraHourRateByPackageId');
+    }
 
     return data;
 

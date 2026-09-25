@@ -4,13 +4,22 @@ import '../../../core/config/app_config.dart';
 import 'package:customer_app_car_rental/features/cars/models/car.dart';
 import 'branch_selection_screen.dart';
 import 'package:customer_app_car_rental/features/admin/availability/services/admin_availability_service.dart';
+import '../../pricing/models/km_pricing_package.dart';
+import '../../pricing/models/pricing_profile.dart';
+import '../../pricing/models/pricing_config.dart';
 
 class DateTimeScreen extends StatefulWidget {
   final Car car;
+  final PricingProfile pricingProfile;
+  final String rentalType;
+  final KmPricingPackage selectedPackage;
 
   const DateTimeScreen({
     super.key,
     required this.car,
+    required this.pricingProfile,
+    required this.rentalType,
+    required this.selectedPackage,
   });
 
   @override
@@ -68,12 +77,42 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
   DateTime? _lastAvailabilityCheckedAt;
 
   // ============================================================
+  // PRICING STATE
+  // ============================================================
+
+  late PricingProfile _pricingProfile;
+  late KmPricingPackage _selectedPackage;
+  late RentalType _rentalType;
+
+  bool _pricingReady = false;
+
+  int get _minimumHours =>
+      _pricingProfile.minimumHoursFor(_selectedPackage.id);
+
+  int get _minimumDays =>
+      _pricingProfile.minimumDaysFor(_selectedPackage.id);
+
+  double get _extraHourRate =>
+      _pricingProfile.extraHourRateFor(_selectedPackage.id);
+
+  // ============================================================
   // INIT
   // ============================================================
 
   @override
   void initState() {
     super.initState();
+
+    _pricingProfile = widget.pricingProfile;
+    _selectedPackage = widget.selectedPackage;
+    _rentalType =
+        RentalType.fromString(widget.rentalType) ?? RentalType.daily;
+
+    _pricingReady = _pricingProfile.getPackage(
+          _selectedPackage.id,
+          rentalType: _rentalType,
+        ) !=
+        null;
 
     _setDefaultDateTime();
     _loadAvailability();
@@ -262,6 +301,210 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
     return parts.isEmpty
         ? 'Less than 1 minute'
         : parts.join(' ');
+  }
+
+  // ============================================================
+  // PRICING HELPERS
+  // ============================================================
+
+  String _formatMoney(double value) {
+    if (value == value.roundToDouble()) {
+      return '₹${value.toInt()}';
+    }
+    return '₹${value.toStringAsFixed(0)}';
+  }
+
+  double _priceForDate(DateTime date) {
+    if (!_pricingReady) return 0;
+    return _pricingProfile.priceFor(
+      rentalType: _rentalType,
+      package: _selectedPackage,
+      date: date,
+    );
+  }
+
+  bool _isSpecialPrice(DateTime date) {
+    if (!_pricingReady) return false;
+    final special = _pricingProfile.specialRateForDate(date);
+    if (special == null || !special.isActive) return false;
+    return special.priceFor(
+          rentalType: _rentalType,
+          packageId: _selectedPackage.id,
+        ) !=
+        null;
+  }
+
+  String _calendarPriceText(DateTime date) {
+    final price = _priceForDate(date);
+    if (price <= 0) return '';
+    return _rentalType == RentalType.hourly
+        ? '${_formatMoney(price)}/h'
+        : _formatMoney(price);
+  }
+
+  int _wholeDays(DateTime start, DateTime end) {
+    if (!end.isAfter(start)) return 0;
+    return end.difference(start).inMinutes ~/ (24 * 60);
+  }
+
+  int _billableHourlyHours(DateTime start, DateTime end) {
+    if (!end.isAfter(start)) return 0;
+    final minutes = end.difference(start).inMinutes;
+    return (minutes / 60).ceil();
+  }
+
+  bool _meetsMinimumBookingRule(DateTime start, DateTime end) {
+    if (!end.isAfter(start)) return false;
+
+    if (_rentalType == RentalType.hourly) {
+      final minimum = _minimumHours < 1 ? 1 : _minimumHours;
+      return _billableHourlyHours(start, end) >= minimum;
+    }
+
+    final minimum = _minimumDays < 1 ? 1 : _minimumDays;
+    return _wholeDays(start, end) >= minimum;
+  }
+
+  String _minimumRuleText() {
+    if (_rentalType == RentalType.hourly) {
+      final value = _minimumHours < 1 ? 1 : _minimumHours;
+      return 'Min ${value} hour${value == 1 ? '' : 's'}';
+    }
+    final value = _minimumDays < 1 ? 1 : _minimumDays;
+    return 'Min ${value} day${value == 1 ? '' : 's'}';
+  }
+
+  String _extraHourText() {
+    if (_rentalType != RentalType.daily || _extraHourRate <= 0) {
+      return '';
+    }
+    return 'Extra hour ${_formatMoney(_extraHourRate)}';
+  }
+
+  bool _validateMinimumBeforeConfirm() {
+    final pickup = _pickupDateTime;
+    final returnTime = _returnDateTime;
+    if (pickup == null || returnTime == null) return false;
+
+    if (_meetsMinimumBookingRule(pickup, returnTime)) return true;
+
+    setState(() {
+      if (_rentalType == RentalType.hourly) {
+        final minimum = _minimumHours < 1 ? 1 : _minimumHours;
+        _errorMessage =
+            'This package requires a minimum booking of $minimum hour${minimum == 1 ? '' : 's'}.';
+      } else {
+        final minimum = _minimumDays < 1 ? 1 : _minimumDays;
+        _errorMessage =
+            'This package requires a minimum booking of $minimum day${minimum == 1 ? '' : 's'}.';
+      }
+    });
+    return false;
+  }
+
+  Widget _buildPricingRuleCard() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(13),
+      decoration: BoxDecoration(
+        color: card,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  color: softAccent,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(
+                  Icons.sell_rounded,
+                  color: primary,
+                  size: 17,
+                ),
+              ),
+              const SizedBox(width: 9),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '${_selectedPackage.name} • ${_rentalType.label}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontFamily: 'Manrope',
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                        color: heading,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      _rentalType == RentalType.hourly
+                          ? '${_formatMoney(_selectedPackage.safeHourlyRate)} / hour'
+                          : '${_formatMoney(_selectedPackage.safeDailyRate)} / day',
+                      style: const TextStyle(
+                        fontFamily: 'Manrope',
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        color: primary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 7,
+            runSpacing: 7,
+            children: [
+              _ruleChip(_minimumRuleText()),
+              if (_extraHourText().isNotEmpty)
+                _ruleChip(_extraHourText()),
+              _ruleChip(
+                _selectedPackage.unlimitedKm
+                    ? 'Unlimited KM'
+                    : '${_selectedPackage.safeIncludedKm} KM included',
+              ),
+              if (!_selectedPackage.unlimitedKm &&
+                  _selectedPackage.safeExtraKmRate > 0)
+                _ruleChip(
+                  '${_formatMoney(_selectedPackage.safeExtraKmRate)} / extra KM',
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _ruleChip(String text) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(9),
+        border: Border.all(color: border),
+      ),
+      child: Text(
+        text,
+        style: const TextStyle(
+          fontFamily: 'Manrope',
+          fontSize: 8.5,
+          fontWeight: FontWeight.w800,
+          color: body,
+        ),
+      ),
+    );
   }
 
   // ============================================================
@@ -846,6 +1089,21 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
       return;
     }
 
+    final pickup = _pickupDateTime;
+    final returnTime = _returnDateTime;
+
+    if (pickup == null || returnTime == null) {
+      setState(() {
+        _errorMessage =
+            'Select pickup and return times before confirming the booking dates.';
+      });
+      return;
+    }
+
+    if (!_validateMinimumBeforeConfirm()) {
+      return;
+    }
+
     setState(() {
       _datesConfirmed = true;
       _selectingPickupDate = false;
@@ -1056,6 +1314,8 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
                       pickup: isPickup,
                       returnDate: isReturn,
                       enabled: canSelect,
+                      priceText: _calendarPriceText(date),
+                      specialPrice: _isSpecialPrice(date),
                       onTap: canSelect
                           ? () => _tapCalendarDate(date)
                           : null,
@@ -1109,6 +1369,8 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
               ),
             ],
           ),
+          const SizedBox(height: 12),
+          _buildPricingRuleCard(),
           if (!_datesConfirmed) ...[
             const SizedBox(height: 14),
             SizedBox(
@@ -1476,7 +1738,13 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
       return;
     }
 
-    // Final authoritative check. This uses the complete pickup -> return
+    
+    if (!_meetsMinimumBookingRule(pickup, returnDateTime)) {
+      _validateMinimumBeforeConfirm();
+      return;
+    }
+
+// Final authoritative check. This uses the complete pickup -> return
     // range, so rentals spanning multiple months are handled correctly.
     setState(() {
       _checkingAvailability = true;
@@ -1520,12 +1788,15 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
       MaterialPageRoute(
         builder: (_) =>
             BranchSelectionScreen(
-          car: widget.car,
-          tenantId: _tenantId,
-          pickupDateTime: pickup,
-          returnDateTime:
-              returnDateTime,
-        ),
+  car: widget.car,
+  tenantId: _tenantId,
+  pickupDateTime: pickup,
+  returnDateTime: returnDateTime,
+  rentalType: widget.rentalType,
+   pricingProfile: widget.pricingProfile,
+     selectedPackage: widget.selectedPackage,
+
+),
       ),
     );
   }
@@ -2162,6 +2433,7 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
 
   Widget _buildBottomBar() {
     final ready =
+        _pricingReady &&
         !_loadingAvailability &&
             !_checkingAvailability &&
             !_refreshingAvailability &&
@@ -2352,6 +2624,8 @@ class _CalendarDay extends StatelessWidget {
   final bool pickup;
   final bool returnDate;
   final bool enabled;
+  final String priceText;
+  final bool specialPrice;
   final VoidCallback? onTap;
 
   const _CalendarDay({
@@ -2362,6 +2636,8 @@ class _CalendarDay extends StatelessWidget {
     required this.pickup,
     required this.returnDate,
     required this.enabled,
+    required this.priceText,
+    required this.specialPrice,
     required this.onTap,
   });
 
@@ -2436,23 +2712,50 @@ class _CalendarDay extends StatelessWidget {
             child: Stack(
               alignment: Alignment.center,
               children: [
-                Text(
-                  '${date.day}',
-                  style: TextStyle(
-                    fontFamily: 'Manrope',
-                    fontSize: 13,
-                    fontWeight: FontWeight.w800,
-                    color: textColor,
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(2, 4, 2, 2),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Text(
+                        '${date.day}',
+                        style: TextStyle(
+                          fontFamily: 'Manrope',
+                          fontSize: 12,
+                          fontWeight: FontWeight.w800,
+                          color: textColor,
+                        ),
+                      ),
+                      if (priceText.isNotEmpty) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          priceText,
+                          maxLines: 1,
+                          overflow: TextOverflow.clip,
+                          style: TextStyle(
+                            fontFamily: 'Manrope',
+                            fontSize: 7.5,
+                            fontWeight: FontWeight.w900,
+                            color: selected
+                                ? Colors.white
+                                : specialPrice
+                                    ? const Color(0xFFB45309)
+                                    : primary,
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
                 ),
                 if (selected && marker != null)
                   Positioned(
-                    bottom: 3,
+                    top: 2,
+                    right: 3,
                     child: Text(
                       pickup ? 'P' : 'R',
                       style: const TextStyle(
                         fontFamily: 'Manrope',
-                        fontSize: 7,
+                        fontSize: 6.5,
                         fontWeight: FontWeight.w900,
                         color: Colors.white,
                       ),
@@ -2461,7 +2764,8 @@ class _CalendarDay extends StatelessWidget {
                 if (!selected &&
                     state == _CalendarDayState.partial)
                   Positioned(
-                    bottom: 4,
+                    top: 3,
+                    right: 4,
                     child: Container(
                       width: 4,
                       height: 4,
@@ -2474,7 +2778,8 @@ class _CalendarDay extends StatelessWidget {
                 if (!selected &&
                     state == _CalendarDayState.full)
                   Positioned(
-                    bottom: 4,
+                    top: 3,
+                    right: 4,
                     child: Container(
                       width: 4,
                       height: 4,

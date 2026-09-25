@@ -107,8 +107,10 @@ class _ReviewBookingScreenState
           ? (widget.securityDepositAmount ?? widget.pricingResult.securityDeposit)
           : 0.0;
 
+  double get _tripTotalAmount => widget.pricingResult.total;
+
   double get _selectedTotalAmount =>
-      widget.pricingResult.total + _selectedDepositAmount;
+      _tripTotalAmount + _selectedDepositAmount;
 
   String _depositLabel(String type) {
     switch (type) {
@@ -226,29 +228,173 @@ class _ReviewBookingScreenState
   }
 
   String _durationText() {
-    final minutes =
-        widget.pricingResult.durationMinutes;
+    return _durationBreakdownText();
+  }
 
-    if (minutes < 60) {
-      return '$minutes minutes';
+  String get _rentalTypeLabel {
+    final type = widget.pricingResult.rentalType.trim().toLowerCase();
+    return type == 'hourly' ? 'Hourly' : 'Daily';
+  }
+
+  bool get _isHourly =>
+      widget.pricingResult.rentalType.trim().toLowerCase() == 'hourly';
+
+  bool get _isDaily =>
+      widget.pricingResult.rentalType.trim().toLowerCase() == 'daily';
+
+  int get _minimumHours =>
+      widget.pricingProfile.minimumHoursFor(widget.selectedKmPackage.id);
+
+  int get _minimumDays =>
+      widget.pricingProfile.minimumDaysFor(widget.selectedKmPackage.id);
+
+  double get _configuredExtraHourRate =>
+      widget.pricingProfile.extraHourRateFor(widget.selectedKmPackage.id);
+
+  bool get _specialPricingApplied =>
+      (widget.pricingResult.specialPricingRuleId ?? '').trim().isNotEmpty;
+
+  String _durationBreakdownText() {
+    final totalMinutes = widget.pricingResult.durationMinutes;
+    if (totalMinutes <= 0) return '0 minutes';
+
+    final days = totalMinutes ~/ (24 * 60);
+    final remaining = totalMinutes % (24 * 60);
+    final hours = remaining ~/ 60;
+    final minutes = remaining % 60;
+
+    final parts = <String>[];
+    if (days > 0) {
+      parts.add('$days ${days == 1 ? 'day' : 'days'}');
     }
-
-    final hours =
-        widget.pricingResult.durationHours;
-
-    if (hours < 24) {
-      final rounded =
-          hours.ceil();
-
-      return '$rounded '
-          '${rounded == 1 ? 'hour' : 'hours'}';
+    if (hours > 0) {
+      parts.add('$hours ${hours == 1 ? 'hour' : 'hours'}');
     }
+    if (minutes > 0) {
+      parts.add('$minutes ${minutes == 1 ? 'minute' : 'minutes'}');
+    }
+    return parts.join(' + ');
+  }
 
-    final days =
-        widget.pricingResult.rentalDays;
+  Widget _buildPricingRulesSection() {
+    final package = widget.selectedKmPackage;
 
-    return '$days '
-        '${days == 1 ? 'day' : 'days'}';
+    return _sectionCard(
+      title: 'BOOKING & PRICING RULES',
+      icon: Icons.tune_rounded,
+      child: Column(
+        children: [
+          _ruleRow(Icons.timelapse_rounded, 'Rental type', _rentalTypeLabel),
+          const SizedBox(height: 10),
+          _ruleRow(
+            Icons.timer_outlined,
+            'Minimum booking',
+            _isHourly
+                ? '$_minimumHours ${_minimumHours == 1 ? 'hour' : 'hours'}'
+                : '$_minimumDays ${_minimumDays == 1 ? 'day' : 'days'}',
+          ),
+          const SizedBox(height: 10),
+          _ruleRow(
+            package.unlimitedKm
+                ? Icons.all_inclusive_rounded
+                : Icons.speed_rounded,
+            'Included KM',
+            package.unlimitedKm
+                ? 'Unlimited'
+                : '${package.includedKm ?? 0} KM',
+          ),
+          if (package.extraKmRate > 0) ...[
+            const SizedBox(height: 10),
+            _ruleRow(
+              Icons.add_road_rounded,
+              'Extra KM',
+              '${_money(package.extraKmRate)} / KM',
+            ),
+          ],
+          if (_isDaily && _configuredExtraHourRate > 0) ...[
+            const SizedBox(height: 10),
+            _ruleRow(
+              Icons.more_time_rounded,
+              'Extra hour',
+              '${_money(_configuredExtraHourRate)} / hour',
+            ),
+          ],
+          if (_isHourly && widget.pricingResult.extraTimeCharge > 0) ...[
+            const SizedBox(height: 10),
+            _ruleRow(
+              Icons.more_time_rounded,
+              'Extra time charged',
+              _money(widget.pricingResult.extraTimeCharge),
+            ),
+          ],
+          if (_specialPricingApplied) ...[
+            const SizedBox(height: 12),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(
+                horizontal: 11,
+                vertical: 9,
+              ),
+              decoration: BoxDecoration(
+                color: softAccent,
+                borderRadius: BorderRadius.circular(11),
+              ),
+              child: const Row(
+                children: [
+                  Icon(
+                    Icons.event_available_rounded,
+                    size: 17,
+                    color: primary,
+                  ),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Special-date pricing is applied to this booking.',
+                      style: TextStyle(
+                        fontFamily: 'Manrope',
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w700,
+                        color: primary,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _ruleRow(IconData icon, String label, String value) {
+    return Row(
+      children: [
+        Icon(icon, size: 17, color: muted),
+        const SizedBox(width: 9),
+        Expanded(
+          child: Text(
+            label,
+            style: const TextStyle(
+              fontFamily: 'Manrope',
+              fontSize: 11.5,
+              fontWeight: FontWeight.w600,
+              color: body,
+            ),
+          ),
+        ),
+        Text(
+          value,
+          textAlign: TextAlign.right,
+          style: const TextStyle(
+            fontFamily: 'Manrope',
+            fontSize: 11.5,
+            fontWeight: FontWeight.w800,
+            color: heading,
+          ),
+        ),
+      ],
+    );
   }
 
   Future<void> _confirmBooking() async {
@@ -691,6 +837,8 @@ class _ReviewBookingScreenState
                   const SizedBox(height: 14),
                   _buildPackageSection(),
                   const SizedBox(height: 14),
+                  _buildPricingRulesSection(),
+                  const SizedBox(height: 14),
                   _buildCustomerSection(),
                   const SizedBox(height: 14),
                   _buildPriceSection(),
@@ -1118,10 +1266,7 @@ class _ReviewBookingScreenState
             result.taxAmount,
           ),
           const SizedBox(height: 14),
-          const Divider(
-            height: 1,
-            color: border,
-          ),
+          const Divider(height: 1, color: border),
           const SizedBox(height: 14),
           Row(
             children: [
@@ -1137,7 +1282,7 @@ class _ReviewBookingScreenState
                 ),
               ),
               Text(
-                _money(result.total),
+                _money(_tripTotalAmount),
                 style: const TextStyle(
                   fontFamily: 'Manrope',
                   fontSize: 18,
@@ -1147,44 +1292,71 @@ class _ReviewBookingScreenState
               ),
             ],
           ),
-          const SizedBox(height: 13),
+          const SizedBox(height: 12),
           Container(
-            padding:
-                const EdgeInsets.all(12),
+            padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
               color: background,
-              borderRadius:
-                  BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(12),
             ),
-            child: Row(
+            child: Column(
               children: [
-                const Icon(
-                  Icons.account_balance_wallet_outlined,
-                  size: 17,
-                  color: muted,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    'Security deposit (${_depositLabel(widget.securityDepositType)})',
-                    style: const TextStyle(
-                      fontFamily: 'Manrope',
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      color: body,
+                Row(
+                  children: [
+                    const Icon(
+                      Icons.account_balance_wallet_outlined,
+                      size: 17,
+                      color: muted,
                     ),
-                  ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Security deposit (${_depositLabel(widget.securityDepositType)})',
+                        style: const TextStyle(
+                          fontFamily: 'Manrope',
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: body,
+                        ),
+                      ),
+                    ),
+                    Text(
+                      _money(_selectedDepositAmount),
+                      style: const TextStyle(
+                        fontFamily: 'Manrope',
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                        color: heading,
+                      ),
+                    ),
+                  ],
                 ),
-                Text(
-                  _money(
-                    _selectedDepositAmount,
-                  ),
-                  style: const TextStyle(
-                    fontFamily: 'Manrope',
-                    fontSize: 12,
-                    fontWeight: FontWeight.w800,
-                    color: heading,
-                  ),
+                const SizedBox(height: 10),
+                const Divider(height: 1, color: border),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    const Expanded(
+                      child: Text(
+                        'Amount Payable',
+                        style: TextStyle(
+                          fontFamily: 'Manrope',
+                          fontSize: 13,
+                          fontWeight: FontWeight.w900,
+                          color: heading,
+                        ),
+                      ),
+                    ),
+                    Text(
+                      _money(_selectedTotalAmount),
+                      style: const TextStyle(
+                        fontFamily: 'Manrope',
+                        fontSize: 16,
+                        fontWeight: FontWeight.w900,
+                        color: primary,
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -1487,7 +1659,7 @@ class _ReviewBookingScreenState
                             .center,
                     children: [
                       const Text(
-                        'Confirm Booking',
+                        'Continue to Payment',
                         style:
                             TextStyle(
                           fontFamily:

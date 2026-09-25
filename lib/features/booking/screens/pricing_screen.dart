@@ -38,6 +38,9 @@ class PricingScreen extends StatefulWidget {
 
   final KmPricingPackage selectedKmPackage;
 
+  /// Rental mode selected by the customer on Car Details.
+  final RentalType rentalType;
+
 
 
   const PricingScreen({
@@ -57,6 +60,7 @@ class PricingScreen extends StatefulWidget {
     required this.pricingProfile,
 
     required this.selectedKmPackage,
+    required this.rentalType,
 
   });
 
@@ -247,6 +251,21 @@ class _PricingScreenState extends State<PricingScreen> {
         return;
 
       }
+
+      final selectedPackage = widget.pricingProfile.getPackage(
+        widget.selectedKmPackage.id,
+        rentalType: widget.rentalType,
+      );
+
+      if (selectedPackage == null || !selectedPackage.isActive) {
+        setState(() {
+          _isLoading = false;
+          _errorMessage =
+              'The selected package is no longer available. Please go back and select another package.';
+        });
+        return;
+      }
+
 
 
 
@@ -592,6 +611,10 @@ class _PricingScreenState extends State<PricingScreen> {
 
         _buildSelectedPackage(),
 
+        const SizedBox(height: 14),
+
+        _buildPricingRulesCard(),
+
         const SizedBox(height: 20),
 
         _buildPriceBreakdown(result),
@@ -842,6 +865,18 @@ class _PricingScreenState extends State<PricingScreen> {
 
           _buildInfoRow(
 
+            Icons.swap_horiz_rounded,
+
+            'Rental type',
+
+            widget.rentalType == RentalType.hourly ? 'Hourly' : 'Daily',
+
+          ),
+
+          const SizedBox(height: 9),
+
+          _buildInfoRow(
+
             Icons.schedule_rounded,
 
             'Duration',
@@ -941,6 +976,9 @@ class _PricingScreenState extends State<PricingScreen> {
   Widget _buildSelectedPackage() {
 
     final package = widget.selectedKmPackage;
+    final minimumHours = widget.pricingProfile.minimumHoursFor(package.id);
+    final minimumDays = widget.pricingProfile.minimumDaysFor(package.id);
+    final extraHourRate = widget.pricingProfile.extraHourRateFor(package.id);
 
 
 
@@ -1071,6 +1109,22 @@ class _PricingScreenState extends State<PricingScreen> {
                   ),
 
                 ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    _smallChip(
+                      widget.rentalType == RentalType.hourly
+                          ? 'Min $minimumHours hr'
+                          : 'Min $minimumDays day${minimumDays == 1 ? '' : 's'}',
+                    ),
+                    if (extraHourRate > 0)
+                      _smallChip('${_money(extraHourRate)} / extra hr'),
+                    if (!package.unlimitedKm && package.extraKmRate > 0)
+                      _smallChip('${_money(package.extraKmRate)} / extra KM'),
+                  ],
+                ),
 
               ],
 
@@ -1097,6 +1151,93 @@ class _PricingScreenState extends State<PricingScreen> {
   }
 
 
+
+  Widget _smallChip(String text) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.72),
+        borderRadius: BorderRadius.circular(7),
+      ),
+      child: Text(
+        text,
+        style: const TextStyle(
+          fontFamily: 'Manrope',
+          fontSize: 8.5,
+          fontWeight: FontWeight.w800,
+          color: primary,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPricingRulesCard() {
+    final package = widget.selectedKmPackage;
+    final minimumHours = widget.pricingProfile.minimumHoursFor(package.id);
+    final minimumDays = widget.pricingProfile.minimumDaysFor(package.id);
+    final extraHourRate = widget.pricingProfile.extraHourRateFor(package.id);
+
+    final rules = <String>[
+      widget.rentalType == RentalType.hourly
+          ? 'Minimum booking: $minimumHours hour${minimumHours == 1 ? '' : 's'}'
+          : 'Minimum booking: $minimumDays day${minimumDays == 1 ? '' : 's'}',
+      if (extraHourRate > 0)
+        'Daily extra hour: ${_money(extraHourRate)} / hour',
+      if (!package.unlimitedKm && package.extraKmRate > 0)
+        'Extra KM: ${_money(package.extraKmRate)} / KM',
+      if (package.unlimitedKm) 'Unlimited KM included',
+      if (widget.rentalType == RentalType.daily)
+        "Each rental day uses that date's configured package price",
+    ];
+
+    return Container(
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: card,
+        borderRadius: BorderRadius.circular(17),
+        border: Border.all(color: border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'BOOKING PRICING RULES',
+            style: TextStyle(
+              fontFamily: 'Manrope',
+              fontSize: 9.5,
+              fontWeight: FontWeight.w800,
+              letterSpacing: .7,
+              color: muted,
+            ),
+          ),
+          const SizedBox(height: 10),
+          ...rules.map(
+            (rule) => Padding(
+              padding: const EdgeInsets.only(bottom: 7),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Icon(Icons.check_circle_rounded, size: 15, color: primary),
+                  const SizedBox(width: 7),
+                  Expanded(
+                    child: Text(
+                      rule,
+                      style: const TextStyle(
+                        fontFamily: 'Manrope',
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w600,
+                        color: body,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   Widget _buildPriceBreakdown(
 
@@ -1142,7 +1283,7 @@ class _PricingScreenState extends State<PricingScreen> {
 
         _buildPriceRow(
 
-          'Extra Time',
+          'Extra Hour',
 
           result.extraTimeCharge,
 
@@ -1310,7 +1451,7 @@ class _PricingScreenState extends State<PricingScreen> {
 
               Text(
 
-                _money(result.total),
+                _money(result.amountPayable),
 
                 style: const TextStyle(
 

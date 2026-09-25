@@ -103,6 +103,10 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   DateTime? _calendarSelectionStart;
   DateTime? _calendarSelectionEnd;
 
+  // Loaded early so the vehicle calendar can show the same date-wise
+  // customer pricing before the final booking calculation.
+  PricingProfile? _calendarPricingProfile;
+
   List<Map<String, dynamic>> _branches = [];
   List<Map<String, dynamic>> _allBranches = [];
   String? _selectedBranchId;
@@ -608,10 +612,123 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     if (!keepVehicle) _selectedCar = null;
     _selectedBranchId = null;
     _pricingProfile = null;
+    _calendarPricingProfile = null;
     _packages = [];
     _selectedPackage = null;
     _pricingResult = null;
     _step = keepVehicle ? 4 : 1;
+  }
+
+  Future<void> _preparePricingForCalendar() async {
+    final car = _selectedCar;
+    final rentalType = _pricingRentalType;
+    if (car == null || rentalType == null) return;
+
+    final profileId = car.pricingProfileId.trim();
+    if (profileId.isEmpty) {
+      _showError('This vehicle has no pricing profile assigned.');
+      return;
+    }
+
+    try {
+      final profile = await PricingManager.instance.loadPricingForCar(
+        tenantId: _tenantId,
+        pricingProfileId: profileId,
+      );
+
+      if (!mounted) return;
+
+      if (profile == null || !profile.isActive) {
+        _showError('Pricing is unavailable for this vehicle.');
+        return;
+      }
+
+      final packages = profile.packagesFor(rentalType).where((package) {
+        return package.isActive &&
+            (rentalType == RentalType.hourly
+                ? package.supportsHourly
+                : package.supportsDaily);
+      }).toList();
+
+      if (packages.isEmpty) {
+        _showError(
+          'No active ${_rentalTypeLabel.toLowerCase()} packages are available.',
+        );
+        return;
+      }
+
+      KmPricingPackage? selected = _selectedPackage;
+      if (selected == null ||
+          !packages.any((package) => package.id == selected!.id)) {
+        try {
+          selected = packages.firstWhere((package) => !package.unlimitedKm);
+        } catch (_) {
+          selected = packages.first;
+        }
+      } else {
+        selected = packages.firstWhere(
+          (package) => package.id == selected!.id,
+        );
+      }
+
+      setState(() {
+        _calendarPricingProfile = profile;
+        _pricingProfile = profile;
+        _packages = List<KmPricingPackage>.from(packages);
+        _selectedPackage = selected;
+        _pricingResult = null;
+      });
+    } catch (e, stackTrace) {
+      developer.log(
+        'Unable to prepare calendar pricing',
+        name: 'AdminNewBooking',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      if (mounted) {
+        _showError('Unable to load pricing for the vehicle calendar.');
+      }
+    }
+  }
+
+  double _calendarPriceForDate(DateTime date) {
+    final profile = _calendarPricingProfile ?? _pricingProfile;
+    final package = _selectedPackage;
+    final rentalType = _pricingRentalType;
+
+    if (profile == null || package == null || rentalType == null) return 0;
+
+    return profile.priceFor(
+      rentalType: rentalType,
+      package: package,
+      date: date,
+    );
+  }
+
+  String? _calendarSpecialRateName(DateTime date) {
+    final profile = _calendarPricingProfile ?? _pricingProfile;
+    return profile?.specialRateForDate(date)?.name;
+  }
+
+  int get _selectedPackageMinimumHours {
+    final profile = _calendarPricingProfile ?? _pricingProfile;
+    final package = _selectedPackage;
+    if (profile == null || package == null) return 1;
+    return profile.minimumHoursFor(package.id);
+  }
+
+  int get _selectedPackageMinimumDays {
+    final profile = _calendarPricingProfile ?? _pricingProfile;
+    final package = _selectedPackage;
+    if (profile == null || package == null) return 1;
+    return profile.minimumDaysFor(package.id);
+  }
+
+  double get _selectedPackageExtraHourRate {
+    final profile = _calendarPricingProfile ?? _pricingProfile;
+    final package = _selectedPackage;
+    if (profile == null || package == null) return 0;
+    return profile.extraHourRateFor(package.id);
   }
 
   Future<void> _loadAvailabilityCalendar() async {
@@ -781,6 +898,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     _selectedCar = null;
     _selectedBranchId = null;
     _pricingProfile = null;
+    _calendarPricingProfile = null;
     _packages = [];
     _selectedPackage = null;
     _pricingResult = null;
@@ -876,6 +994,34 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     if (_isHourly && pickup.isBefore(DateTime.now())) {
       _showError('Pickup time cannot be in the past.');
       return;
+    }
+
+    if (_selectedPackage == null) {
+      _showError('Please select a KM package before continuing.');
+      return;
+    }
+
+    if (_isHourly) {
+      final actualMinutes = returnTime.difference(pickup).inMinutes;
+      final minimumHours = _selectedPackageMinimumHours;
+      if (actualMinutes < minimumHours * 60) {
+        _showError(
+          'Minimum booking for ${_selectedPackage!.name} is '
+          '$minimumHours ${minimumHours == 1 ? 'hour' : 'hours'}.',
+        );
+        return;
+      }
+    } else {
+      final actualDays =
+          _dayOnly(returnTime).difference(_dayOnly(pickup)).inDays;
+      final minimumDays = _selectedPackageMinimumDays;
+      if (actualDays < minimumDays) {
+        _showError(
+          'Minimum booking for ${_selectedPackage!.name} is '
+          '$minimumDays ${minimumDays == 1 ? 'day' : 'days'}.',
+        );
+        return;
+      }
     }
 
     setState(() {
@@ -1310,13 +1456,18 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
 
       // Prefer a finite KM package as the initial selection.
       // Unlimited remains available in the list and can be selected manually.
-      KmPricingPackage? selected;
-      if (typePackages.isNotEmpty) {
+      KmPricingPackage? selected = _selectedPackage;
+      if (selected == null ||
+          !typePackages.any((package) => package.id == selected!.id)) {
         try {
           selected = typePackages.firstWhere((package) => !package.unlimitedKm);
         } catch (_) {
           selected = typePackages.first;
         }
+      } else {
+        selected = typePackages.firstWhere(
+          (package) => package.id == selected!.id,
+        );
       }
 
       if (!mounted) return;
@@ -1324,7 +1475,8 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       // Do not jump directly to step 6 here.
       setState(() {
         _pricingProfile = profile;
-        _packages = List<KmPricingPackage>.from(packages);
+        _calendarPricingProfile = profile;
+        _packages = List<KmPricingPackage>.from(typePackages);
         _selectedPackage = selected;
         _pricingResult = null;
         _loading = false;
@@ -1457,8 +1609,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     // Daily rentals are date-based. Their return date already occupies
     // the complete selected day, so the 23:59:59.999 availability boundary
     // must never be interpreted as paid "extra hours".
-    _adminExtraTimeCharge =
-        (_rentalType == AdminRentalType.hourly) ? result.extraTimeCharge : 0.0;
+    _adminExtraTimeCharge = result.extraTimeCharge;
     _adminAddOnTotal = result.addOnTotal;
     _adminProtectionTotal = result.protectionTotal;
     _adminDiscountAmount = result.discountAmount;
@@ -1549,6 +1700,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       ),
     );
   }
+  
 
   void _selectPackage(KmPricingPackage package) {
     final rate = _selectedPackageRate(package);
@@ -1614,7 +1766,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       setState(() {
         _availabilitySnapshot = snapshot;
         _loading = false;
-        _step = 9;
+        _step = 8;
         _paidAmount = 0;
       });
     } catch (e) {
@@ -1966,9 +2118,8 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
           (_step == 2 ? 'Available Vehicles' :
           (_step == 3 ? 'Rental Type' :
           (_step == 4 ? 'Vehicle Calendar' :
-          (_step == 7 ? 'Choose KM Package' :
-          (_step == 8 ? 'Pricing & Payment' :
-          (_step == 9 ? 'Final Review' : 'New Booking')))))),
+          (_step == 7 ? 'Pricing & Payment' :
+          (_step == 8 ? 'Final Review' : 'New Booking'))))),
           style: GoogleFonts.manrope(
             color: heading,
             fontSize: 20,
@@ -1987,44 +2138,6 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
                 _buildStepContent(),
               ],
             ),
-            if (_step == 7 && !_loading && !_creatingBooking && _packages.isNotEmpty)
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                child: Container(
-                  padding: const EdgeInsets.fromLTRB(10, 12, 10, 10),
-                  decoration: BoxDecoration(
-                    color: background.withOpacity(.96),
-                    border: const Border(
-                      top: BorderSide(color: border),
-                    ),
-                    boxShadow: const [
-                      BoxShadow(
-                        color: Color(0x12000000),
-                        blurRadius: 16,
-                        offset: Offset(0, -5),
-                      ),
-                    ],
-                  ),
-                  child: SafeArea(
-                    top: false,
-                    child: _primaryButton(
-                      'Continue',
-                      Icons.arrow_forward_rounded,
-                      () {
-                        print('🔥 CONTINUE FROM KM PACKAGE PRESSED');
-                        if (_selectedPackage == null) {
-                          _showError('Please select a KM package.');
-                          return;
-                        }
-                        _calculatePricing();
-                        setState(() => _step = 8);
-                      },
-                    ),
-                  ),
-                ),
-              ),
             if (_loading || _creatingBooking)
               Positioned.fill(
                 child: Container(
@@ -2070,7 +2183,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   }
 
   Widget _buildProgress() {
-    final labels = const ['Dates', 'Vehicles', 'Type', 'Vehicle Calendar', 'Branch', 'Customer', 'Package', 'Pricing', 'Confirm'];
+    final labels = const ['Dates', 'Vehicles', 'Type', 'Vehicle Calendar', 'Branch', 'Customer', 'Pricing', 'Confirm'];
     return Container(
       padding: const EdgeInsets.all(15),
       decoration: BoxDecoration(
@@ -2083,7 +2196,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
           Row(
             children: [
               Text(
-                'Booking ${_step}/9',
+                'Booking ${_step}/8',
                 style: GoogleFonts.manrope(
                   color: primary,
                   fontSize: 11,
@@ -2106,7 +2219,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
             borderRadius: BorderRadius.circular(10),
             child: LinearProgressIndicator(
               minHeight: 6,
-              value: _step / 9,
+              value: _step / 8,
               backgroundColor: softAccent,
               color: primary,
             ),
@@ -2131,10 +2244,8 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       case 6:
         return _buildCustomer();
       case 7:
-        return _buildPackage();
-      case 8:
         return _buildPricing();
-      case 9:
+      case 8:
         return _buildReview();
       default:
         return const SizedBox.shrink();
@@ -2239,6 +2350,8 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
                     _calendarMonth = DateTime(_pickupDate.year, _pickupDate.month, 1);
                     _step = 4;
                   });
+                  await _preparePricingForCalendar();
+                  if (!mounted) return;
                   await _loadAvailabilityCalendar();
                 },
                 child: AnimatedContainer(
@@ -2717,7 +2830,9 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
                     Text(
                       _loadingCalendar
                           ? 'Refreshing vehicle availability…'
-                          : 'Monthly booking availability',
+                          : _selectedPackage == null
+                              ? 'Monthly availability'
+                              : 'Prices for ${_selectedPackage!.name}',
                       style: GoogleFonts.manrope(
                         color: muted,
                         fontSize: 10,
@@ -2844,7 +2959,33 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
                           fontWeight: FontWeight.w900,
                         ),
                       ),
-                      const SizedBox(height: 3),
+                      const SizedBox(height: 2),
+                      if (!isPast && _selectedPackage != null) ...[
+                        Text(
+                          _calendarPriceForDate(day) > 0
+                              ? _money(_calendarPriceForDate(day))
+                              : '—',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: GoogleFonts.manrope(
+                            color: booked || blocked ? muted : heading,
+                            fontSize: 7.5,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                        if (_calendarSpecialRateName(day) != null)
+                          Text(
+                            'SPECIAL',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: GoogleFonts.manrope(
+                              color: primary,
+                              fontSize: 6,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                      ],
+                      const SizedBox(height: 2),
                       Container(
                         width: 6,
                         height: 6,
@@ -2959,6 +3100,190 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     );
   }
 
+  Widget _buildCalendarPackageSelector() {
+    final packages = _packagesForRentalType;
+
+    return _sectionCard(
+      title: 'Pricing package',
+      subtitle:
+          'Select the package that will be used for this booking and calendar prices.',
+      child: packages.isEmpty
+          ? _emptyCard(
+              'No packages available',
+              'No active package is configured for this rental type.',
+            )
+          : Column(
+              children: packages.map((package) {
+                final selected = _selectedPackage?.id == package.id;
+                final rate = _selectedPackageRate(package);
+
+                return GestureDetector(
+                  onTap: () {
+                    setState(() {
+                      _selectedPackage = package;
+                      _pricingResult = null;
+                    });
+                  },
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 160),
+                    margin: const EdgeInsets.only(bottom: 8),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: selected ? softAccent : background,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: selected ? primary : border,
+                        width: selected ? 1.4 : 1,
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          selected
+                              ? Icons.radio_button_checked_rounded
+                              : Icons.radio_button_off_rounded,
+                          color: selected ? primary : muted,
+                          size: 20,
+                        ),
+                        const SizedBox(width: 9),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                package.name,
+                                style: GoogleFonts.manrope(
+                                  color: heading,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w900,
+                                ),
+                              ),
+                              const SizedBox(height: 3),
+                              Text(
+                                package.unlimitedKm
+                                    ? 'Unlimited KM'
+                                    : '${package.includedKm ?? 0} KM included • '
+                                        '${_money(package.safeExtraKmRate)} / extra KM',
+                                style: GoogleFonts.manrope(
+                                  color: body,
+                                  fontSize: 9.5,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        Text(
+                          '${_money(rate)} / ${_isHourly ? 'hr' : 'day'}',
+                          style: GoogleFonts.manrope(
+                            color: primary,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+    );
+  }
+
+  Widget _buildCalendarPricingRules() {
+    final package = _selectedPackage;
+    final profile = _calendarPricingProfile ?? _pricingProfile;
+
+    if (package == null || profile == null) {
+      return const SizedBox.shrink();
+    }
+
+    final minimumText = _isHourly
+        ? '${_selectedPackageMinimumHours} '
+            '${_selectedPackageMinimumHours == 1 ? 'hour' : 'hours'} minimum'
+        : '${_selectedPackageMinimumDays} '
+            '${_selectedPackageMinimumDays == 1 ? 'day' : 'days'} minimum';
+
+    final extraHour = _selectedPackageExtraHourRate;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(13),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(15),
+        border: Border.all(color: border),
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.rule_rounded, color: primary, size: 18),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '$minimumText • '
+                  '${package.unlimitedKm ? 'Unlimited KM' : '${package.safeIncludedKm} KM included'}',
+                  style: GoogleFonts.manrope(
+                    color: heading,
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 9),
+          Wrap(
+            spacing: 7,
+            runSpacing: 7,
+            children: [
+              _calendarRuleChip(
+                'Extra KM ${_money(package.safeExtraKmRate)} / KM',
+              ),
+              if (extraHour > 0)
+                _calendarRuleChip(
+                  'Extra hour ${_money(extraHour)} / hr',
+                ),
+              _calendarRuleChip('Special dates can change the day price'),
+            ],
+          ),
+          const SizedBox(height: 9),
+          Text(
+            _isHourly
+                ? 'Minimum hours affect billing only; exact selected times are still used for availability.'
+                : 'Daily billing uses complete 24-hour blocks plus the configured extra-hour charge for remaining time.',
+            style: GoogleFonts.manrope(
+              color: muted,
+              fontSize: 9.5,
+              height: 1.35,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _calendarRuleChip(String text) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: card,
+        borderRadius: BorderRadius.circular(9),
+        border: Border.all(color: border),
+      ),
+      child: Text(
+        text,
+        style: GoogleFonts.manrope(
+          color: body,
+          fontSize: 8.5,
+          fontWeight: FontWeight.w800,
+        ),
+      ),
+    );
+  }
+
   Widget _buildDates() {
     final durationText = _isHourly
         ? '${_formatTime(_pickupTime)} → ${_formatTime(_returnTime)}'
@@ -2980,6 +3305,10 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
           subtitle: _loadingCalendar ? 'Refreshing vehicle availability…' : 'Selected period: $durationText',
           child: Column(
             children: [
+              _buildCalendarPackageSelector(),
+              const SizedBox(height: 12),
+              _buildCalendarPricingRules(),
+              const SizedBox(height: 14),
               _premiumMonthlyAvailabilityCalendar(),
               const SizedBox(height: 12),
               Container(
@@ -5296,12 +5625,20 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
   }
 
   String _durationText(PricingResult result) {
-    if (result.durationMinutes < 60) return '${result.durationMinutes} minutes';
-    if (result.durationHours < 24) {
-      final h = result.durationHours.ceil();
-      return '$h ${h == 1 ? 'hour' : 'hours'}';
-    }
-    return '${result.rentalDays} ${result.rentalDays == 1 ? 'day' : 'days'}';
+    final totalMinutes = result.durationMinutes;
+    if (totalMinutes <= 0) return '0 minutes';
+
+    final days = totalMinutes ~/ (24 * 60);
+    final remaining = totalMinutes % (24 * 60);
+    final hours = remaining ~/ 60;
+    final minutes = remaining % 60;
+
+    final parts = <String>[];
+    if (days > 0) parts.add('$days ${days == 1 ? 'day' : 'days'}');
+    if (hours > 0) parts.add('$hours ${hours == 1 ? 'hour' : 'hours'}');
+    if (minutes > 0) parts.add('$minutes ${minutes == 1 ? 'minute' : 'minutes'}');
+
+    return parts.join(' + ');
   }
 
   Widget _heroCard({required IconData icon, required String title, required String subtitle}) {

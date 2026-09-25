@@ -4,13 +4,20 @@ import 'package:flutter/material.dart';
 import '../../../core/config/app_config.dart';
 import 'package:customer_app_car_rental/features/cars/models/car.dart';
 import '../../../models/branch.dart';
-import 'km_package_screen.dart';
+import '../../pricing/models/km_pricing_package.dart';
+import '../../pricing/models/pricing_config.dart';
+import '../../pricing/models/pricing_profile.dart';
+import '../../pricing/manager/pricing_manager.dart';
+import 'pricing_screen.dart';
 
 class BranchSelectionScreen extends StatefulWidget {
   final Car car;
   final String tenantId;
   final DateTime pickupDateTime;
   final DateTime returnDateTime;
+  final String rentalType;
+  final PricingProfile pricingProfile;
+  final KmPricingPackage selectedPackage;
 
   const BranchSelectionScreen({
     super.key,
@@ -18,6 +25,9 @@ class BranchSelectionScreen extends StatefulWidget {
     required this.tenantId,
     required this.pickupDateTime,
     required this.returnDateTime,
+    required this.rentalType,
+    required this.pricingProfile,
+    required this.selectedPackage,
   });
 
   @override
@@ -30,6 +40,11 @@ class _BranchSelectionScreenState extends State<BranchSelectionScreen> {
 
   List<Branch> _branches = [];
   String? _selectedBranchId;
+
+  late PricingProfile _pricingProfile;
+  late KmPricingPackage _selectedPackage;
+  late RentalType _rentalType;
+  bool _pricingReady = false;
 
   bool _isLoading = true;
   bool _isRefreshing = false;
@@ -57,9 +72,24 @@ class _BranchSelectionScreenState extends State<BranchSelectionScreen> {
 
   bool get _busy => _isLoading || _isRefreshing || _isContinuing;
 
+  bool get _canContinue =>
+      !_busy && _pricingReady && _selectedBranch != null;
+
   @override
   void initState() {
     super.initState();
+
+    _pricingProfile = widget.pricingProfile;
+    _selectedPackage = widget.selectedPackage;
+    _rentalType =
+        RentalType.fromString(widget.rentalType) ?? RentalType.daily;
+
+    _pricingReady = _pricingProfile.getPackage(
+          _selectedPackage.id,
+          rentalType: _rentalType,
+        ) !=
+        null;
+
     _loadBranches();
   }
 
@@ -197,6 +227,173 @@ class _BranchSelectionScreenState extends State<BranchSelectionScreen> {
     return branch;
   }
 
+  String _formatRate(double value) {
+    if (value == value.roundToDouble()) return '₹${value.toInt()}';
+    return '₹${value.toStringAsFixed(0)}';
+  }
+
+  String get _packagePriceText {
+    final price = _pricingProfile.priceFor(
+      rentalType: _rentalType,
+      package: _selectedPackage,
+      date: widget.pickupDateTime,
+    );
+    return _rentalType == RentalType.hourly
+        ? '${_formatRate(price)} / hour'
+        : '${_formatRate(price)} / day';
+  }
+
+  Widget _buildBookingSummary() {
+    final duration =
+        widget.returnDateTime.difference(widget.pickupDateTime);
+    final minutes = duration.inMinutes.clamp(0, 100000000);
+    final days = minutes ~/ (24 * 60);
+    final remaining = minutes % (24 * 60);
+    final hours = remaining ~/ 60;
+    final mins = remaining % 60;
+
+    final durationText = _rentalType == RentalType.hourly
+        ? '${(minutes / 60).ceil()} hour${(minutes / 60).ceil() == 1 ? '' : 's'}'
+        : [
+            if (days > 0) '$days day${days == 1 ? '' : 's'}',
+            if (hours > 0) '$hours hr',
+            if (mins > 0) '$mins min',
+          ].join(' + ');
+
+    final kmText = _selectedPackage.unlimitedKm
+        ? 'Unlimited KM'
+        : '${_selectedPackage.includedKm ?? 0} KM included';
+
+    final extraKmText =
+        _selectedPackage.unlimitedKm ||
+                _selectedPackage.extraKmRate <= 0
+            ? null
+            : '${_formatRate(_selectedPackage.extraKmRate)} / extra KM';
+
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.fromLTRB(20, 14, 20, 0),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: card,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: softAccent,
+                  borderRadius: BorderRadius.circular(11),
+                ),
+                child: const Icon(
+                  Icons.sell_rounded,
+                  color: primary,
+                  size: 18,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _selectedPackage.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontFamily: 'Manrope',
+                        fontSize: 12,
+                        fontWeight: FontWeight.w900,
+                        color: heading,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '${_rentalType.label} • $_packagePriceText',
+                      style: const TextStyle(
+                        fontFamily: 'Manrope',
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        color: primary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(
+                Icons.verified_rounded,
+                color: primary,
+                size: 18,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 7,
+            runSpacing: 7,
+            children: [
+              _summaryChip(kmText),
+              if (extraKmText != null) _summaryChip(extraKmText),
+              _summaryChip(
+                durationText.isEmpty
+                    ? 'Selected duration'
+                    : durationText,
+              ),
+            ],
+          ),
+          const SizedBox(height: 9),
+          const Text(
+            'The selected package will be used for the final pricing calculation.',
+            style: TextStyle(
+              fontFamily: 'Manrope',
+              fontSize: 9.5,
+              fontWeight: FontWeight.w600,
+              color: body,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _summaryChip(String text) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(9),
+        border: Border.all(color: border),
+      ),
+      child: Text(
+        text,
+        style: const TextStyle(
+          fontFamily: 'Manrope',
+          fontSize: 8.5,
+          fontWeight: FontWeight.w800,
+          color: body,
+        ),
+      ),
+    );
+  }
+
+  bool _packageSupportsRentalType(
+    KmPricingPackage package,
+    RentalType type,
+  ) {
+    switch (type) {
+      case RentalType.hourly:
+        return package.supportsHourly;
+      case RentalType.daily:
+        return package.supportsDaily;
+    }
+  }
+
   Future<void> _continue() async {
     final selected = _selectedBranch;
 
@@ -241,15 +438,75 @@ class _BranchSelectionScreenState extends State<BranchSelectionScreen> {
         _lastCheckedAt = DateTime.now();
       });
 
+      final freshProfile =
+          await PricingManager.instance.loadPricingForCar(
+        tenantId: _tenantId,
+        pricingProfileId: widget.car.pricingProfileId,
+      );
+
+      if (!mounted) return;
+
+      if (freshProfile == null || !freshProfile.isActive) {
+        setState(() {
+          _isContinuing = false;
+          _pricingReady = false;
+          _errorMessage =
+              'This vehicle pricing is no longer available. Please go back and try again.';
+        });
+        return;
+      }
+
+      final freshPackage = freshProfile.getPackage(
+        _selectedPackage.id,
+        rentalType: _rentalType,
+      );
+
+      if (freshPackage == null || !freshPackage.isActive) {
+        setState(() {
+          _isContinuing = false;
+          _pricingProfile = freshProfile;
+          _pricingReady = false;
+          _errorMessage =
+              'The selected package is no longer available. Please go back and select another package.';
+        });
+        _showSnackBar(
+          'The selected pricing package changed. Please review it again.',
+          icon: Icons.sync_problem_rounded,
+          isError: true,
+        );
+        return;
+      }
+
+      if (!_packageSupportsRentalType(freshPackage, _rentalType)) {
+        setState(() {
+          _isContinuing = false;
+          _pricingReady = false;
+          _errorMessage =
+              'The selected package is not available for this rental type.';
+        });
+        return;
+      }
+
+      setState(() {
+        _pricingProfile = freshProfile;
+        _selectedPackage = freshPackage;
+        _pricingReady = true;
+        _isContinuing = false;
+        _lastCheckedAt = DateTime.now();
+      });
+
       await Navigator.push(
         context,
         MaterialPageRoute(
-          builder: (_) => KmPackageScreen(
+          builder: (_) => PricingScreen(
             car: widget.car,
             tenantId: _tenantId,
             branch: branch,
             pickupDateTime: widget.pickupDateTime,
             returnDateTime: widget.returnDateTime,
+            pricingProfile: freshProfile,
+            selectedKmPackage: freshPackage,
+            rentalType: _rentalType,
           ),
         ),
       );
@@ -443,6 +700,8 @@ class _BranchSelectionScreenState extends State<BranchSelectionScreen> {
                   ),
                   children: [
                     _buildTripSummary(),
+                    const SizedBox(height: 14),
+                    _buildBookingSummary(),
                     const SizedBox(height: 14),
                     _buildAvailabilityStatus(),
                     const SizedBox(height: 24),

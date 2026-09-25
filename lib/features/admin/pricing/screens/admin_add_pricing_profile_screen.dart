@@ -1,17 +1,15 @@
 import 'package:flutter/material.dart';
 
 
+
 import '../../../../core/config/app_config.dart';
-
-import '../../../cars/models/car.dart';
-
-import '../../../cars/services/car_service.dart';
 
 import '../../../pricing/models/km_pricing_package.dart';
 
 import '../../../pricing/models/pricing_profile.dart';
 
 import '../../../pricing/services/pricing_profile_service.dart';
+
 
 
 /// Admin screen for creating a simple vehicle/pricing-group pricing profile.
@@ -65,6 +63,7 @@ class AdminAddPricingProfileScreen extends StatefulWidget {
   });
 
 
+
   @override
 
   State<AdminAddPricingProfileScreen> createState() =>
@@ -72,6 +71,7 @@ class AdminAddPricingProfileScreen extends StatefulWidget {
       _AdminAddPricingProfileScreenState();
 
 }
+
 
 
 class _AdminAddPricingProfileScreenState
@@ -97,7 +97,9 @@ class _AdminAddPricingProfileScreenState
   static const Color border = Color(0xFFE5EBE9);
 
 
+
   final _formKey = GlobalKey<FormState>();
+
 
 
   final TextEditingController _nameController =
@@ -105,9 +107,11 @@ class _AdminAddPricingProfileScreenState
       TextEditingController();
 
 
+
   final TextEditingController _pricingGroupController =
 
       TextEditingController();
+
 
 
   final TextEditingController _depositController =
@@ -115,9 +119,11 @@ class _AdminAddPricingProfileScreenState
       TextEditingController();
 
 
+
   final TextEditingController _minimumAssetValueController =
 
       TextEditingController();
+
 
 
   final TextEditingController _specialRuleNameController =
@@ -125,9 +131,11 @@ class _AdminAddPricingProfileScreenState
       TextEditingController();
 
 
+
   final TextEditingController _specialHourlyController =
 
       TextEditingController();
+
 
 
   final TextEditingController _specialDailyController =
@@ -135,15 +143,13 @@ class _AdminAddPricingProfileScreenState
       TextEditingController();
 
 
+
   final TextEditingController _specialExtraKmController =
 
       TextEditingController();
+bool _isActive = true;
+bool _isSaving = false;
 
-
-  bool _isActive = true;
-
-
-  bool _isSaving = false;
 
 
   bool _hourlyEnabled = true;
@@ -151,7 +157,9 @@ class _AdminAddPricingProfileScreenState
   bool _dailyEnabled = true;
 
 
+
   DepositType _depositType = DepositType.none;
+
 
 
   bool _specialRuleEnabled = false;
@@ -161,14 +169,26 @@ class _AdminAddPricingProfileScreenState
   DateTime? _specialEndDate;
 
 
+
   final List<_PackageDraft> _packages = [];
+
 
 
   String get tenantId =>
 
       AppConfig.tenant.tenantId;
 
+
+
   @override
+  void initState() {
+    super.initState();
+  }
+
+
+
+  @override
+
   void dispose() {
 
     _nameController.dispose();
@@ -188,6 +208,7 @@ class _AdminAddPricingProfileScreenState
     _specialExtraKmController.dispose();
 
 
+
     for (final package in _packages) {
 
       package.dispose();
@@ -195,9 +216,13 @@ class _AdminAddPricingProfileScreenState
     }
 
 
+
     super.dispose();
 
   }
+
+
+
 
 
   // ===========================================================================
@@ -205,6 +230,7 @@ class _AdminAddPricingProfileScreenState
   // PACKAGES
 
   // ===========================================================================
+
 
 
   void _addPackage() {
@@ -222,9 +248,11 @@ class _AdminAddPricingProfileScreenState
   }
 
 
+
   void _removePackage(int index) {
 
     final package = _packages[index];
+
 
 
     setState(() {
@@ -234,9 +262,11 @@ class _AdminAddPricingProfileScreenState
     });
 
 
+
     package.dispose();
 
   }
+
 
 
   // ===========================================================================
@@ -246,6 +276,7 @@ class _AdminAddPricingProfileScreenState
   // ===========================================================================
 
 
+
   Future<void> _save() async {
 
     if (!_formKey.currentState!.validate()) {
@@ -253,7 +284,6 @@ class _AdminAddPricingProfileScreenState
       return;
 
     }
-
     if (_packages.isEmpty) {
 
       _showSnackBar(
@@ -269,9 +299,11 @@ class _AdminAddPricingProfileScreenState
     }
 
 
+
     final packages =
 
         _packages.map(_buildPackage).toList();
+
 
 
     final activePackages = packages
@@ -283,6 +315,7 @@ class _AdminAddPricingProfileScreenState
         )
 
         .toList();
+
 
 
     if (activePackages.isEmpty) {
@@ -298,6 +331,7 @@ class _AdminAddPricingProfileScreenState
       return;
 
     }
+
 
 
     if (_hourlyEnabled &&
@@ -321,6 +355,7 @@ class _AdminAddPricingProfileScreenState
     }
 
 
+
     if (_dailyEnabled &&
 
         !activePackages.any(
@@ -342,6 +377,7 @@ class _AdminAddPricingProfileScreenState
     }
 
 
+
     if (!_hourlyEnabled && !_dailyEnabled) {
 
       _showSnackBar(
@@ -355,6 +391,7 @@ class _AdminAddPricingProfileScreenState
       return;
 
     }
+
 
 
     if (_specialRuleEnabled) {
@@ -374,6 +411,7 @@ class _AdminAddPricingProfileScreenState
         return;
 
       }
+
 
 
       if (_specialEndDate!.isBefore(
@@ -397,11 +435,13 @@ class _AdminAddPricingProfileScreenState
     }
 
 
+
     setState(() {
 
       _isSaving = true;
 
     });
+
 
 
     try {
@@ -417,6 +457,7 @@ class _AdminAddPricingProfileScreenState
           .toList();
 
 
+
       final dailyPackages = activePackages
 
           .where(
@@ -427,16 +468,47 @@ class _AdminAddPricingProfileScreenState
 
           .toList();
 
+      final minimumHoursByPackageId =
+          <String, int>{};
+      final minimumDaysByPackageId =
+          <String, int>{};
+      final extraHourRateByPackageId =
+          <String, double>{};
+
+      for (final draft in _packages) {
+        final builtPackage = _buildPackage(draft);
+        final packageId = builtPackage.id.trim();
+
+        if (_hourlyEnabled && builtPackage.supportsHourly) {
+          minimumHoursByPackageId[packageId] =
+              _positiveIntOrDefault(
+            draft.minimumHoursController.text,
+            1,
+          );
+        }
+
+        if (_dailyEnabled && builtPackage.supportsDaily) {
+          minimumDaysByPackageId[packageId] =
+              _positiveIntOrDefault(
+            draft.minimumDaysController.text,
+            1,
+          );
+        }
+
+        extraHourRateByPackageId[packageId] =
+            _nonNegativeDouble(
+          draft.extraHourController.text,
+        );
+      }
 
       final profile =
-
           PricingProfile(
 
         id: '',
 
         tenantId: tenantId,
 
-        // Reusable pricing profile. Cars are connected later from Edit Pricing Profile.
+        // Reusable profile: cars are connected after creation.
         vehicleId: '',
 
         pricingGroupId:
@@ -479,12 +551,27 @@ class _AdminAddPricingProfileScreenState
 
             _buildDepositConfig(),
 
+        
+        minimumHoursByPackageId:
+            Map<String, int>.unmodifiable(
+          minimumHoursByPackageId,
+        ),
+        minimumDaysByPackageId:
+            Map<String, int>.unmodifiable(
+          minimumDaysByPackageId,
+        ),
+        extraHourRateByPackageId:
+            Map<String, double>.unmodifiable(
+          extraHourRateByPackageId,
+        ),
         isActive: _isActive,
 
       );
 
 
+
       final errors = _validatePricingProfile(profile);
+
 
 
       if (errors.isNotEmpty) {
@@ -492,6 +579,7 @@ class _AdminAddPricingProfileScreenState
         throw Exception(errors.join('\n'));
 
       }
+
 
 
       await PricingProfileService.instance
@@ -505,14 +593,17 @@ class _AdminAddPricingProfileScreenState
       );
 
 
+
       if (!mounted) return;
+
 
 
       _showSnackBar(
 
-        'Pricing profile created successfully.',
+        'Pricing profile created successfully. Connect cars from Edit Pricing Profile.',
 
       );
+
 
 
       Navigator.pop(
@@ -526,6 +617,7 @@ class _AdminAddPricingProfileScreenState
     } catch (e) {
 
       if (!mounted) return;
+
 
 
       _showSnackBar(
@@ -559,6 +651,7 @@ class _AdminAddPricingProfileScreenState
   }
 
 
+
   KmPricingPackage _buildPackage(
 
     _PackageDraft draft,
@@ -574,6 +667,7 @@ class _AdminAddPricingProfileScreenState
         ? 'package_${DateTime.now().microsecondsSinceEpoch}'
 
         : draft.idController.text.trim();
+
 
 
     return KmPricingPackage(
@@ -625,6 +719,7 @@ class _AdminAddPricingProfileScreenState
   }
 
 
+
   List<SpecialRate> _buildSpecialRates(
 
     List<KmPricingPackage> packages,
@@ -642,6 +737,7 @@ class _AdminAddPricingProfileScreenState
     }
 
 
+
     final hourlyPrice =
 
         _nonNegativeDouble(
@@ -649,6 +745,7 @@ class _AdminAddPricingProfileScreenState
       _specialHourlyController.text,
 
     );
+
 
 
     final dailyPrice =
@@ -660,6 +757,7 @@ class _AdminAddPricingProfileScreenState
     );
 
 
+
     final extraKm =
 
         _nonNegativeDouble(
@@ -669,14 +767,17 @@ class _AdminAddPricingProfileScreenState
     );
 
 
+
     final hourlyPrices =
 
         <String, double>{};
 
 
+
     final dailyPrices =
 
         <String, double>{};
+
 
 
     for (final package in packages) {
@@ -694,6 +795,7 @@ class _AdminAddPricingProfileScreenState
       }
 
 
+
       if (package.supportsDaily &&
 
           _dailyEnabled &&
@@ -707,6 +809,7 @@ class _AdminAddPricingProfileScreenState
       }
 
     }
+
 
 
     return [
@@ -762,6 +865,7 @@ class _AdminAddPricingProfileScreenState
   }
 
 
+
   DepositConfig _buildDepositConfig() {
 
     if (_depositType ==
@@ -777,6 +881,7 @@ class _AdminAddPricingProfileScreenState
     }
 
 
+
     final amount =
 
         _nonNegativeDouble(
@@ -786,6 +891,7 @@ class _AdminAddPricingProfileScreenState
     );
 
 
+
     final minimumAssetValue =
 
         _nonNegativeDouble(
@@ -793,6 +899,7 @@ class _AdminAddPricingProfileScreenState
       _minimumAssetValueController.text,
 
     );
+
 
 
     return DepositConfig(
@@ -848,6 +955,7 @@ class _AdminAddPricingProfileScreenState
   }
 
 
+
   String _depositPaymentMethod(
 
     DepositType type,
@@ -877,11 +985,12 @@ class _AdminAddPricingProfileScreenState
   }
 
 
+
   /// Local validation for the simplified PricingProfile model.
 
   ///
 
-  /// The simplified model intentionally has no \`validate()\` method returning
+  /// The simplified model intentionally has no `validate()` method returning
 
   /// a List<String>. Validation belongs here so this screen does not depend
 
@@ -892,11 +1001,13 @@ class _AdminAddPricingProfileScreenState
     final errors = <String>[];
 
 
+
     if (profile.tenantId.trim().isEmpty) {
 
       errors.add('Tenant ID is required.');
 
     }
+
 
 
     if (profile.name.trim().isEmpty) {
@@ -906,11 +1017,13 @@ class _AdminAddPricingProfileScreenState
     }
 
 
+
     if (profile.currency.trim().isEmpty) {
 
       errors.add('Currency is required.');
 
     }
+
 
 
     if (profile.hourlyPackages.isEmpty &&
@@ -920,6 +1033,7 @@ class _AdminAddPricingProfileScreenState
       errors.add('At least one hourly or daily pricing package is required.');
 
     }
+
 
 
     for (final package in [
@@ -967,6 +1081,7 @@ class _AdminAddPricingProfileScreenState
       }
 
     }
+
 
 
     for (final rate in profile.specialRates) {
@@ -1022,6 +1137,7 @@ class _AdminAddPricingProfileScreenState
     }
 
 
+
     final deposit = profile.securityDeposit;
 
     if (deposit.amount < 0) {
@@ -1037,9 +1153,11 @@ class _AdminAddPricingProfileScreenState
     }
 
 
+
     return errors.toSet().toList();
 
   }
+
 
 
   // ===========================================================================
@@ -1047,6 +1165,7 @@ class _AdminAddPricingProfileScreenState
   // SPECIAL DATE PICKER
 
   // ===========================================================================
+
 
 
   Future<void> _pickSpecialDate({
@@ -1068,6 +1187,7 @@ class _AdminAddPricingProfileScreenState
             DateTime.now());
 
 
+
     final picked =
 
         await showDatePicker(
@@ -1083,6 +1203,7 @@ class _AdminAddPricingProfileScreenState
     );
 
 
+
     if (picked == null ||
 
         !mounted) {
@@ -1092,11 +1213,13 @@ class _AdminAddPricingProfileScreenState
     }
 
 
+
     setState(() {
 
       if (start) {
 
         _specialStartDate = picked;
+
 
 
         if (_specialEndDate != null &&
@@ -1122,6 +1245,7 @@ class _AdminAddPricingProfileScreenState
   }
 
 
+
   String _formatDate(
 
     DateTime? date,
@@ -1135,6 +1259,7 @@ class _AdminAddPricingProfileScreenState
     }
 
 
+
     return '${date.day.toString().padLeft(2, '0')}/'
 
         '${date.month.toString().padLeft(2, '0')}/'
@@ -1142,6 +1267,7 @@ class _AdminAddPricingProfileScreenState
         '${date.year}';
 
   }
+
 
 
   DateTime _dateOnly(
@@ -1163,11 +1289,13 @@ class _AdminAddPricingProfileScreenState
   }
 
 
+
   // ===========================================================================
 
   // BUILD
 
   // ===========================================================================
+
 
 
   @override
@@ -1237,13 +1365,15 @@ class _AdminAddPricingProfileScreenState
           children: [
 
 
+
+
             _section(
 
               title: 'Profile Details',
 
               subtitle:
 
-                  'Create one reusable pricing profile. Connect one or many cars later from Edit Pricing Profile.',
+                  'Create one reusable pricing profile that can be connected to multiple cars.',
 
               icon: Icons.badge_outlined,
 
@@ -1311,13 +1441,49 @@ class _AdminAddPricingProfileScreenState
 
             ),
 
-            const SizedBox(height: 16),            _connectionInfo(),
             const SizedBox(height: 16),
 
 
 
+                        _section(
+              title: 'Car Connection',
+              subtitle:
+                  'Create the pricing profile first. Connect one or many cars after saving.',
+              icon: Icons.link_rounded,
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: softAccent,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: const Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      Icons.info_outline_rounded,
+                      color: primary,
+                      size: 20,
+                    ),
+                    SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'This profile is reusable. After creation, open Edit Pricing Profile → Connected Cars to connect as many cars as you want.',
+                        style: TextStyle(
+                          fontFamily: 'Manrope',
+                          fontSize: 11.5,
+                          height: 1.45,
+                          color: body,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
 
-            _section(
+_section(
 
               title: 'Rental Types',
 
@@ -1338,13 +1504,14 @@ class _AdminAddPricingProfileScreenState
             const SizedBox(height: 16),
 
 
+
             _section(
 
               title: 'KM Packages',
 
               subtitle:
 
-                  'Create packages such as 150 KM, 500 KM, 1000 KM or Unlimited. Daily included KM is multiplied by rental days.',
+                  'Create packages such as 150 KM, 500 KM, 1000 KM or Unlimited. Daily included KM is multiplied by the number of billable rental days. Extra hours use the package extra-hour rate.',
 
               icon:
 
@@ -1357,6 +1524,7 @@ class _AdminAddPricingProfileScreenState
             ),
 
             const SizedBox(height: 16),
+
 
 
             _section(
@@ -1380,6 +1548,7 @@ class _AdminAddPricingProfileScreenState
             const SizedBox(height: 16),
 
 
+
             _section(
 
               title: 'Security Deposit',
@@ -1399,6 +1568,7 @@ class _AdminAddPricingProfileScreenState
             ),
 
             const SizedBox(height: 16),
+
 
 
             _section(
@@ -1484,6 +1654,7 @@ class _AdminAddPricingProfileScreenState
             ),
 
             const SizedBox(height: 24),
+
 
 
             SizedBox(
@@ -1598,113 +1769,16 @@ class _AdminAddPricingProfileScreenState
 
   }
 
+
+
+
+
   // ===========================================================================
-  // CURRENCY
-  // ===========================================================================
-
-
-  Widget _readOnlyCurrency() {
-
-    return TextFormField(
-
-      initialValue:
-
-          AppConfig.tenant.business.currency,
-
-      readOnly: true,
-
-      decoration:
-
-          _decoration(
-
-        'Currency',
-
-        'Currency',
-
-      ),
-
-      style:
-
-          const TextStyle(
-
-        fontFamily: 'Manrope',
-
-        color: heading,
-
-        fontWeight:
-
-            FontWeight.w700,
-
-      ),
-
-    );
-
-  }
-
-
-    Widget _connectionInfo() {
-    return Container(
-      padding: const EdgeInsets.all(17),
-      decoration: BoxDecoration(
-        color: softAccent,
-        borderRadius: BorderRadius.circular(21),
-        border: Border.all(
-          color: accent.withValues(alpha: 0.20),
-        ),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.85),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: const Icon(
-              Icons.link_rounded,
-              color: primary,
-              size: 21,
-            ),
-          ),
-          const SizedBox(width: 12),
-          const Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Reusable pricing profile',
-                  style: TextStyle(
-                    fontFamily: 'Manrope',
-                    fontSize: 14,
-                    fontWeight: FontWeight.w800,
-                    color: heading,
-                  ),
-                ),
-                SizedBox(height: 4),
-                Text(
-                  'Create this profile once and connect one or many cars later from Edit Pricing Profile.',
-                  style: TextStyle(
-                    fontFamily: 'Manrope',
-                    fontSize: 11.5,
-                    height: 1.45,
-                    color: body,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-// ===========================================================================
 
   // RENTAL TYPES
 
   // ===========================================================================
+
 
 
   Widget _rentalTypeSettings() {
@@ -1821,7 +1895,7 @@ class _AdminAddPricingProfileScreenState
 
                 child: Text(
 
-                  'Weekend, weekly and monthly rentals are no longer separate rental types. Weekend/holiday/festival changes are handled through Special Date Pricing.',
+                  'Weekend, weekly and monthly rentals are no longer separate rental types. Weekend/holiday/festival changes are handled through Special Date Pricing. Set minimum hours/days and extra-hour pricing inside each KM package.',
 
                   style: TextStyle(
 
@@ -1852,6 +1926,7 @@ class _AdminAddPricingProfileScreenState
     );
 
   }
+
 
 
   Widget _rentalTypeTile({
@@ -1927,6 +2002,7 @@ class _AdminAddPricingProfileScreenState
   }
 
 
+
   // ===========================================================================
 
   // PACKAGES
@@ -1934,6 +2010,42 @@ class _AdminAddPricingProfileScreenState
   // ===========================================================================
 
 
+Widget _readOnlyCurrency() {
+  final currency = AppConfig.tenant.business.currency.trim();
+
+  return InputDecorator(
+    decoration: _decoration(
+      'Currency',
+      'Configured business currency',
+    ),
+    child: Row(
+      children: [
+        const Icon(
+          Icons.currency_exchange_rounded,
+          size: 18,
+          color: primary,
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            currency.isEmpty ? 'Not configured' : currency,
+            style: const TextStyle(
+              fontFamily: 'Manrope',
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: heading,
+            ),
+          ),
+        ),
+        const Icon(
+          Icons.lock_outline_rounded,
+          size: 16,
+          color: muted,
+        ),
+      ],
+    ),
+  );
+}
   Widget _packageFields() {
 
     return Column(
@@ -2109,6 +2221,7 @@ class _AdminAddPricingProfileScreenState
     );
 
   }
+
 
 
   Widget _packageCard(
@@ -2535,6 +2648,64 @@ class _AdminAddPricingProfileScreenState
 
           ),
 
+          
+          const SizedBox(height: 10),
+
+          Row(
+            children: [
+              Expanded(
+                child: _field(
+                  controller:
+                      package.minimumHoursController,
+                  label:
+                      'Minimum hours',
+                  hint:
+                      '1',
+                  keyboardType:
+                      TextInputType.number,
+                  validator:
+                      _positiveIntegerValidator,
+                  helper:
+                      'Minimum hourly booking',
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _field(
+                  controller:
+                      package.minimumDaysController,
+                  label:
+                      'Minimum days',
+                  hint:
+                      '1',
+                  keyboardType:
+                      TextInputType.number,
+                  validator:
+                      _positiveIntegerValidator,
+                  helper:
+                      'Minimum daily booking',
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 10),
+
+          _field(
+            controller:
+                package.extraHourController,
+            label:
+                'Extra hour charge',
+            hint:
+                '300',
+            keyboardType:
+                TextInputType.number,
+            validator:
+                _nonNegativeValidator,
+            helper:
+                '25 hours = 1 day + 1 extra hour, not 2 days.',
+          ),
+
           const SizedBox(
 
             height: 4,
@@ -2606,11 +2777,13 @@ class _AdminAddPricingProfileScreenState
   }
 
 
+
   // ===========================================================================
 
   // SPECIAL PRICING
 
   // ===========================================================================
+
 
 
   Widget _specialPricingFields() {
@@ -2988,6 +3161,7 @@ class _AdminAddPricingProfileScreenState
   }
 
 
+
   Widget _datePickerField({
 
     required String label,
@@ -3079,11 +3253,13 @@ class _AdminAddPricingProfileScreenState
   }
 
 
+
   // ===========================================================================
 
   // DEPOSIT
 
   // ===========================================================================
+
 
 
   Widget _depositFields() {
@@ -3095,6 +3271,7 @@ class _AdminAddPricingProfileScreenState
     final asset =
 
         _depositType.isAsset;
+
 
 
     return Column(
@@ -3170,11 +3347,13 @@ class _AdminAddPricingProfileScreenState
             }
 
 
+
             setState(() {
 
               _depositType =
 
                   value;
+
 
 
               if (!value.isMonetary) {
@@ -3342,6 +3521,7 @@ class _AdminAddPricingProfileScreenState
   }
 
 
+
   String _depositTypeLabel(
 
     DepositType type,
@@ -3379,11 +3559,13 @@ class _AdminAddPricingProfileScreenState
   }
 
 
+
   // ===========================================================================
 
   // UI HELPERS
 
   // ===========================================================================
+
 
 
   Widget _section({
@@ -3591,6 +3773,7 @@ class _AdminAddPricingProfileScreenState
   }
 
 
+
   Widget _field({
 
     required TextEditingController
@@ -3648,6 +3831,7 @@ class _AdminAddPricingProfileScreenState
     );
 
   }
+
 
 
   InputDecoration _decoration(
@@ -3801,6 +3985,7 @@ class _AdminAddPricingProfileScreenState
   }
 
 
+
   String? _required(
 
     String? value,
@@ -3816,9 +4001,11 @@ class _AdminAddPricingProfileScreenState
     }
 
 
+
     return null;
 
   }
+
 
 
   String? _positiveOrEmpty(
@@ -3836,6 +4023,7 @@ class _AdminAddPricingProfileScreenState
     }
 
 
+
     final number =
 
         int.tryParse(
@@ -3843,6 +4031,7 @@ class _AdminAddPricingProfileScreenState
       value.trim(),
 
     );
+
 
 
     if (number == null ||
@@ -3854,9 +4043,41 @@ class _AdminAddPricingProfileScreenState
     }
 
 
+
     return null;
 
   }
+  String? _positiveIntegerValidator(
+    String? value,
+  ) {
+    if (value == null || value.trim().isEmpty) {
+      return 'Required';
+    }
+
+    final number = int.tryParse(value.trim());
+
+    if (number == null || number < 1) {
+      return 'Enter 1 or more';
+    }
+
+    return null;
+  }
+
+  int _positiveIntOrDefault(
+    String value,
+    int fallback,
+  ) {
+    final parsed = int.tryParse(value.trim());
+
+    if (parsed == null || parsed < 1) {
+      return fallback;
+    }
+
+    return parsed;
+  }
+
+
+
 
 
   String? _nonNegativeValidator(
@@ -3874,6 +4095,7 @@ class _AdminAddPricingProfileScreenState
     }
 
 
+
     final number =
 
         double.tryParse(
@@ -3881,6 +4103,7 @@ class _AdminAddPricingProfileScreenState
       value.trim(),
 
     );
+
 
 
     if (number == null ||
@@ -3894,9 +4117,11 @@ class _AdminAddPricingProfileScreenState
     }
 
 
+
     return null;
 
   }
+
 
 
   double _nonNegativeDouble(
@@ -3914,6 +4139,7 @@ class _AdminAddPricingProfileScreenState
     );
 
 
+
     if (parsed == null ||
 
         !parsed.isFinite ||
@@ -3925,9 +4151,11 @@ class _AdminAddPricingProfileScreenState
     }
 
 
+
     return parsed;
 
   }
+
 
 
   int? _nullablePositiveInt(
@@ -3945,6 +4173,7 @@ class _AdminAddPricingProfileScreenState
     );
 
 
+
     if (parsed == null ||
 
         parsed < 0) {
@@ -3954,9 +4183,11 @@ class _AdminAddPricingProfileScreenState
     }
 
 
+
     return parsed;
 
   }
+
 
 
   void _showSnackBar(
@@ -4044,11 +4275,13 @@ class _AdminAddPricingProfileScreenState
 }
 
 
+
 // =============================================================================
 
 // PACKAGE DRAFT
 
 // =============================================================================
+
 
 
 class _PackageDraft {
@@ -4060,11 +4293,13 @@ class _PackageDraft {
       TextEditingController();
 
 
+
   final TextEditingController
 
       nameController =
 
       TextEditingController();
+
 
 
   final TextEditingController
@@ -4074,11 +4309,13 @@ class _PackageDraft {
       TextEditingController();
 
 
+
   final TextEditingController
 
       hourlyController =
 
       TextEditingController();
+
 
 
   final TextEditingController
@@ -4088,6 +4325,7 @@ class _PackageDraft {
       TextEditingController();
 
 
+
   final TextEditingController
 
       extraKmController =
@@ -4095,9 +4333,24 @@ class _PackageDraft {
       TextEditingController();
 
 
+
+
+  final TextEditingController
+      minimumHoursController =
+      TextEditingController(text: '1');
+
+  final TextEditingController
+      minimumDaysController =
+      TextEditingController(text: '1');
+
+  final TextEditingController
+      extraHourController =
+      TextEditingController(text: '0');
+
   bool unlimited = false;
 
   bool isActive = true;
+
 
 
   void dispose() {
@@ -4114,6 +4367,9 @@ class _PackageDraft {
 
     extraKmController.dispose();
 
+    minimumHoursController.dispose();
+    minimumDaysController.dispose();
+    extraHourController.dispose();
   }
 
 }

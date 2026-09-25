@@ -500,6 +500,18 @@ class PricingProfile {
   final DepositConfig
       securityDeposit;
 
+  /// Package-specific minimum booking duration.
+  /// Key = KM package id.
+  final Map<String, int> minimumHoursByPackageId;
+
+  /// Package-specific minimum daily booking duration.
+  /// Key = KM package id.
+  final Map<String, int> minimumDaysByPackageId;
+
+  /// Package-specific extra-hour charge.
+  /// Key = KM package id.
+  final Map<String, double> extraHourRateByPackageId;
+
   final bool isActive;
 
   const PricingProfile({
@@ -517,6 +529,9 @@ class PricingProfile {
         const [],
     this.securityDeposit =
         const DepositConfig(),
+    this.minimumHoursByPackageId = const {},
+    this.minimumDaysByPackageId = const {},
+    this.extraHourRateByPackageId = const {},
     this.isActive = true,
   });
 
@@ -541,6 +556,26 @@ class PricingProfile {
             package.isActive &&
             package.supportsDaily,
       );
+
+  // ===========================================================================
+  // PACKAGE BOOKING RULES
+  // ===========================================================================
+
+  int minimumHoursFor(String packageId) {
+    final value = minimumHoursByPackageId[packageId.trim()];
+    return value != null && value > 0 ? value : 1;
+  }
+
+  int minimumDaysFor(String packageId) {
+    final value = minimumDaysByPackageId[packageId.trim()];
+    return value != null && value > 0 ? value : 1;
+  }
+
+  double extraHourRateFor(String packageId) {
+    final value = extraHourRateByPackageId[packageId.trim()];
+    if (value == null || !value.isFinite || value < 0) return 0;
+    return value;
+  }
 
   List<KmPricingPackage> packagesFor(
     RentalType type,
@@ -858,6 +893,21 @@ class PricingProfile {
                   map['securityDeposit'],
             },
       ),
+      minimumHoursByPackageId: _toIntMap(
+        map['minimumHoursByPackageId'] ??
+            map['minimumHoursByPackage'] ??
+            map['minimumHours'],
+      ),
+      minimumDaysByPackageId: _toIntMap(
+        map['minimumDaysByPackageId'] ??
+            map['minimumDaysByPackage'] ??
+            map['minimumDays'],
+      ),
+      extraHourRateByPackageId: _toDoubleMap(
+        map['extraHourRateByPackageId'] ??
+            map['extraHourRatesByPackageId'] ??
+            map['extraHourRate'],
+      ),
       isActive: _safeBool(
         map['isActive'],
         fallback: true,
@@ -896,6 +946,18 @@ class PricingProfile {
               .toList(),
       'securityDeposit':
           securityDeposit.toMap(),
+      'minimumHoursByPackageId':
+          Map<String, int>.from(
+        minimumHoursByPackageId,
+      ),
+      'minimumDaysByPackageId':
+          Map<String, int>.from(
+        minimumDaysByPackageId,
+      ),
+      'extraHourRateByPackageId':
+          Map<String, double>.from(
+        extraHourRateByPackageId,
+      ),
       'isActive': isActive,
     };
   }
@@ -1040,6 +1102,12 @@ class PricingProfile {
         specialRates,
     DepositConfig?
         securityDeposit,
+    Map<String, int>?
+        minimumHoursByPackageId,
+    Map<String, int>?
+        minimumDaysByPackageId,
+    Map<String, double>?
+        extraHourRateByPackageId,
     bool? isActive,
   }) {
     return PricingProfile(
@@ -1066,6 +1134,15 @@ class PricingProfile {
       securityDeposit:
           securityDeposit ??
               this.securityDeposit,
+      minimumHoursByPackageId:
+          minimumHoursByPackageId ??
+              this.minimumHoursByPackageId,
+      minimumDaysByPackageId:
+          minimumDaysByPackageId ??
+              this.minimumDaysByPackageId,
+      extraHourRateByPackageId:
+          extraHourRateByPackageId ??
+              this.extraHourRateByPackageId,
       isActive:
           isActive ?? this.isActive,
     );
@@ -1205,6 +1282,31 @@ DateTime _safeDate(
         1,
         1,
       );
+}
+
+Map<String, int>
+    _toIntMap(
+  dynamic value,
+) {
+  if (value is! Map) {
+    return {};
+  }
+
+  final result = <String, int>{};
+  value.forEach((key, rawValue) {
+    final id = key.toString().trim();
+    if (id.isEmpty) return;
+
+    final parsed = rawValue is num
+        ? rawValue.toInt()
+        : int.tryParse(rawValue.toString().trim());
+
+    if (parsed != null && parsed > 0) {
+      result[id] = parsed;
+    }
+  });
+
+  return Map.unmodifiable(result);
 }
 
 Map<String, double>
