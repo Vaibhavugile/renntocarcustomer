@@ -22,6 +22,11 @@ import '../../admin/availability/services/admin_availability_service.dart';
 /// before a booking is written. Firestore Security Rules must independently
 /// enforce tenant/admin/customer authorization.
 class BookingService {
+  /// Availability model:
+  /// - Calendar indicators may use whole-day checks.
+  /// - Actual booking checks ALWAYS use exact pickup/return timestamps.
+  /// - Minimum hourly/daily rental rules belong to the pricing/booking flow,
+  ///   not to Firestore availability normalization.
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final AdminAvailabilityService _availabilityService =
@@ -156,11 +161,23 @@ class BookingService {
     );
   }
 
-  /// Availability check for the simplified hourly/daily rental model.
+  /// Availability check for the customer/admin booking range.
   ///
-  /// Hourly uses the exact timestamps.
-  /// Daily occupies the complete selected calendar days and therefore ends
-  /// at the end of the selected return date.
+  /// IMPORTANT:
+  /// Both hourly AND daily rentals use the EXACT selected timestamps here.
+  ///
+  /// Example:
+  ///   Pickup: 25 Sep 2026 19:00
+  ///   Return: 26 Sep 2026 19:00
+  ///
+  /// This is intentionally NOT converted to:
+  ///   25 Sep 00:00 -> 26 Sep 23:59:59
+  ///
+  /// The calendar UI may mark an individual calendar day as partially booked,
+  /// but the final booking availability check must use the actual pickup and
+  /// return time selected by the customer. This prevents a valid daily booking
+  /// from being rejected just because another booking exists earlier on the
+  /// return date.
   Future<bool> isCarAvailableForRental({
     required String tenantId,
     required String carId,
@@ -424,40 +441,70 @@ class BookingService {
     }
   }
 
+  /// Normalizes the range used for an ACTUAL booking availability check.
+  ///
+  /// Do not expand daily rentals to whole calendar days here.
+  ///
+  /// The Date/Time screen is responsible for enforcing the minimum-day rule
+  /// (for example, a 1-day daily booking may be 25 Sep 19:00 -> 26 Sep 19:00).
+  /// Availability itself is an interval-overlap problem and therefore must
+  /// compare the exact timestamps.
+  ///
+  /// Calendar-day availability indicators are handled separately by
+  /// [isCarAvailableForCalendarDay].
   _AvailabilityRange _normalizeAvailabilityRange({
     required String? rentalType,
     required DateTime pickupDateTime,
     required DateTime returnDateTime,
   }) {
-    final type =
-        rentalType?.trim().toLowerCase();
-
-    if (type == 'daily') {
-      final start = DateTime(
-        pickupDateTime.year,
-        pickupDateTime.month,
-        pickupDateTime.day,
-      );
-
-      final end = DateTime(
-        returnDateTime.year,
-        returnDateTime.month,
-        returnDateTime.day,
-        23,
-        59,
-        59,
-        999,
-      );
-
-      return _AvailabilityRange(
-        start: start,
-        end: end,
-      );
-    }
+    // Keep the parameter for API compatibility and future rental-type rules.
+    // The authoritative booking interval is always exact.
+    final _ = rentalType;
 
     return _AvailabilityRange(
       start: pickupDateTime,
       end: returnDateTime,
+    );
+  }
+
+  /// Checks availability for an entire calendar day.
+  ///
+  /// This method is for calendar indicators such as:
+  /// - Available
+  /// - Partially booked
+  /// - Fully booked
+  ///
+  /// It is deliberately separate from [isCarAvailableForRental], because a
+  /// calendar day can be partially booked while still containing valid
+  /// pickup/return windows.
+  Future<bool> isCarAvailableForCalendarDay({
+    required String tenantId,
+    required String carId,
+    required DateTime date,
+    String? excludeBookingId,
+  }) async {
+    final dayStart = DateTime(
+      date.year,
+      date.month,
+      date.day,
+    );
+
+    final dayEnd = DateTime(
+      date.year,
+      date.month,
+      date.day,
+      23,
+      59,
+      59,
+      999,
+    );
+
+    return isCarAvailable(
+      tenantId: tenantId,
+      carId: carId,
+      pickupDateTime: dayStart,
+      returnDateTime: dayEnd,
+      excludeBookingId: excludeBookingId,
     );
   }
 
