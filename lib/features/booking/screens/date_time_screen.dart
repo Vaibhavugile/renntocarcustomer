@@ -783,6 +783,1450 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
         : _CalendarDayState.full;
   }
 
+  List<_AvailabilityInterval> _intervalsForDate(DateTime date) {
+    final snapshot = _availabilitySnapshot;
+    if (snapshot == null) return const [];
+
+    final dayStart = _dateOnly(date);
+    final dayEnd = dayStart.add(const Duration(days: 1));
+
+    final bookings = _availabilityService.conflictsForCar(
+      carId: widget.car.id,
+      start: dayStart,
+      end: dayEnd,
+      bookings: snapshot.bookings,
+    );
+    final blocks = _availabilityService.blocksForCar(
+      carId: widget.car.id,
+      start: dayStart,
+      end: dayEnd,
+      blocks: snapshot.blocks,
+    );
+
+    final intervals = <_AvailabilityInterval>[
+      ...bookings.map(
+        (item) => _AvailabilityInterval(
+          item.pickupDateTime,
+          item.returnDateTime,
+        ),
+      ),
+      ...blocks.map(
+        (item) => _AvailabilityInterval(
+          item.startDateTime,
+          item.endDateTime,
+        ),
+      ),
+    ];
+
+    intervals.sort((a, b) => a.start.compareTo(b.start));
+    return intervals;
+  }
+
+  List<_AvailabilityInterval> _availableWindowsForDate(DateTime date) {
+    final dayStart = _dateOnly(date);
+    final dayEnd = dayStart.add(const Duration(days: 1));
+    final intervals = _intervalsForDate(date);
+    if (intervals.isEmpty) {
+      return [
+        _AvailabilityInterval(dayStart, dayEnd),
+      ];
+    }
+
+    final merged = <_AvailabilityInterval>[];
+    for (final interval in intervals) {
+      final start = interval.start.isBefore(dayStart)
+          ? dayStart
+          : interval.start;
+      final end = interval.end.isAfter(dayEnd) ? dayEnd : interval.end;
+      if (!end.isAfter(start)) continue;
+
+      if (merged.isEmpty || start.isAfter(merged.last.end)) {
+        merged.add(_AvailabilityInterval(start, end));
+      } else if (end.isAfter(merged.last.end)) {
+        final previous = merged.removeLast();
+        merged.add(_AvailabilityInterval(previous.start, end));
+      }
+    }
+
+    final windows = <_AvailabilityInterval>[];
+    var cursor = dayStart;
+    for (final blocked in merged) {
+      if (blocked.start.isAfter(cursor)) {
+        windows.add(_AvailabilityInterval(cursor, blocked.start));
+      }
+      if (blocked.end.isAfter(cursor)) cursor = blocked.end;
+    }
+    if (cursor.isBefore(dayEnd)) {
+      windows.add(_AvailabilityInterval(cursor, dayEnd));
+    }
+    return windows;
+  }
+
+  String _intervalText(_AvailabilityInterval interval) {
+    return '${_formatTime(TimeOfDay.fromDateTime(interval.start))} - '
+        '${_formatTime(TimeOfDay.fromDateTime(interval.end))}';
+  }
+
+  Future<void> _showUnavailableDialog({
+    required DateTime requestedStart,
+    required DateTime requestedEnd,
+    String? message,
+  }) async {
+    if (!mounted) return;
+
+    final date = _dateOnly(requestedStart);
+    final booked = _intervalsForDate(date);
+    final windows = _availableWindowsForDate(date)
+        .where((item) => item.end.difference(item.start).inMinutes >= 30)
+        .take(5)
+        .toList();
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (dialogContext) {
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          insetPadding: const EdgeInsets.symmetric(horizontal: 22),
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(20, 22, 20, 18),
+            decoration: BoxDecoration(
+              color: card,
+              borderRadius: BorderRadius.circular(26),
+              border: Border.all(color: border),
+              boxShadow: const [
+                BoxShadow(
+                  color: Color(0x24000000),
+                  blurRadius: 30,
+                  offset: Offset(0, 12),
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      width: 46,
+                      height: 46,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFFF3E8),
+                        borderRadius: BorderRadius.circular(15),
+                      ),
+                      child: const Icon(
+                        Icons.event_busy_rounded,
+                        color: Color(0xFFE17B2D),
+                        size: 24,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    const Expanded(
+                      child: Text(
+                        'This time is not available',
+                        style: TextStyle(
+                          fontFamily: 'Manrope',
+                          fontSize: 17,
+                          fontWeight: FontWeight.w900,
+                          color: heading,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                Text(
+                  '${message ?? 'The vehicle is already booked or blocked during the selected period.'}\n\nRequested: ${_formatTime(TimeOfDay.fromDateTime(requestedStart))} - ${_formatTime(TimeOfDay.fromDateTime(requestedEnd))}',
+                  style: const TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 12,
+                    height: 1.45,
+                    fontWeight: FontWeight.w600,
+                    color: body,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(13),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF8FAF9),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: border),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _formatDate(date),
+                        style: const TextStyle(
+                          fontFamily: 'Manrope',
+                          fontSize: 13,
+                          fontWeight: FontWeight.w900,
+                          color: heading,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      if (booked.isNotEmpty) ...[
+                        const Text(
+                          'Booked / blocked',
+                          style: TextStyle(
+                            fontFamily: 'Manrope',
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w800,
+                            color: muted,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        ...booked.take(5).map(
+                              (item) => Padding(
+                                padding: const EdgeInsets.only(bottom: 5),
+                                child: Row(
+                                  children: [
+                                    const Icon(
+                                      Icons.lock_clock_rounded,
+                                      size: 14,
+                                      color: Color(0xFFE05252),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      _intervalText(item),
+                                      style: const TextStyle(
+                                        fontFamily: 'Manrope',
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w800,
+                                        color: heading,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                      ] else
+                        const Text(
+                          'The selected rental range is not available for this vehicle.',
+                          style: TextStyle(
+                            fontFamily: 'Manrope',
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            color: body,
+                          ),
+                        ),
+                      if (windows.isNotEmpty) ...[
+                        const SizedBox(height: 8),
+                        const Text(
+                          'Available windows',
+                          style: TextStyle(
+                            fontFamily: 'Manrope',
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w800,
+                            color: muted,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        ...windows.map(
+                              (item) => Padding(
+                                padding: const EdgeInsets.only(bottom: 5),
+                                child: Row(
+                                  children: [
+                                    const Icon(
+                                      Icons.check_circle_rounded,
+                                      size: 14,
+                                      color: primary,
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      _intervalText(item),
+                                      style: const TextStyle(
+                                        fontFamily: 'Manrope',
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w800,
+                                        color: heading,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                      ],
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 15),
+                SizedBox(
+                  width: double.infinity,
+                  height: 46,
+                  child: ElevatedButton(
+                    onPressed: () => Navigator.of(dialogContext).pop(),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: primary,
+                      foregroundColor: Colors.white,
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                    ),
+                    child: const Text(
+                      'Choose another time',
+                      style: TextStyle(
+                        fontFamily: 'Manrope',
+                        fontSize: 13,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildSelectedDateAvailability() {
+    final focusedDate = _selectingPickupDate
+        ? _pickupDate
+        : (_returnDate ?? _pickupDate);
+    if (focusedDate == null || _loadingAvailability) {
+      return const SizedBox.shrink();
+    }
+
+    final state = _getCalendarDayState(focusedDate);
+    if (state == _CalendarDayState.available) {
+      return const SizedBox.shrink();
+    }
+
+    final booked = _intervalsForDate(focusedDate);
+    final windows = _availableWindowsForDate(focusedDate)
+        .where((item) => item.end.difference(item.start).inMinutes >= 30)
+        .take(4)
+        .toList();
+
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(top: 12),
+      padding: const EdgeInsets.all(13),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFFBF5),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFF3D5AF)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.info_outline_rounded,
+                  size: 17, color: Color(0xFFE17B2D)),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(
+                  '${_formatDate(focusedDate)} is partially booked',
+                  style: const TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 12,
+                    fontWeight: FontWeight.w900,
+                    color: heading,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (booked.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(
+              'Unavailable: ${booked.map(_intervalText).join(', ')}',
+              style: const TextStyle(
+                fontFamily: 'Manrope',
+                fontSize: 10.5,
+                fontWeight: FontWeight.w700,
+                color: body,
+              ),
+            ),
+          ],
+          if (windows.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              'Available: ${windows.map(_intervalText).join(', ')}',
+              style: const TextStyle(
+                fontFamily: 'Manrope',
+                fontSize: 10.5,
+                fontWeight: FontWeight.w800,
+                color: primary,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  List<DateTime> _dropdownDates() {
+    final first = _calendarMonth.isBefore(_today)
+        ? _today
+        : _calendarMonth;
+    final last = DateTime(
+      _calendarMonth.year,
+      _calendarMonth.month + 1,
+      0,
+    );
+    final result = <DateTime>[];
+    var cursor = DateTime(first.year, first.month, first.day);
+    while (!cursor.isAfter(last)) {
+      if (!_dateOnly(cursor).isBefore(_today)) {
+        result.add(cursor);
+      }
+      cursor = cursor.add(const Duration(days: 1));
+    }
+
+    void addIfMissing(DateTime? value) {
+      if (value == null) return;
+      final normalized = _dateOnly(value);
+      if (!result.any((item) => _sameDate(item, normalized)) &&
+          !normalized.isBefore(_today)) {
+        result.add(normalized);
+      }
+    }
+
+    addIfMissing(_pickupDate);
+    addIfMissing(_returnDate);
+    result.sort();
+    return result;
+  }
+
+  Widget _dateDropdown({
+    required String label,
+    required DateTime? value,
+    required bool pickup,
+  }) {
+    final dates = _dropdownDates();
+    final validValue = value != null &&
+            dates.any((item) => _sameDate(item, value))
+        ? dates.firstWhere((item) => _sameDate(item, value))
+        : null;
+
+    return DropdownButtonFormField<DateTime>(
+      value: validValue,
+      isExpanded: true,
+      decoration: InputDecoration(
+        labelText: label,
+        prefixIcon: const Icon(Icons.calendar_today_rounded, size: 18),
+        filled: true,
+        fillColor: const Color(0xFFF8FAF9),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: const BorderSide(color: border),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: const BorderSide(color: border),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: const BorderSide(color: primary, width: 1.4),
+        ),
+      ),
+      items: dates.map((date) {
+        final state = _getCalendarDayState(date);
+        final disabled = state == _CalendarDayState.full ||
+            state == _CalendarDayState.past ||
+            (!pickup &&
+                _pickupDate != null &&
+                date.isBefore(_dateOnly(_pickupDate!)));
+
+        return DropdownMenuItem<DateTime>(
+          value: date,
+          enabled: !disabled,
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  _formatDate(date),
+                  style: TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                    color: disabled ? muted : heading,
+                  ),
+                ),
+              ),
+              if (state == _CalendarDayState.partial)
+                const Text(
+                  'Partially booked',
+                  style: TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 9.5,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFFE17B2D),
+                  ),
+                ),
+              if (state == _CalendarDayState.available)
+                const Text(
+                  'Available',
+                  style: TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 9.5,
+                    fontWeight: FontWeight.w800,
+                    color: primary,
+                  ),
+                ),
+              if (state == _CalendarDayState.full)
+                const Text(
+                  'Booked',
+                  style: TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 9.5,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFFE05252),
+                  ),
+                ),
+            ],
+          ),
+        );
+      }).toList(),
+      onChanged: _loadingAvailability
+          ? null
+          : (date) {
+              if (date == null) return;
+              if (pickup) {
+                _selectingPickupDate = true;
+                _selectCalendarDate(date);
+              } else {
+                _selectingPickupDate = false;
+                _selectCalendarDate(date);
+              }
+            },
+    );
+  }
+
+  Widget _buildDateSelectionCard() {
+    final pickupState = _pickupDate == null
+        ? null
+        : _getCalendarDayState(_pickupDate!);
+    final returnState = _returnDate == null
+        ? null
+        : _getCalendarDayState(_returnDate!);
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: card,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 34,
+                height: 34,
+                decoration: BoxDecoration(
+                  color: softAccent,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(
+                  Icons.calendar_month_rounded,
+                  color: primary,
+                  size: 18,
+                ),
+              ),
+              const SizedBox(width: 9),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Rental dates',
+                      style: TextStyle(
+                        fontFamily: 'Manrope',
+                        fontSize: 13,
+                        fontWeight: FontWeight.w900,
+                        color: heading,
+                      ),
+                    ),
+                    SizedBox(height: 2),
+                    Text(
+                      'Tap a date to choose pickup and return',
+                      style: TextStyle(
+                        fontFamily: 'Manrope',
+                        fontSize: 10,
+                        fontWeight: FontWeight.w600,
+                        color: muted,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (_pickupDate != null || _returnDate != null)
+                InkWell(
+                  onTap: _resetDateSelection,
+                  borderRadius: BorderRadius.circular(10),
+                  child: const Padding(
+                    padding: EdgeInsets.all(6),
+                    child: Icon(
+                      Icons.refresh_rounded,
+                      size: 18,
+                      color: primary,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: _dateChoiceTile(
+                  label: 'Pickup',
+                  date: _pickupDate,
+                  state: pickupState,
+                  active: _selectingPickupDate,
+                  icon: Icons.login_rounded,
+                  onTap: () => _openDateSelectionSheet(pickup: true),
+                ),
+              ),
+              const SizedBox(width: 9),
+              Expanded(
+                child: _dateChoiceTile(
+                  label: 'Return',
+                  date: _returnDate,
+                  state: returnState,
+                  active: !_selectingPickupDate && _pickupDate != null,
+                  icon: Icons.logout_rounded,
+                  onTap: () => _openDateSelectionSheet(pickup: false),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _dateChoiceTile({
+    required String label,
+    required DateTime? date,
+    required _CalendarDayState? state,
+    required bool active,
+    required IconData icon,
+    required VoidCallback onTap,
+  }) {
+    final available = state == null || state == _CalendarDayState.available;
+    final partial = state == _CalendarDayState.partial;
+    final full = state == _CalendarDayState.full;
+
+    return Material(
+      color: active ? softAccent : background,
+      borderRadius: BorderRadius.circular(14),
+      child: InkWell(
+        onTap: _loadingAvailability ? null : onTap,
+        borderRadius: BorderRadius.circular(14),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 11),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: active
+                  ? const Color(0xFF8EDDD4)
+                  : border,
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(icon, size: 17, color: primary),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      label,
+                      style: const TextStyle(
+                        fontFamily: 'Manrope',
+                        fontSize: 9.5,
+                        fontWeight: FontWeight.w700,
+                        color: muted,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      date == null ? 'Select date' : _formatDateShort(date),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontFamily: 'Manrope',
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w900,
+                        color: heading,
+                      ),
+                    ),
+                    if (date != null) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        full
+                            ? 'Fully booked'
+                            : partial
+                                ? 'Partially booked'
+                                : available
+                                    ? 'Available'
+                                    : 'Select date',
+                        style: TextStyle(
+                          fontFamily: 'Manrope',
+                          fontSize: 8.5,
+                          fontWeight: FontWeight.w800,
+                          color: full
+                              ? const Color(0xFFE05252)
+                              : partial
+                                  ? const Color(0xFFB7791F)
+                                  : primary,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              const Icon(Icons.keyboard_arrow_down_rounded, size: 18, color: muted),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _formatDateShort(DateTime date) {
+    const months = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    ];
+    return '${date.day} ${months[date.month - 1]}';
+  }
+
+  Future<void> _openDateSelectionSheet({required bool pickup}) async {
+    if (_loadingAvailability) return;
+
+    // The customer must complete the whole flow inside this one sheet:
+    // 1) pickup date -> pickup time
+    // 2) return date  -> return time
+    // The sheet only closes after both date + time values exist.
+    var selectingPickup = pickup || _pickupDate == null;
+
+    if (!selectingPickup && _pickupDate == null) {
+      selectingPickup = true;
+    }
+
+    _selectingPickupDate = selectingPickup;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      barrierColor: Colors.black.withValues(alpha: 0.32),
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (context, sheetSetState) {
+            final cells = _calendarDays(_calendarMonth);
+            final canGoPrevious = !_calendarMonth.isAtSameMomentAs(
+              _monthDate(_today.year, _today.month),
+            );
+
+            final activeDate = selectingPickup ? _pickupDate : _returnDate;
+            final activeTime = selectingPickup ? _pickupTime : _returnTime;
+            final activeSlots = activeDate == null
+                ? const <TimeOfDay>[]
+                : _availableTimeSlots(activeDate);
+
+            final pickupComplete =
+                _pickupDate != null && _pickupTime != null;
+            final returnComplete =
+                _returnDate != null && _returnTime != null;
+            final bothComplete = pickupComplete && returnComplete;
+
+            return SafeArea(
+              top: false,
+              child: Container(
+                constraints: BoxConstraints(
+                  maxHeight: MediaQuery.of(context).size.height * 0.92,
+                ),
+                padding: const EdgeInsets.fromLTRB(16, 9, 16, 14),
+                decoration: const BoxDecoration(
+                  color: card,
+                  borderRadius: BorderRadius.vertical(
+                    top: Radius.circular(28),
+                  ),
+                ),
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Center(
+                        child: Container(
+                          width: 42,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: border,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 11),
+                      Row(
+                        children: [
+                          const Expanded(
+                            child: Text(
+                              'Choose dates & time',
+                              style: TextStyle(
+                                fontFamily: 'Manrope',
+                                fontSize: 17,
+                                fontWeight: FontWeight.w900,
+                                color: heading,
+                              ),
+                            ),
+                          ),
+                          if (bothComplete)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 9,
+                                vertical: 6,
+                              ),
+                              decoration: BoxDecoration(
+                                color: softAccent,
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: const Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    Icons.check_circle_rounded,
+                                    size: 14,
+                                    color: primary,
+                                  ),
+                                  SizedBox(width: 4),
+                                  Text(
+                                    'Ready',
+                                    style: TextStyle(
+                                      fontFamily: 'Manrope',
+                                      fontSize: 9,
+                                      fontWeight: FontWeight.w900,
+                                      color: primary,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          IconButton(
+                            onPressed: () => Navigator.pop(sheetContext),
+                            icon: const Icon(Icons.close_rounded, size: 20),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 9),
+
+                      // Compact progress row. The actual date + time selection
+                      // happens below in this same sheet.
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _sheetDateTimeStep(
+                              number: '1',
+                              label: 'Pickup',
+                              date: _pickupDate,
+                              time: _pickupTime,
+                              active: selectingPickup,
+                              complete: pickupComplete,
+                            ),
+                          ),
+                          const SizedBox(width: 7),
+                          Expanded(
+                            child: _sheetDateTimeStep(
+                              number: '2',
+                              label: 'Return',
+                              date: _returnDate,
+                              time: _returnTime,
+                              active: !selectingPickup,
+                              complete: returnComplete,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 13),
+
+                      Row(
+                        children: [
+                          IconButton(
+                            onPressed: canGoPrevious
+                                ? () {
+                                    _previousMonth();
+                                    sheetSetState(() {});
+                                  }
+                                : null,
+                            icon: const Icon(Icons.chevron_left_rounded),
+                          ),
+                          Expanded(
+                            child: Text(
+                              _monthTitle(_calendarMonth),
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                fontFamily: 'Manrope',
+                                fontSize: 15,
+                                fontWeight: FontWeight.w900,
+                                color: heading,
+                              ),
+                            ),
+                          ),
+                          IconButton(
+                            onPressed: () {
+                              _nextMonth();
+                              sheetSetState(() {});
+                            },
+                            icon: const Icon(Icons.chevron_right_rounded),
+                          ),
+                        ],
+                      ),
+                      Row(
+                        children: const [
+                          _WeekdayLabel('M'),
+                          _WeekdayLabel('T'),
+                          _WeekdayLabel('W'),
+                          _WeekdayLabel('T'),
+                          _WeekdayLabel('F'),
+                          _WeekdayLabel('S'),
+                          _WeekdayLabel('S'),
+                        ],
+                      ),
+                      const SizedBox(height: 7),
+                      GridView.builder(
+                        shrinkWrap: true,
+                        physics: const NeverScrollableScrollPhysics(),
+                        itemCount: cells.length,
+                        gridDelegate:
+                            const SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: 7,
+                          mainAxisSpacing: 6,
+                          crossAxisSpacing: 5,
+                          childAspectRatio: 0.92,
+                        ),
+                        itemBuilder: (context, index) {
+                          final date = cells[index];
+                          if (date == null) return const SizedBox.shrink();
+
+                          final state = _getCalendarDayState(date);
+                          final isPickup = _pickupDate != null &&
+                              _sameDate(_pickupDate!, date);
+                          final isReturn = _returnDate != null &&
+                              _sameDate(_returnDate!, date);
+                          final inRange = _isDateInSelectedRange(date);
+                          final canSelect = _canSelectCalendarDate(date);
+
+                          VoidCallback? onTap;
+
+                          if (state == _CalendarDayState.full) {
+                            onTap = () => _showUnavailableDialog(
+                                  requestedStart: _dateOnly(date),
+                                  requestedEnd: _dateOnly(date).add(
+                                    const Duration(days: 1),
+                                  ),
+                                  message:
+                                      'This date is fully booked or blocked. Choose another date.',
+                                );
+                          } else if (canSelect) {
+                            onTap = () {
+                              _selectingPickupDate = selectingPickup;
+                              _selectCalendarDate(date);
+
+                              // Selecting a date never closes the sheet.
+                              // The next required step is time selection below.
+                              sheetSetState(() {});
+                            };
+                          }
+
+                          return _CalendarDay(
+                            date: date,
+                            state: state,
+                            selected: isPickup || isReturn,
+                            inRange: inRange,
+                            pickup: isPickup,
+                            returnDate: isReturn,
+                            enabled: onTap != null,
+                            priceText: _calendarPriceText(date),
+                            specialPrice: _isSpecialPrice(date),
+                            onTap: onTap,
+                          );
+                        },
+                      ),
+                      const SizedBox(height: 9),
+                      Wrap(
+                        spacing: 11,
+                        runSpacing: 6,
+                        children: const [
+                          _CalendarLegend(
+                            color: Color(0xFF14B8A6),
+                            label: 'Available',
+                          ),
+                          _CalendarLegend(
+                            color: Color(0xFFF2B84B),
+                            label: 'Partially booked',
+                          ),
+                          _CalendarLegend(
+                            color: Color(0xFFE05252),
+                            label: 'Fully booked',
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(height: 13),
+
+                      // ------------------------------------------------------
+                      // REQUIRED TIME SELECTION — same popup, directly below
+                      // the calendar. No second popup and no separate page.
+                      // ------------------------------------------------------
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.fromLTRB(12, 12, 12, 11),
+                        decoration: BoxDecoration(
+                          color: activeDate == null
+                              ? background
+                              : softAccent,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(
+                            color: activeDate == null
+                                ? border
+                                : const Color(0xFFBDEBE5),
+                          ),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Container(
+                                  width: 31,
+                                  height: 31,
+                                  decoration: BoxDecoration(
+                                    color: Colors.white,
+                                    borderRadius: BorderRadius.circular(9),
+                                  ),
+                                  child: const Icon(
+                                    Icons.schedule_rounded,
+                                    size: 17,
+                                    color: primary,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        selectingPickup
+                                            ? 'Pickup time'
+                                            : 'Return time',
+                                        style: const TextStyle(
+                                          fontFamily: 'Manrope',
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w900,
+                                          color: heading,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        activeDate == null
+                                            ? 'Select a date above first'
+                                            : 'Choose an available time for ${_formatDateShort(activeDate)}',
+                                        style: const TextStyle(
+                                          fontFamily: 'Manrope',
+                                          fontSize: 9,
+                                          fontWeight: FontWeight.w600,
+                                          color: muted,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                Text(
+                                  _rentalType == RentalType.hourly
+                                      ? '30 min'
+                                      : '1 hr',
+                                  style: const TextStyle(
+                                    fontFamily: 'Manrope',
+                                    fontSize: 9,
+                                    fontWeight: FontWeight.w800,
+                                    color: primary,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 10),
+                            if (activeDate == null)
+                              const Text(
+                                'Date and time are required.',
+                                style: TextStyle(
+                                  fontFamily: 'Manrope',
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w800,
+                                  color: Color(0xFF8A6100),
+                                ),
+                              )
+                            else if (activeSlots.isEmpty)
+                              Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 10,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFFFF7ED),
+                                  borderRadius: BorderRadius.circular(11),
+                                  border: Border.all(
+                                    color: const Color(0xFFF4D2AA),
+                                  ),
+                                ),
+                                child: const Text(
+                                  'No available time on this date. Choose another date.',
+                                  style: TextStyle(
+                                    fontFamily: 'Manrope',
+                                    fontSize: 9.5,
+                                    fontWeight: FontWeight.w800,
+                                    color: Color(0xFF9A5B18),
+                                  ),
+                                ),
+                              )
+                            else
+                              SizedBox(
+                                height: 48,
+                                child: ListView.separated(
+                                  scrollDirection: Axis.horizontal,
+                                  itemCount: activeSlots.length,
+                                  separatorBuilder: (_, __) =>
+                                      const SizedBox(width: 7),
+                                  itemBuilder: (context, index) {
+                                    final time = activeSlots[index];
+                                    final selected = activeTime != null &&
+                                        activeTime.hour == time.hour &&
+                                        activeTime.minute == time.minute;
+                                    final valid = _isTimeSlotValid(
+                                      time,
+                                      pickup: selectingPickup,
+                                    );
+
+                                    return _timeSlotChip(
+                                      time: time,
+                                      selected: selected,
+                                      enabled: valid,
+                                      onTap: valid
+                                          ? () async {
+                                              await _selectTimeSlot(
+                                                time,
+                                                pickup: selectingPickup,
+                                              );
+                                              if (!mounted) return;
+
+                                              if (selectingPickup) {
+                                                // Pickup time is complete. Move
+                                                // directly to return date.
+                                                selectingPickup = false;
+                                                _selectingPickupDate = false;
+                                              } else {
+                                                // Return date + time are now
+                                                // complete. Keep the sheet open
+                                                // for a short confirmation state.
+                                                _selectingPickupDate = false;
+                                              }
+                                              sheetSetState(() {});
+                                            }
+                                          : null,
+                                    );
+                                  },
+                                ),
+                              ),
+                            if (activeDate != null) ...[
+                              const SizedBox(height: 9),
+                              _buildAvailabilityTimeline(activeDate),
+                            ],
+                          ],
+                        ),
+                      ),
+
+                      const SizedBox(height: 11),
+
+                      if (selectingPickup && _pickupDate != null && _pickupTime == null)
+                        const _SheetHint(
+                          icon: Icons.touch_app_rounded,
+                          text: 'Select an available pickup time to continue.',
+                        ),
+                      if (!selectingPickup &&
+                          _pickupDate != null &&
+                          _pickupTime != null &&
+                          _returnDate == null)
+                        const _SheetHint(
+                          icon: Icons.calendar_month_rounded,
+                          text: 'Now select your return date from the calendar.',
+                        ),
+                      if (!selectingPickup &&
+                          _returnDate != null &&
+                          _returnTime == null)
+                        const _SheetHint(
+                          icon: Icons.touch_app_rounded,
+                          text: 'Select an available return time to finish.',
+                        ),
+
+                      if (bothComplete) ...[
+                        const SizedBox(height: 3),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 11,
+                            vertical: 10,
+                          ),
+                          decoration: BoxDecoration(
+                            color: softAccent,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                Icons.check_circle_rounded,
+                                size: 17,
+                                color: primary,
+                              ),
+                              const SizedBox(width: 7),
+                              Expanded(
+                                child: Text(
+                                  '${_formatDateShort(_pickupDate!)} ${_formatTime(_pickupTime)}  →  ${_formatDateShort(_returnDate!)} ${_formatTime(_returnTime)}',
+                                  style: const TextStyle(
+                                    fontFamily: 'Manrope',
+                                    fontSize: 9.5,
+                                    fontWeight: FontWeight.w900,
+                                    color: heading,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        SizedBox(
+                          width: double.infinity,
+                          height: 48,
+                          child: ElevatedButton(
+                            onPressed: () {
+                              if (!_validateMinimumBeforeConfirm()) {
+                                sheetSetState(() {});
+                                return;
+                              }
+
+                              setState(() {
+                                _datesConfirmed = true;
+                                _selectingPickupDate = false;
+                                _errorMessage = null;
+                              });
+                              Navigator.pop(sheetContext);
+                            },
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: primary,
+                              foregroundColor: Colors.white,
+                              elevation: 0,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                            ),
+                            child: const Text(
+                              'Confirm dates & time',
+                              style: TextStyle(
+                                fontFamily: 'Manrope',
+                                fontSize: 12,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+
+                      const SizedBox(height: 3),
+                      Text(
+                        'Calendar prices and availability are shown for each date. Date + time are required before continuing.',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          fontFamily: 'Manrope',
+                          fontSize: 8.5,
+                          fontWeight: FontWeight.w600,
+                          color: muted,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  Widget _sheetDateTimeStep({
+    required String number,
+    required String label,
+    required DateTime? date,
+    required TimeOfDay? time,
+    required bool active,
+    required bool complete,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 8),
+      decoration: BoxDecoration(
+        color: active ? softAccent : background,
+        borderRadius: BorderRadius.circular(13),
+        border: Border.all(
+          color: active ? const Color(0xFF8EDDD4) : border,
+        ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 23,
+            height: 23,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: complete
+                  ? primary
+                  : active
+                      ? primary
+                      : const Color(0xFFE9EFED),
+              shape: BoxShape.circle,
+            ),
+            child: complete
+                ? const Icon(
+                    Icons.check_rounded,
+                    size: 14,
+                    color: Colors.white,
+                  )
+                : Text(
+                    number,
+                    style: TextStyle(
+                      fontFamily: 'Manrope',
+                      fontSize: 9,
+                      fontWeight: FontWeight.w900,
+                      color: active ? Colors.white : body,
+                    ),
+                  ),
+          ),
+          const SizedBox(width: 7),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: const TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 8.5,
+                    fontWeight: FontWeight.w700,
+                    color: muted,
+                  ),
+                ),
+                const SizedBox(height: 1),
+                Text(
+                  date == null
+                      ? 'Select date'
+                      : time == null
+                          ? '${_formatDateShort(date)} • Select time'
+                          : '${_formatDateShort(date)} • ${_formatTime(time)}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w900,
+                    color: heading,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+
+  Widget _sheetDateStep(
+    String number,
+    String label,
+    DateTime? date,
+    bool active,
+  ) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+      decoration: BoxDecoration(
+        color: active ? softAccent : background,
+        borderRadius: BorderRadius.circular(13),
+        border: Border.all(
+          color: active ? const Color(0xFF8EDDD4) : border,
+        ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 24,
+            height: 24,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: active ? primary : const Color(0xFFE9EFED),
+              shape: BoxShape.circle,
+            ),
+            child: Text(
+              number,
+              style: TextStyle(
+                fontFamily: 'Manrope',
+                fontSize: 10,
+                fontWeight: FontWeight.w900,
+                color: active ? Colors.white : body,
+              ),
+            ),
+          ),
+          const SizedBox(width: 7),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: const TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 9,
+                    fontWeight: FontWeight.w700,
+                    color: muted,
+                  ),
+                ),
+                Text(
+                  date == null ? 'Select date' : _formatDateShort(date),
+                  style: const TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w900,
+                    color: heading,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+
+
   bool _canSelectCalendarDate(DateTime date) {
     final state = _getCalendarDayState(date);
 
@@ -1371,6 +2815,9 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
           ),
           const SizedBox(height: 12),
           _buildPricingRuleCard(),
+          _buildSelectedDateAvailability(),
+          const SizedBox(height: 12),
+          _buildDateSelectionCard(),
           if (!_datesConfirmed) ...[
             const SizedBox(height: 14),
             SizedBox(
@@ -1483,11 +2930,13 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
     );
 
     if (!pickupMomentAvailable) {
-      setState(() {
-        _errorMessage =
-            'This pickup time is already unavailable for this car.';
-      });
-
+      if (mounted) {
+        await _showUnavailableDialog(
+          requestedStart: pickup,
+          requestedEnd: pickup.add(const Duration(minutes: 1)),
+          message: 'This pickup time is already booked or blocked. Choose a time before or after the unavailable window.',
+        );
+      }
       return;
     }
 
@@ -1590,11 +3039,13 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
       );
 
       if (!available) {
-        setState(() {
-          _errorMessage =
-              'This car is already unavailable during the selected time.';
-        });
-
+        if (mounted) {
+          await _showUnavailableDialog(
+            requestedStart: pickup,
+            requestedEnd: returnDateTime,
+            message: 'The selected rental period overlaps an existing booking or vehicle block.',
+          );
+        }
         return;
       }
     }
@@ -1806,85 +3257,75 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
   // ============================================================
 
   @override
-  Widget build(
-    BuildContext context,
-  ) {
+  Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: background,
       appBar: AppBar(
         backgroundColor: background,
-        surfaceTintColor:
-            Colors.transparent,
+        surfaceTintColor: Colors.transparent,
         elevation: 0,
         leading: IconButton(
           tooltip: 'Back',
-          onPressed:
-              (_checkingAvailability || _refreshingAvailability)
-                  ? null
-                  : () =>
-                      Navigator.pop(
-                        context,
-                      ),
+          onPressed: (_checkingAvailability || _refreshingAvailability)
+              ? null
+              : () => Navigator.pop(context),
           icon: const Icon(
-            Icons
-                .arrow_back_ios_new_rounded,
+            Icons.arrow_back_ios_new_rounded,
             size: 20,
             color: heading,
           ),
         ),
         title: const Text(
-          'Date & Time',
+          'Choose dates & time',
           style: TextStyle(
             fontFamily: 'Manrope',
             fontSize: 18,
-            fontWeight:
-                FontWeight.w700,
+            fontWeight: FontWeight.w800,
             color: heading,
           ),
         ),
         centerTitle: true,
+        actions: [
+          IconButton(
+            tooltip: 'Refresh availability',
+            onPressed: _refreshingAvailability
+                ? null
+                : () => _refreshAvailability(showMessage: true),
+            icon: _refreshingAvailability
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: primary,
+                    ),
+                  )
+                : const Icon(Icons.refresh_rounded, color: primary, size: 21),
+          ),
+        ],
       ),
       body: SafeArea(
         child: Column(
           children: [
             Expanded(
-              child:
-                  SingleChildScrollView(
-                padding:
-                    const EdgeInsets
-                        .fromLTRB(
-                  20,
-                  8,
-                  20,
-                  24,
-                ),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(16, 7, 16, 24),
                 child: Column(
-                  crossAxisAlignment:
-                      CrossAxisAlignment
-                          .start,
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     _buildCarSummary(),
-                    const SizedBox(
-                      height: 16,
-                    ),
-                    _buildAvailabilityBanner(),
-                    const SizedBox(
-                      height: 20,
-                    ),
-                    _buildHeading(),
-                    const SizedBox(height: 14),
-                    _buildInlineCalendar(),
-                    if (_datesConfirmed) ...[
-                      const SizedBox(height: 14),
+                    const SizedBox(height: 10),
+                    _buildPricingRuleCard(),
+                    const SizedBox(height: 10),
+                    _buildDateSelectionCard(),
+                    if (_pickupDate != null && _returnDate != null) ...[
+                      const SizedBox(height: 10),
                       _buildTimeSelection(),
-                      const SizedBox(height: 14),
+                      const SizedBox(height: 10),
                       _buildDurationCard(),
                     ],
-                    if (_errorMessage !=
-                        null) ...[
-                      const SizedBox(
-                        height: 12,
-                      ),
+                    if (_errorMessage != null) ...[
+                      const SizedBox(height: 10),
                       _buildError(),
                     ],
                   ],
@@ -2166,38 +3607,455 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
     );
   }
 
+  List<TimeOfDay> _availableTimeSlots(DateTime date) {
+    final windows = _availableWindowsForDate(date);
+    final stepMinutes = _rentalType == RentalType.hourly ? 30 : 60;
+    final result = <TimeOfDay>[];
+    final now = DateTime.now();
+
+    for (final window in windows) {
+      var cursor = window.start;
+      while (cursor.isBefore(window.end)) {
+        final candidate = DateTime(
+          date.year,
+          date.month,
+          date.day,
+          cursor.hour,
+          cursor.minute,
+        );
+        if (!candidate.isBefore(now) || !_sameDate(date, _today)) {
+          result.add(TimeOfDay(hour: candidate.hour, minute: candidate.minute));
+        }
+        cursor = cursor.add(Duration(minutes: stepMinutes));
+      }
+    }
+
+    final unique = <String, TimeOfDay>{};
+    for (final item in result) {
+      unique['${item.hour}:${item.minute}'] = item;
+    }
+
+    return unique.values.toList()
+      ..sort((a, b) {
+        final am = a.hour * 60 + a.minute;
+        final bm = b.hour * 60 + b.minute;
+        return am.compareTo(bm);
+      });
+  }
+
+  bool _isTimeSlotValid(TimeOfDay time, {required bool pickup}) {
+    final date = pickup ? _pickupDate : _returnDate;
+    if (date == null) return false;
+
+    final moment = _combine(date, time);
+    if (pickup && moment.isBefore(DateTime.now())) return false;
+
+    if (!pickup) {
+      final pickupDateTime = _pickupDateTime;
+      if (pickupDateTime == null || !moment.isAfter(pickupDateTime)) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  Future<void> _selectTimeSlot(TimeOfDay time, {required bool pickup}) async {
+    final date = pickup ? _pickupDate : _returnDate;
+    if (date == null) {
+      await _openDateSelectionSheet(pickup: pickup);
+      return;
+    }
+
+    if (!_isTimeSlotValid(time, pickup: pickup)) return;
+
+    final moment = _combine(date, time);
+    final pickupMoment = pickup ? moment : _pickupDateTime;
+
+    if (pickup) {
+      final available = await _isRangeAvailable(
+        moment,
+        moment.add(const Duration(minutes: 1)),
+      );
+      if (!mounted) return;
+      if (!available) {
+        await _showUnavailableDialog(
+          requestedStart: moment,
+          requestedEnd: moment.add(const Duration(minutes: 1)),
+          message: 'This pickup time is already booked or blocked. Choose another available time.',
+        );
+        return;
+      }
+
+      setState(() {
+        _pickupTime = time;
+        _returnTime = _returnDateTime != null &&
+                !_returnDateTime!.isAfter(moment)
+            ? null
+            : _returnTime;
+        _errorMessage = null;
+        _datesConfirmed = _pickupDate != null && _returnDate != null;
+        _selectingPickupDate = false;
+      });
+    } else {
+      final start = pickupMoment;
+      if (start == null || !moment.isAfter(start)) return;
+
+      final minimumOk = _meetsMinimumBookingRule(start, moment);
+      if (!minimumOk) {
+        _validateMinimumBeforeConfirm();
+        return;
+      }
+
+      final available = await _isRangeAvailable(start, moment);
+      if (!mounted) return;
+      if (!available) {
+        await _showUnavailableDialog(
+          requestedStart: start,
+          requestedEnd: moment,
+          message: 'The selected rental period overlaps an existing booking or vehicle block. Choose another return time.',
+        );
+        return;
+      }
+
+      setState(() {
+        _returnTime = time;
+        _errorMessage = null;
+        _datesConfirmed = true;
+      });
+    }
+  }
+
   Widget _buildTimeSelection() {
+    final pickupSlots = _pickupDate == null
+        ? const <TimeOfDay>[]
+        : _availableTimeSlots(_pickupDate!);
+    final returnSlots = _returnDate == null
+        ? const <TimeOfDay>[]
+        : _availableTimeSlots(_returnDate!);
+    final slots = _selectingPickupDate || _returnTime == null
+        ? pickupSlots
+        : returnSlots;
+    final showingPickup = _selectingPickupDate || _returnDate == null;
+    final selectedTime = showingPickup ? _pickupTime : _returnTime;
+
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.fromLTRB(14, 13, 14, 13),
       decoration: BoxDecoration(
         color: card,
         borderRadius: BorderRadius.circular(18),
         border: Border.all(color: border),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Expanded(
-            child: _smallTimeButton(
-              label: 'Pickup',
-              time: _pickupTime,
-              icon: Icons.login_rounded,
-              onTap: _selectPickupTime,
+          Row(
+            children: [
+              const Icon(Icons.schedule_rounded, size: 18, color: primary),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text(
+                  'Choose time',
+                  style: TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 14,
+                    fontWeight: FontWeight.w900,
+                    color: heading,
+                  ),
+                ),
+              ),
+              Text(
+                _rentalType == RentalType.hourly ? '30 min slots' : '1 hr slots',
+                style: const TextStyle(
+                  fontFamily: 'Manrope',
+                  fontSize: 9.5,
+                  fontWeight: FontWeight.w700,
+                  color: muted,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: _timeModeButton(
+                  label: 'Pickup',
+                  value: _pickupDateTime == null
+                      ? 'Select date & time'
+                      : '${_formatDateShort(_pickupDate!)} • ${_formatTime(_pickupTime)}',
+                  active: showingPickup,
+                  onTap: () => setState(() => _selectingPickupDate = true),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _timeModeButton(
+                  label: 'Return',
+                  value: _returnDateTime == null
+                      ? 'Select date & time'
+                      : '${_formatDateShort(_returnDate!)} • ${_formatTime(_returnTime)}',
+                  active: !showingPickup,
+                  onTap: () {
+                    if (_returnDate == null) {
+                      _openDateSelectionSheet(pickup: false);
+                    } else if (_pickupTime == null) {
+                      setState(() {
+                        _errorMessage = 'Choose pickup time first.';
+                        _selectingPickupDate = true;
+                      });
+                    } else {
+                      setState(() => _selectingPickupDate = false);
+                    }
+                  },
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 11),
+          Text(
+            showingPickup ? 'Available pickup times' : 'Available return times',
+            style: const TextStyle(
+              fontFamily: 'Manrope',
+              fontSize: 10,
+              fontWeight: FontWeight.w800,
+              color: body,
             ),
           ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: _smallTimeButton(
-              label: 'Return',
-              time: _returnTime,
-              icon: Icons.logout_rounded,
-              onTap: _selectReturnTime,
+          const SizedBox(height: 7),
+          if (slots.isEmpty)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFF7ED),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFFF4D2AA)),
+              ),
+              child: const Text(
+                'No available time slots for this date. Choose another date.',
+                style: TextStyle(
+                  fontFamily: 'Manrope',
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  color: Color(0xFF9A5B18),
+                ),
+              ),
+            )
+          else
+            SizedBox(
+              height: 52,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: slots.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 8),
+                itemBuilder: (context, index) {
+                  final time = slots[index];
+                  final selected = selectedTime != null &&
+                      selectedTime.hour == time.hour &&
+                      selectedTime.minute == time.minute;
+                  final valid = _isTimeSlotValid(time, pickup: showingPickup);
+                  return _timeSlotChip(
+                    time: time,
+                    selected: selected,
+                    enabled: valid,
+                    onTap: valid
+                        ? () => _selectTimeSlot(time, pickup: showingPickup)
+                        : null,
+                  );
+                },
+              ),
             ),
+          const SizedBox(height: 9),
+          _buildAvailabilityTimeline(
+            showingPickup ? _pickupDate : _returnDate,
           ),
         ],
       ),
     );
   }
+
+  Widget _timeModeButton({
+    required String label,
+    required String value,
+    required bool active,
+    required VoidCallback onTap,
+  }) {
+    return Material(
+      color: active ? softAccent : background,
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: active ? const Color(0xFF8EDDD4) : border,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: const TextStyle(
+                  fontFamily: 'Manrope',
+                  fontSize: 8.5,
+                  fontWeight: FontWeight.w700,
+                  color: muted,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                value,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontFamily: 'Manrope',
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.w900,
+                  color: heading,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _timeSlotChip({
+    required TimeOfDay time,
+    required bool selected,
+    required bool enabled,
+    required VoidCallback? onTap,
+  }) {
+    return Material(
+      color: selected ? primary : Colors.white,
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          width: 76,
+          alignment: Alignment.center,
+          padding: const EdgeInsets.symmetric(horizontal: 9),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: selected
+                  ? primary
+                  : enabled
+                      ? border
+                      : const Color(0xFFE8ECEB),
+            ),
+          ),
+          child: Text(
+            _formatTime(time),
+            style: TextStyle(
+              fontFamily: 'Manrope',
+              fontSize: 11,
+              fontWeight: FontWeight.w900,
+              color: selected
+                  ? Colors.white
+                  : enabled
+                      ? heading
+                      : muted,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAvailabilityTimeline(DateTime? date) {
+    if (date == null) return const SizedBox.shrink();
+    final windows = _availableWindowsForDate(date)
+        .where((item) => item.end.isAfter(item.start))
+        .toList();
+    final intervals = _intervalsForDate(date)
+        .where((item) => item.end.isAfter(item.start))
+        .toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Text(
+              'Availability',
+              style: TextStyle(
+                fontFamily: 'Manrope',
+                fontSize: 9,
+                fontWeight: FontWeight.w800,
+                color: muted,
+              ),
+            ),
+            const Spacer(),
+            if (intervals.isNotEmpty)
+              Text(
+                '${intervals.length} booked window${intervals.length == 1 ? '' : 's'}',
+                style: const TextStyle(
+                  fontFamily: 'Manrope',
+                  fontSize: 8.5,
+                  fontWeight: FontWeight.w700,
+                  color: muted,
+                ),
+              ),
+          ],
+        ),
+        const SizedBox(height: 5),
+        SizedBox(
+          height: 8,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: Row(
+              children: [
+                for (final window in windows)
+                  Expanded(
+                    flex: window.end.difference(window.start).inMinutes.clamp(1, 1440).toInt(),
+                    child: Container(color: accent),
+                  ),
+                for (final blocked in intervals)
+                  Expanded(
+                    flex: blocked.end.difference(blocked.start).inMinutes.clamp(1, 1440).toInt(),
+                    child: Container(color: const Color(0xFFE7B0A9)),
+                  ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 4),
+        if (windows.isNotEmpty)
+          Text(
+            'Available ${windows.take(2).map(_intervalText).join(' • ')}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontFamily: 'Manrope',
+              fontSize: 8.5,
+              fontWeight: FontWeight.w700,
+              color: primary,
+            ),
+          )
+        else
+          const Text(
+            'No available window on this date',
+            style: TextStyle(
+              fontFamily: 'Manrope',
+              fontSize: 8.5,
+              fontWeight: FontWeight.w700,
+              color: Color(0xFFE05252),
+            ),
+          ),
+      ],
+    );
+  }
+
+
 
   Widget _smallTimeButton({
     required String label,
@@ -2604,6 +4462,50 @@ class _CalendarLegend extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _SheetHint extends StatelessWidget {
+  final IconData icon;
+  final String text;
+
+  const _SheetHint({
+    required this.icon,
+    required this.text,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF9E8),
+        borderRadius: BorderRadius.circular(11),
+        border: Border.all(color: const Color(0xFFF2D48B)),
+      ),
+      child: Row(
+        children: [
+          const Icon(
+            Icons.info_outline_rounded,
+            size: 15,
+            color: Color(0xFF8A6100),
+          ),
+          const SizedBox(width: 7),
+          Expanded(
+            child: Text(
+              text,
+              style: const TextStyle(
+                fontFamily: 'Manrope',
+                fontSize: 9,
+                fontWeight: FontWeight.w800,
+                color: Color(0xFF8A6100),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

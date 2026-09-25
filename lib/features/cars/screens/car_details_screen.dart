@@ -63,8 +63,12 @@ class _CarDetailsScreenState extends State<CarDetailsScreen> {
 
   bool _isFavorite = false;
 
-  // Customer chooses rental basis here. Package selection remains later.
+  // Customer chooses rental basis here.
   bool _isHourly = false;
+
+  // The exact package selected by the customer.
+  // This is intentionally nullable until the active package list is loaded.
+  String? _selectedPackageId;
 
   final PageController _imageController = PageController();
 
@@ -181,6 +185,18 @@ class _CarDetailsScreenState extends State<CarDetailsScreen> {
         _pricingError = null;
         // Daily is the default when available; otherwise use hourly.
         _isHourly = !hasDaily && hasHourly;
+
+        final defaultPackages = _isHourly
+            ? pricing.hourlyPackages
+            : pricing.dailyPackages;
+        _selectedPackageId = defaultPackages
+            .where((package) =>
+                package.isActive &&
+                (_isHourly
+                    ? package.safeHourlyRate > 0
+                    : package.safeDailyRate > 0))
+            .map((package) => package.id)
+            .isEmpty ? null : defaultPackages.firstWhere((package) => package.isActive && (_isHourly ? package.safeHourlyRate > 0 : package.safeDailyRate > 0)).id;
       });
     } catch (e) {
       if (!mounted) return;
@@ -1322,6 +1338,8 @@ class _CarDetailsScreenState extends State<CarDetailsScreen> {
                   onTap: () {
                     setState(() {
                       _isHourly = true;
+                      final packages = _activePackages(pricing);
+                      _selectedPackageId = packages.isEmpty ? null : packages.first.id;
                     });
                   },
                   minimumBooking:
@@ -1352,6 +1370,8 @@ class _CarDetailsScreenState extends State<CarDetailsScreen> {
                   onTap: () {
                     setState(() {
                       _isHourly = false;
+                      final packages = _activePackages(pricing);
+                      _selectedPackageId = packages.isEmpty ? null : packages.first.id;
                     });
                   },
                   minimumBooking:
@@ -1575,7 +1595,7 @@ class _CarDetailsScreenState extends State<CarDetailsScreen> {
   }
 
   // ===========================================================================
-  // FIRST PACKAGE PREVIEW
+  // PACKAGE SELECTION
   // ===========================================================================
 
   Widget _buildPackagePreview() {
@@ -1585,237 +1605,352 @@ class _CarDetailsScreenState extends State<CarDetailsScreen> {
       return const SizedBox.shrink();
     }
 
-    final hourly =
-        _firstHourlyPackage(pricing);
+    final packages = _activePackages(pricing);
 
-    final daily =
-        _firstDailyPackage(pricing);
-
-    if (hourly == null && daily == null) {
-      return const SizedBox.shrink();
+    if (packages.isEmpty) {
+      return _buildPricingUnavailable(
+        message: _isHourly
+            ? 'No active hourly packages are configured for this vehicle.'
+            : 'No active daily packages are configured for this vehicle.',
+      );
     }
 
     return Column(
-      crossAxisAlignment:
-          CrossAxisAlignment.start,
-
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _sectionTitle(
-          'Available packages',
-          'A quick look at the first package in each rental type',
+          _isHourly ? 'Hourly packages' : 'Daily packages',
+          _isHourly
+              ? 'Choose the hourly package that fits your trip. The selected package will be used for the booking calculation.'
+              : 'Choose the daily package that fits your trip. The selected package will be used for the booking calculation.',
         ),
 
         const SizedBox(height: 13),
 
-        if (daily != null)
-          _packagePreviewCard(
-            package: daily,
-            rentalType: 'Daily',
-          ),
+        ...List.generate(
+          packages.length,
+          (index) {
+            final package = packages[index];
+            final selected = _selectedPackageId == package.id;
 
-        if (daily != null && hourly != null)
-          const SizedBox(height: 10),
-
-        if (hourly != null)
-          _packagePreviewCard(
-            package: hourly,
-            rentalType: 'Hourly',
-          ),
+            return Padding(
+              padding: EdgeInsets.only(
+                bottom: index == packages.length - 1 ? 0 : 12,
+              ),
+              child: _packageSelectionCard(
+                package: package,
+                selected: selected,
+                rentalType: _isHourly ? 'Hourly' : 'Daily',
+                onTap: () {
+                  setState(() {
+                    _selectedPackageId = package.id;
+                  });
+                },
+              ),
+            );
+          },
+        ),
       ],
     );
   }
 
-  Widget _packagePreviewCard({
+  List<KmPricingPackage> _activePackages(PricingProfile pricing) {
+    final source = _isHourly
+        ? pricing.hourlyPackages
+        : pricing.dailyPackages;
+
+    return source.where((package) {
+      if (!package.isActive) return false;
+
+      return _isHourly
+          ? package.safeHourlyRate > 0
+          : package.safeDailyRate > 0;
+    }).toList();
+  }
+
+  Widget _packageSelectionCard({
     required KmPricingPackage package,
+    required bool selected,
     required String rentalType,
+    required VoidCallback onTap,
   }) {
-    final isHourly =
-        rentalType.toLowerCase() ==
-            'hourly';
+    final isHourly = rentalType.toLowerCase() == 'hourly';
 
     final rate = isHourly
         ? package.safeHourlyRate
         : package.safeDailyRate;
 
-    final rateSuffix =
-        isHourly ? '/ hr' : '/ day';
+    final rateSuffix = isHourly ? '/ hour' : '/ day';
 
-    final kmText = package.unlimitedKm
-        ? 'Unlimited KM'
+    final minimum = isHourly
+        ? (_pricingProfile?.minimumHoursFor(package.id) ?? 1)
+        : (_pricingProfile?.minimumDaysFor(package.id) ?? 1);
+
+    final includedKmText = package.unlimitedKm
+        ? 'Unlimited KM included'
         : '${_formatKm(package.safeIncludedKm)} KM included';
 
-    final extraText =
-        package.unlimitedKm
-            ? 'No extra KM charge'
-            : '₹${_formatAmount(package.safeExtraKmRate)} / KM extra';
+    final extraKmText = package.unlimitedKm
+        ? 'No extra KM charge'
+        : '₹${_formatAmount(package.safeExtraKmRate)} / KM extra';
 
-    final minimumText = isHourly
-        ? 'Minimum ${_pricingProfile?.minimumHoursFor(package.id) ?? 1} hour(s)'
-        : 'Minimum ${_pricingProfile?.minimumDaysFor(package.id) ?? 1} day(s)';
-
-    return Container(
-      width: double.infinity,
-
-      padding: const EdgeInsets.all(16),
-
-      decoration: BoxDecoration(
-        color: card,
-
-        borderRadius:
-            BorderRadius.circular(20),
-
-        border: Border.all(
-          color: border,
-        ),
-      ),
-
-      child: Row(
-        children: [
-          Container(
-            width: 46,
-            height: 46,
-
-            decoration: BoxDecoration(
-              color: softAccent,
-              borderRadius:
-                  BorderRadius.circular(14),
-            ),
-
-            child: Icon(
-              isHourly
-                  ? Icons.schedule_rounded
-                  : Icons.today_rounded,
-              color: primary,
-              size: 20,
-            ),
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 220),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: selected ? softAccent : card,
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(
+            color: selected ? primary : border,
+            width: selected ? 1.6 : 1,
           ),
-
-          const SizedBox(width: 12),
-
-          Expanded(
-            child: Column(
-              crossAxisAlignment:
-                  CrossAxisAlignment.start,
-
+          boxShadow: [
+            BoxShadow(
+              color: selected
+                  ? const Color(0x1217201F)
+                  : const Color(0x0617201F),
+              blurRadius: selected ? 20 : 14,
+              offset: const Offset(0, 7),
+            ),
+          ],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  children: [
-                    Container(
-                      padding:
-                          const EdgeInsets.symmetric(
-                        horizontal: 7,
-                        vertical: 4,
+                Container(
+                  width: 48,
+                  height: 48,
+                  decoration: BoxDecoration(
+                    color: selected ? primary : softAccent,
+                    borderRadius: BorderRadius.circular(15),
+                  ),
+                  child: Icon(
+                    isHourly
+                        ? Icons.schedule_rounded
+                        : Icons.today_rounded,
+                    color: selected ? Colors.white : primary,
+                    size: 21,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 4,
+                            ),
+                            decoration: BoxDecoration(
+                              color: selected ? primary : softAccent,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text(
+                              rentalType.toUpperCase(),
+                              style: TextStyle(
+                                color: selected ? Colors.white : primary,
+                                fontSize: 8,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: .6,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          if (selected)
+                            const Icon(
+                              Icons.verified_rounded,
+                              color: primary,
+                              size: 17,
+                            ),
+                        ],
                       ),
-
-                      decoration: BoxDecoration(
-                        color: softAccent,
-                        borderRadius:
-                            BorderRadius.circular(7),
-                      ),
-
-                      child: Text(
-                        rentalType.toUpperCase(),
-
+                      const SizedBox(height: 7),
+                      Text(
+                        package.name.trim().isEmpty
+                            ? (isHourly ? 'Hourly Package' : 'Daily Package')
+                            : package.name,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
-                          color: primary,
-                          fontSize: 8,
-                          fontWeight:
-                              FontWeight.w900,
-                          letterSpacing: .5,
+                          color: heading,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w900,
                         ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(
+                      '₹${_formatAmount(rate)}',
+                      style: const TextStyle(
+                        color: primary,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w900,
                       ),
                     ),
-
-                    const SizedBox(width: 7),
-
-                    Expanded(
-                      child: Text(
-                        package.name,
-
-                        maxLines: 1,
-                        overflow:
-                            TextOverflow.ellipsis,
-
-                        style:
-                            const TextStyle(
-                          color: heading,
-                          fontSize: 12,
-                          fontWeight:
-                              FontWeight.w900,
-                        ),
+                    Text(
+                      rateSuffix,
+                      style: const TextStyle(
+                        color: muted,
+                        fontSize: 9,
+                        fontWeight: FontWeight.w700,
                       ),
                     ),
                   ],
                 ),
+              ],
+            ),
 
-                const SizedBox(height: 7),
+            const SizedBox(height: 15),
+            const Divider(height: 1, color: border),
+            const SizedBox(height: 13),
 
-                Text(
-                  kmText,
-
-                  style: const TextStyle(
-                    color: body,
-                    fontSize: 9,
-                    fontWeight: FontWeight.w700,
+            Row(
+              children: [
+                Expanded(
+                  child: _packageDetailTile(
+                    icon: Icons.speed_rounded,
+                    label: 'Included KM',
+                    value: includedKmText,
                   ),
                 ),
-
-                const SizedBox(height: 3),
-
-                Text(
-                  extraText,
-
-                  style: const TextStyle(
-                    color: muted,
-                    fontSize: 9,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-
-                const SizedBox(height: 3),
-
-                Text(
-                  minimumText,
-
-                  style: const TextStyle(
-                    color: muted,
-                    fontSize: 9,
-                    fontWeight: FontWeight.w600,
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _packageDetailTile(
+                    icon: Icons.add_road_rounded,
+                    label: 'Extra KM',
+                    value: extraKmText,
                   ),
                 ),
               ],
             ),
-          ),
 
-          const SizedBox(width: 8),
+            const SizedBox(height: 10),
 
-          Column(
-            crossAxisAlignment:
-                CrossAxisAlignment.end,
+            Row(
+              children: [
+                Expanded(
+                  child: _packageDetailTile(
+                    icon: Icons.timelapse_rounded,
+                    label: 'Minimum booking',
+                    value: isHourly
+                        ? '$minimum hour${minimum == 1 ? '' : 's'}'
+                        : '$minimum day${minimum == 1 ? '' : 's'}',
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _packageDetailTile(
+                    icon: Icons.event_available_rounded,
+                    label: 'Booking basis',
+                    value: isHourly ? 'Per hour' : 'Per day',
+                  ),
+                ),
+              ],
+            ),
 
-            children: [
-              Text(
-                '₹${_formatAmount(rate)}',
+            const SizedBox(height: 14),
 
-                style: const TextStyle(
-                  color: primary,
-                  fontSize: 15,
-                  fontWeight: FontWeight.w900,
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(
+                horizontal: 12,
+                vertical: 10,
+              ),
+              decoration: BoxDecoration(
+                color: selected ? primary : Colors.white,
+                borderRadius: BorderRadius.circular(13),
+                border: Border.all(
+                  color: selected ? primary : border,
                 ),
               ),
-
-              const SizedBox(height: 2),
-
-              Text(
-                rateSuffix,
-
-                style: const TextStyle(
-                  color: muted,
-                  fontSize: 8,
-                  fontWeight: FontWeight.w600,
-                ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    selected
+                        ? Icons.check_circle_rounded
+                        : Icons.radio_button_unchecked_rounded,
+                    size: 17,
+                    color: selected ? Colors.white : muted,
+                  ),
+                  const SizedBox(width: 7),
+                  Text(
+                    selected ? 'PACKAGE SELECTED' : 'SELECT THIS PACKAGE',
+                    style: TextStyle(
+                      color: selected ? Colors.white : heading,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: .3,
+                    ),
+                  ),
+                ],
               ),
-            ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _packageDetailTile({
+    required IconData icon,
+    required String label,
+    required String value,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(11),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: border),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 16, color: primary),
+          const SizedBox(width: 7),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: muted,
+                    fontSize: 8,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  value,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: heading,
+                    fontSize: 9,
+                    height: 1.25,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ],
+            ),
           ),
         ],
       ),
@@ -2562,9 +2697,21 @@ class _CarDetailsScreenState extends State<CarDetailsScreen> {
   }
 
   KmPricingPackage? _selectedPackage(PricingProfile pricing) {
-    return _isHourly
-        ? _firstHourlyPackage(pricing)
-        : _firstDailyPackage(pricing);
+    final packages = _activePackages(pricing);
+
+    if (packages.isEmpty) {
+      return null;
+    }
+
+    if (_selectedPackageId != null) {
+      for (final package in packages) {
+        if (package.id == _selectedPackageId) {
+          return package;
+        }
+      }
+    }
+
+    return packages.first;
   }
 
   // ===========================================================================
