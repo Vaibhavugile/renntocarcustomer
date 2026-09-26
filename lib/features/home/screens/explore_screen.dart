@@ -16,11 +16,12 @@ import '../../cars/screens/car_details_screen.dart';
 /// - Filter by vehicle type, transmission and fuel.
 /// - Select hourly or daily rental.
 /// - Select pickup/return dates and times.
-/// - One complete availability snapshot is used for the selected range.
-/// - Shows availability for every visible car without one Firestore query per car.
+/// - Customer enters rental type, pickup/return dates and times.
+/// - No availability calendar is shown on Explore. Calendar availability is
+///   intentionally handled later on the car-specific DateTimeScreen.
+/// - Customer explicitly presses Check availability to search the active fleet.
+/// - Only cars available for the exact selected range are shown after the check.
 /// - Tapping a car opens the existing CarDetailsScreen.
-/// - Pull-to-refresh reloads the fleet and availability.
-/// - Availability is rechecked when the customer presses Check availability.
 class ExploreScreen extends StatefulWidget {
   final String? tenantId;
 
@@ -176,16 +177,19 @@ class _ExploreScreenState extends State<ExploreScreen> {
 
   Future<void> _refresh() async {
     await _loadInitialData();
-
-    if (_availabilityChecked) {
-      await _checkAvailability(showMessage: false);
-    }
   }
 
   void _applyFilters() {
     final query = _searchController.text.trim().toLowerCase();
 
     final filtered = _allCars.where((car) {
+      // Explore is a fleet search screen: once the customer explicitly
+      // checks availability, show only cars that can actually be booked
+      // for the selected range. Before that check, show the active fleet.
+      if (_availabilityChecked && !_availableCarIds.contains(car.id)) {
+        return false;
+      }
+
       final matchesSearch = query.isEmpty ||
           car.name.toLowerCase().contains(query) ||
           car.type.toLowerCase().contains(query) ||
@@ -352,87 +356,421 @@ class _ExploreScreenState extends State<ExploreScreen> {
     }
   }
 
-  Future<void> _pickDate({
+  Future<void> _openDateTimePicker({
     required bool pickup,
   }) async {
-    final initial = pickup ? _pickupDate : _returnDate;
+    DateTime workingDate = pickup ? _pickupDate : _returnDate;
+    TimeOfDay workingTime = pickup ? _pickupTime : _returnTime;
 
-    final selected = await showDatePicker(
+    final minDate = DateTime.now();
+    final maxDate = DateTime.now().add(const Duration(days: 730));
+
+    await showModalBottomSheet<void>(
       context: context,
-      initialDate: initial.isBefore(DateTime.now())
-          ? DateTime.now()
-          : initial,
-      firstDate: DateTime.now(),
-      lastDate: DateTime.now().add(
-        const Duration(days: 730),
-      ),
-      builder: (context, child) {
-        return Theme(
-          data: Theme.of(context).copyWith(
-            colorScheme: const ColorScheme.light(
-              primary: primary,
-              surface: Colors.white,
-            ),
-          ),
-          child: child!,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            final slots = _timeSlotsFor(
+              date: workingDate,
+              pickup: pickup,
+            );
+
+            return SafeArea(
+              top: false,
+              child: Container(
+                decoration: const BoxDecoration(
+                  color: card,
+                  borderRadius: BorderRadius.vertical(
+                    top: Radius.circular(28),
+                  ),
+                ),
+                padding: const EdgeInsets.fromLTRB(18, 10, 18, 18),
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Center(
+                        child: Container(
+                          width: 42,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: border,
+                            borderRadius: BorderRadius.circular(99),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      Row(
+                        children: [
+                          Container(
+                            width: 42,
+                            height: 42,
+                            decoration: BoxDecoration(
+                              color: softAccent,
+                              borderRadius: BorderRadius.circular(13),
+                            ),
+                            child: Icon(
+                              pickup
+                                  ? Icons.login_rounded
+                                  : Icons.logout_rounded,
+                              color: primary,
+                              size: 21,
+                            ),
+                          ),
+                          const SizedBox(width: 11),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  pickup
+                                      ? 'Pickup date & time'
+                                      : 'Return date & time',
+                                  style: const TextStyle(
+                                    fontSize: 17,
+                                    fontWeight: FontWeight.w900,
+                                    color: heading,
+                                  ),
+                                ),
+                                const SizedBox(height: 3),
+                                Text(
+                                  'Select a date, then choose a time slot',
+                                  style: const TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w600,
+                                    color: body,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            onPressed: () => Navigator.pop(sheetContext),
+                            icon: const Icon(Icons.close_rounded),
+                            color: body,
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      Container(
+                        decoration: BoxDecoration(
+                          color: background,
+                          borderRadius: BorderRadius.circular(18),
+                          border: Border.all(color: border),
+                        ),
+                        clipBehavior: Clip.antiAlias,
+                        child: CalendarDatePicker(
+                          initialDate: workingDate.isBefore(minDate)
+                              ? minDate
+                              : workingDate,
+                          firstDate: minDate,
+                          lastDate: maxDate,
+                          currentDate: DateTime.now(),
+                          onDateChanged: (value) {
+                            var next = DateTime(
+                              value.year,
+                              value.month,
+                              value.day,
+                            );
+
+                            if (!pickup &&
+                                next.isBefore(_pickupDate)) {
+                              next = _pickupDate;
+                            }
+
+                            workingDate = next;
+
+                            if (!pickup &&
+                                _sameDate(workingDate, _pickupDate) &&
+                                !_isTimeAfter(
+                                  workingTime,
+                                  _pickupTime,
+                                )) {
+                              workingTime = _nextSlotAfter(_pickupTime);
+                            }
+
+                            setSheetState(() {});
+                          },
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      Row(
+                        children: [
+                          const Expanded(
+                            child: Text(
+                              'Available time slots',
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w900,
+                                color: heading,
+                              ),
+                            ),
+                          ),
+                          Text(
+                            _formatDate(workingDate),
+                            style: const TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w800,
+                              color: primary,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 9),
+                      SizedBox(
+                        height: 54,
+                        child: ListView.separated(
+                          scrollDirection: Axis.horizontal,
+                          physics: const BouncingScrollPhysics(),
+                          itemCount: slots.length,
+                          separatorBuilder: (_, __) =>
+                              const SizedBox(width: 8),
+                          itemBuilder: (_, index) {
+                            final slot = slots[index];
+                            final selected =
+                                slot.hour == workingTime.hour &&
+                                    slot.minute == workingTime.minute;
+
+                            return GestureDetector(
+                              onTap: () {
+                                workingTime = slot;
+                                setSheetState(() {});
+                              },
+                              child: AnimatedContainer(
+                                duration: const Duration(milliseconds: 160),
+                                width: 76,
+                                decoration: BoxDecoration(
+                                  color: selected ? primary : background,
+                                  borderRadius: BorderRadius.circular(14),
+                                  border: Border.all(
+                                    color: selected ? primary : border,
+                                  ),
+                                ),
+                                alignment: Alignment.center,
+                                child: Column(
+                                  mainAxisAlignment:
+                                      MainAxisAlignment.center,
+                                  children: [
+                                    Icon(
+                                      Icons.access_time_rounded,
+                                      size: 14,
+                                      color: selected ? Colors.white : muted,
+                                    ),
+                                    const SizedBox(height: 3),
+                                    Text(
+                                      _formatTime(slot),
+                                      style: TextStyle(
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.w900,
+                                        color: selected
+                                            ? Colors.white
+                                            : heading,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
+                        decoration: BoxDecoration(
+                          color: softAccent,
+                          borderRadius: BorderRadius.circular(13),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.event_available_rounded,
+                              size: 17,
+                              color: primary,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                '${_formatDate(workingDate)} • ${_formatTime(workingTime)}',
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w900,
+                                  color: heading,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          onPressed: () {
+                            if (!pickup &&
+                                !DateTime(
+                                  workingDate.year,
+                                  workingDate.month,
+                                  workingDate.day,
+                                  workingTime.hour,
+                                  workingTime.minute,
+                                ).isAfter(DateTime(
+                                  _pickupDate.year,
+                                  _pickupDate.month,
+                                  _pickupDate.day,
+                                  _pickupTime.hour,
+                                  _pickupTime.minute,
+                                ))) {
+                              _showMessage(
+                                'Return must be after pickup.',
+                                error: true,
+                              );
+                              return;
+                            }
+
+                            setState(() {
+                              if (pickup) {
+                                _pickupDate = workingDate;
+                                _pickupTime = workingTime;
+
+                                final pickupDateTime = DateTime(
+                                  _pickupDate.year,
+                                  _pickupDate.month,
+                                  _pickupDate.day,
+                                  _pickupTime.hour,
+                                  _pickupTime.minute,
+                                );
+                                final returnDateTime = DateTime(
+                                  _returnDate.year,
+                                  _returnDate.month,
+                                  _returnDate.day,
+                                  _returnTime.hour,
+                                  _returnTime.minute,
+                                );
+
+                                if (!returnDateTime.isAfter(pickupDateTime)) {
+                                  final next = pickupDateTime.add(
+                                    const Duration(days: 1),
+                                  );
+                                  _returnDate = DateTime(
+                                    next.year,
+                                    next.month,
+                                    next.day,
+                                  );
+                                  _returnTime = TimeOfDay(
+                                    hour: next.hour,
+                                    minute: next.minute,
+                                  );
+                                }
+                              } else {
+                                _returnDate = workingDate;
+                                _returnTime = workingTime;
+                              }
+
+                              _availabilityChecked = false;
+                              _availableCarIds = <String>{};
+                            });
+
+                            _applyFilters();
+                            Navigator.pop(sheetContext);
+                          },
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: primary,
+                            foregroundColor: Colors.white,
+                            elevation: 0,
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(15),
+                            ),
+                          ),
+                          child: Text(
+                            pickup ? 'Confirm pickup' : 'Confirm return',
+                            style: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
         );
       },
     );
-
-    if (selected == null || !mounted) return;
-
-    setState(() {
-      if (pickup) {
-        _pickupDate = selected;
-
-        if (_returnDate.isBefore(selected) ||
-            _returnDate.isAtSameMomentAs(selected)) {
-          _returnDate = selected.add(const Duration(days: 1));
-        }
-      } else {
-        _returnDate = selected;
-      }
-
-      _availabilityChecked = false;
-      _availableCarIds = <String>{};
-    });
-
-    _applyFilters();
   }
 
-  Future<void> _pickTime({
+  List<TimeOfDay> _timeSlotsFor({
+    required DateTime date,
     required bool pickup,
-  }) async {
-    final selected = await showTimePicker(
-      context: context,
-      initialTime: pickup ? _pickupTime : _returnTime,
-      builder: (context, child) {
-        return Theme(
-          data: Theme.of(context).copyWith(
-            colorScheme: const ColorScheme.light(
-              primary: primary,
-              surface: Colors.white,
-            ),
-          ),
-          child: child!,
+  }) {
+    final now = DateTime.now();
+    final slots = <TimeOfDay>[];
+
+    // Explore is fleet-level, so it does not expose a specific car's
+    // availability. It offers the same compact slot-style input used by the
+    // booking flow, while the final fleet availability is checked afterwards.
+    for (int hour = 0; hour < 24; hour++) {
+      for (int minute = 0; minute < 60; minute += 30) {
+        final candidate = DateTime(
+          date.year,
+          date.month,
+          date.day,
+          hour,
+          minute,
         );
-      },
-    );
 
-    if (selected == null || !mounted) return;
+        if (pickup && _sameDate(date, now) &&
+            candidate.isBefore(now.add(const Duration(minutes: 30)))) {
+          continue;
+        }
 
-    setState(() {
-      if (pickup) {
-        _pickupTime = selected;
-      } else {
-        _returnTime = selected;
+        if (!pickup && _sameDate(date, _pickupDate)) {
+          final pickupDateTime = DateTime(
+            _pickupDate.year,
+            _pickupDate.month,
+            _pickupDate.day,
+            _pickupTime.hour,
+            _pickupTime.minute,
+          );
+          if (!candidate.isAfter(pickupDateTime)) continue;
+        }
+
+        slots.add(TimeOfDay(hour: hour, minute: minute));
       }
+    }
 
-      _availabilityChecked = false;
-      _availableCarIds = <String>{};
-    });
+    return slots.isEmpty
+        ? <TimeOfDay>[const TimeOfDay(hour: 10, minute: 0)]
+        : slots;
+  }
 
-    _applyFilters();
+  bool _sameDate(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
+  bool _isTimeAfter(TimeOfDay a, TimeOfDay b) {
+    return a.hour > b.hour ||
+        (a.hour == b.hour && a.minute > b.minute);
+  }
+
+  TimeOfDay _nextSlotAfter(TimeOfDay value) {
+    var minutes = value.hour * 60 + value.minute + 30;
+    if (minutes >= 24 * 60) {
+      minutes = 23 * 60 + 30;
+    }
+    return TimeOfDay(
+      hour: minutes ~/ 60,
+      minute: minutes % 60,
+    );
   }
 
   void _openCarDetails(Car car) {
@@ -592,18 +930,18 @@ class _ExploreScreenState extends State<ExploreScreen> {
               else
                 SliverPadding(
                   padding: const EdgeInsets.fromLTRB(
-                    14,
+                    16,
                     0,
-                    14,
+                    16,
                     32,
                   ),
                   sliver: SliverGrid(
                     gridDelegate:
-                        const SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: 2,
+                        const SliverGridDelegateWithMaxCrossAxisExtent(
+                      maxCrossAxisExtent: 420,
                       mainAxisSpacing: 14,
-                      crossAxisSpacing: 12,
-                      childAspectRatio: 0.68,
+                      crossAxisSpacing: 14,
+                      childAspectRatio: 0.72,
                     ),
                     delegate: SliverChildBuilderDelegate(
                       (context, index) {
@@ -743,8 +1081,8 @@ class _ExploreScreenState extends State<ExploreScreen> {
                   label: 'Pickup',
                   date: _formatDate(_pickupDate),
                   time: _formatTime(_pickupTime),
-                  onDateTap: () => _pickDate(pickup: true),
-                  onTimeTap: () => _pickTime(pickup: true),
+                  onDateTap: () => _openDateTimePicker(pickup: true),
+                  onTimeTap: () => _openDateTimePicker(pickup: true),
                 ),
               ),
               const SizedBox(width: 10),
@@ -754,8 +1092,8 @@ class _ExploreScreenState extends State<ExploreScreen> {
                   label: 'Return',
                   date: _formatDate(_returnDate),
                   time: _formatTime(_returnTime),
-                  onDateTap: () => _pickDate(pickup: false),
-                  onTimeTap: () => _pickTime(pickup: false),
+                  onDateTap: () => _openDateTimePicker(pickup: false),
+                  onTimeTap: () => _openDateTimePicker(pickup: false),
                 ),
               ),
             ],
@@ -1193,11 +1531,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
   }
 
   Widget _buildResultHeader() {
-    final availableCount = _availabilityChecked
-        ? _visibleCars
-            .where((car) => _availableCarIds.contains(car.id))
-            .length
-        : null;
+    final availableCount = _availabilityChecked ? _visibleCars.length : null;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 2, 20, 12),
@@ -1206,7 +1540,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
           Expanded(
             child: Text(
               _availabilityChecked
-                  ? '$availableCount available • ${_visibleCars.length} shown'
+                  ? '$availableCount available cars'
                   : '${_visibleCars.length} cars',
               style: const TextStyle(
                 fontSize: 15,
@@ -1239,9 +1573,6 @@ class _ExploreScreenState extends State<ExploreScreen> {
   }
 
   Widget _buildExploreCarCard(Car car) {
-    final checked = _availabilityChecked;
-    final available = _availableCarIds.contains(car.id);
-
     return Stack(
       children: [
         Positioned.fill(
@@ -1250,42 +1581,34 @@ class _ExploreScreenState extends State<ExploreScreen> {
             onTap: () => _openCarDetails(car),
           ),
         ),
-        if (checked)
+        if (_availabilityChecked)
           Positioned(
             top: 10,
             right: 10,
             child: Container(
               padding: const EdgeInsets.symmetric(
-                horizontal: 8,
-                vertical: 5,
+                horizontal: 9,
+                vertical: 6,
               ),
               decoration: BoxDecoration(
-                color: available
-                    ? Colors.white.withValues(alpha: .95)
-                    : const Color(0xFFFDF0F0).withValues(alpha: .96),
+                color: Colors.white.withValues(alpha: .95),
                 borderRadius: BorderRadius.circular(10),
               ),
-              child: Row(
+              child: const Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(
-                    available
-                        ? Icons.check_circle_rounded
-                        : Icons.cancel_rounded,
+                    Icons.check_circle_rounded,
                     size: 13,
-                    color: available
-                        ? primary
-                        : Colors.redAccent,
+                    color: primary,
                   ),
-                  const SizedBox(width: 4),
+                  SizedBox(width: 4),
                   Text(
-                    available ? 'AVAILABLE' : 'BOOKED',
+                    'AVAILABLE',
                     style: TextStyle(
                       fontSize: 8,
                       fontWeight: FontWeight.w900,
-                      color: available
-                          ? primary
-                          : Colors.redAccent,
+                      color: primary,
                       letterSpacing: .3,
                     ),
                   ),
