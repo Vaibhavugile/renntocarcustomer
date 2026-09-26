@@ -6,6 +6,7 @@ import '../../../pricing/models/pricing_profile.dart';
 import '../../../pricing/services/pricing_profile_service.dart';
 import 'admin_add_pricing_profile_screen.dart';
 import 'admin_edit_pricing_profile_screen.dart';
+import 'admin_pricing_calendar_screen.dart';
 
 /// Admin list for the simplified car-rental pricing model.
 ///
@@ -193,6 +194,19 @@ class _AdminPricingProfilesScreenState
       context,
       MaterialPageRoute(
         builder: (_) => const AdminAddPricingProfileScreen(),
+      ),
+    );
+
+    if (result == true && mounted) {
+      await _load(refresh: true);
+    }
+  }
+
+  Future<void> _calendar(PricingProfile profile) async {
+    final result = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => AdminPricingCalendarScreen(profile: profile),
       ),
     );
 
@@ -837,7 +851,7 @@ class _AdminPricingProfilesScreenState
               Expanded(
                 child: OutlinedButton.icon(
                   onPressed: () => _edit(p),
-                  icon: const Icon(Icons.edit_outlined, size: 17),
+                  icon: const Icon(Icons.edit_outlined, size: 16),
                   label: const Text('Edit'),
                   style: OutlinedButton.styleFrom(
                     foregroundColor: heading,
@@ -849,23 +863,19 @@ class _AdminPricingProfilesScreenState
                     textStyle: const TextStyle(
                       fontFamily: 'Manrope',
                       fontWeight: FontWeight.w800,
+                      fontSize: 11,
                     ),
                   ),
                 ),
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 7),
               Expanded(
                 child: ElevatedButton.icon(
-                  onPressed: () => _toggle(p),
-                  icon: Icon(
-                    p.isActive
-                        ? Icons.pause_outlined
-                        : Icons.check_rounded,
-                    size: 17,
-                  ),
-                  label: Text(p.isActive ? 'Deactivate' : 'Activate'),
+                  onPressed: () => _calendar(p),
+                  icon: const Icon(Icons.calendar_month_rounded, size: 16),
+                  label: const Text('Calendar'),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: p.isActive ? heading : primary,
+                    backgroundColor: primary,
                     foregroundColor: Colors.white,
                     elevation: 0,
                     minimumSize: const Size.fromHeight(44),
@@ -875,25 +885,33 @@ class _AdminPricingProfilesScreenState
                     textStyle: const TextStyle(
                       fontFamily: 'Manrope',
                       fontWeight: FontWeight.w800,
+                      fontSize: 11,
                     ),
                   ),
                 ),
               ),
-              const SizedBox(width: 8),
-              SizedBox(
-                width: 46,
-                height: 44,
-                child: OutlinedButton(
-                  onPressed: () => _delete(p),
+              const SizedBox(width: 7),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: () => _toggle(p),
+                  icon: Icon(
+                    p.isActive ? Icons.pause_outlined : Icons.check_rounded,
+                    size: 16,
+                  ),
+                  label: Text(p.isActive ? 'Pause' : 'Activate'),
                   style: OutlinedButton.styleFrom(
-                    foregroundColor: Colors.red.shade700,
-                    side: BorderSide(color: Colors.red.shade100),
-                    padding: EdgeInsets.zero,
+                    foregroundColor: p.isActive ? heading : primary,
+                    side: BorderSide(color: p.isActive ? border : primary),
+                    minimumSize: const Size.fromHeight(44),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12),
                     ),
+                    textStyle: const TextStyle(
+                      fontFamily: 'Manrope',
+                      fontWeight: FontWeight.w800,
+                      fontSize: 10.5,
+                    ),
                   ),
-                  child: const Icon(Icons.delete_outline_rounded, size: 19),
                 ),
               ),
             ],
