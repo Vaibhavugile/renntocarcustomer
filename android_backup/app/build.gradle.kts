@@ -13,7 +13,7 @@ plugins {
 }
 
 android {
-    namespace = "com.rentocar.app"
+    namespace = "com.example.customer_app_car_rental"
 
     compileSdk = flutter.compileSdkVersion
 
@@ -44,7 +44,7 @@ android {
     // ============================================================
 
     defaultConfig {
-        applicationId = "com.rentocar.app"
+        applicationId = "com.example.customer_app_car_rental"
 
         minSdk = flutter.minSdkVersion
 

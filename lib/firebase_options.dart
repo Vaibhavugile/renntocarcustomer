@@ -51,12 +51,11 @@ class DefaultFirebaseOptions {
 
   static const FirebaseOptions android = FirebaseOptions(
     apiKey: 'AIzaSyBQ_dwQGEJ8wT3figP3jmoStLKNmsB_yGs',
-    appId: '1:113294411058:android:76451b1cf0e19cdd92032b',
+    appId: '1:113294411058:android:6a63c2a7c8a6197492032b',
     messagingSenderId: '113294411058',
     projectId: 'carrental-fd6eb',
     storageBucket: 'carrental-fd6eb.firebasestorage.app',
   );
-
   static const FirebaseOptions ios = FirebaseOptions(
     apiKey: 'AIzaSyA7cmJ-tyJG2ZesmMLLQGYSu0aJcEiy4vI',
     appId: '1:113294411058:ios:dae87ef6c8c7087292032b',
