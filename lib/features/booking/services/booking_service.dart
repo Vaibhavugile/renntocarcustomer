@@ -3020,6 +3020,285 @@ class BookingService {
   }
 
 
+
+  // ============================================================
+  // CUSTOMER TRANSACTION HISTORY
+  // ============================================================
+
+  CollectionReference<Map<String, dynamic>> _paymentAttempts(
+    String tenantId,
+    String bookingId,
+  ) =>
+      _bookings(tenantId).doc(bookingId).collection('paymentAttempts');
+
+  /// Reads Razorpay/payment attempts for a booking after validating that the
+  /// authenticated customer owns the booking and that the booking belongs to
+  /// the requested tenant.
+  ///
+  /// Attempts are intentionally kept separate from successful payment ledger
+  /// entries. This allows the customer history to show failed, cancelled and
+  /// pending checkout attempts without treating them as money collected.
+  Future<List<CustomerPaymentAttempt>> getBookingPaymentAttemptsForCustomer({
+    required String tenantId,
+    required String bookingId,
+  }) async {
+    final booking = await getBooking(
+      tenantId: tenantId,
+      bookingId: bookingId,
+    );
+
+    if (booking == null) {
+      throw Exception('Booking not found.');
+    }
+
+    final snapshot = await _paymentAttempts(tenantId, bookingId)
+        .orderBy('createdAt', descending: true)
+        .get();
+
+    return snapshot.docs
+        .map(
+          (doc) => CustomerPaymentAttempt.fromFirestore(
+            id: doc.id,
+            data: doc.data(),
+          ),
+        )
+        .where(
+          (attempt) =>
+              attempt.tenantId == tenantId &&
+              attempt.bookingId == bookingId &&
+              attempt.customerId == booking.customerId,
+        )
+        .toList();
+  }
+
+  /// Returns a single customer payment attempt after ownership validation.
+  Future<CustomerPaymentAttempt?> getPaymentAttemptForCustomer({
+    required String tenantId,
+    required String bookingId,
+    required String attemptId,
+  }) async {
+    final booking = await getBooking(
+      tenantId: tenantId,
+      bookingId: bookingId,
+    );
+
+    if (booking == null) {
+      throw Exception('Booking not found.');
+    }
+
+    final doc = await _paymentAttempts(tenantId, bookingId)
+        .doc(attemptId)
+        .get();
+
+    if (!doc.exists || doc.data() == null) {
+      return null;
+    }
+
+    final attempt = CustomerPaymentAttempt.fromFirestore(
+      id: doc.id,
+      data: doc.data()!,
+    );
+
+    if (attempt.tenantId != tenantId ||
+        attempt.bookingId != bookingId ||
+        attempt.customerId != booking.customerId) {
+      throw Exception('Payment attempt ownership mismatch.');
+    }
+
+    return attempt;
+  }
+
+  /// Builds a customer-facing financial history from the existing booking
+  /// subcollections. No second transaction collection is created.
+  ///
+  /// Source of truth:
+  ///   - payments       = actual payment/refund ledger entries
+  ///   - paymentAttempts = checkout attempts, including failed/cancelled/pending
+  ///
+  /// Successful payment attempts are not duplicated when the corresponding
+  /// payment ledger entry has the same Razorpay order/payment reference.
+  ///
+  /// Pagination is booking-based. This avoids downloading every payment
+  /// subcollection for a customer with a large booking history in one request.
+  Future<CustomerTransactionPage> getCustomerTransactionHistory({
+    required String tenantId,
+    int pageSize = 20,
+    DocumentSnapshot<Map<String, dynamic>>? startAfterBooking,
+    CustomerTransactionFilter filter = CustomerTransactionFilter.all,
+  }) async {
+    final user = _requireUser();
+    final safePageSize = pageSize.clamp(1, 50);
+
+    Query<Map<String, dynamic>> query = _bookings(tenantId)
+        .where('customerId', isEqualTo: user.uid)
+        .orderBy('updatedAt', descending: true)
+        .limit(safePageSize + 1);
+
+    if (startAfterBooking != null) {
+      query = query.startAfterDocument(startAfterBooking);
+    }
+
+    final snapshot = await query.get();
+    final docs = snapshot.docs.toList();
+    final hasMoreBookings = docs.length > safePageSize;
+    final bookingDocs = hasMoreBookings
+        ? docs.take(safePageSize).toList()
+        : docs;
+
+    final items = <CustomerTransactionItem>[];
+
+    for (final bookingDoc in bookingDocs) {
+      final booking = Booking.fromMap(
+        bookingDoc.id,
+        bookingDoc.data(),
+      );
+
+      _validateTenant(booking, tenantId);
+      _validateCustomer(booking, user.uid);
+
+      final paymentSnapshot = await _payments(tenantId, booking.bookingId)
+          .orderBy('paymentDate', descending: true)
+          .get();
+
+      final successfulPaymentRefs = <String>{};
+
+      for (final paymentDoc in paymentSnapshot.docs) {
+        final payment = PaymentTransaction.fromMap(
+          paymentDoc.id,
+          paymentDoc.data(),
+        );
+
+        if (payment.tenantId.isNotEmpty && payment.tenantId != tenantId) {
+          continue;
+        }
+        if (payment.customerId.isNotEmpty &&
+            payment.customerId != user.uid) {
+          continue;
+        }
+
+        final item = CustomerTransactionItem.fromPayment(
+          payment: payment,
+          booking: booking,
+        );
+
+        if (_matchesCustomerTransactionFilter(item, filter)) {
+          items.add(item);
+        }
+
+        if (payment.razorpayOrderId != null &&
+            payment.razorpayOrderId!.trim().isNotEmpty) {
+          successfulPaymentRefs.add(payment.razorpayOrderId!.trim());
+        }
+        if (payment.razorpayPaymentId != null &&
+            payment.razorpayPaymentId!.trim().isNotEmpty) {
+          successfulPaymentRefs.add(payment.razorpayPaymentId!.trim());
+        }
+        if (payment.transactionReference != null &&
+            payment.transactionReference!.trim().isNotEmpty) {
+          successfulPaymentRefs.add(payment.transactionReference!.trim());
+        }
+      }
+
+      final attemptSnapshot = await _paymentAttempts(
+        tenantId,
+        booking.bookingId,
+      ).orderBy('createdAt', descending: true).get();
+
+      for (final attemptDoc in attemptSnapshot.docs) {
+        final attempt = CustomerPaymentAttempt.fromFirestore(
+          id: attemptDoc.id,
+          data: attemptDoc.data(),
+        );
+
+        if (attempt.tenantId != tenantId ||
+            attempt.bookingId != booking.bookingId ||
+            attempt.customerId != user.uid) {
+          continue;
+        }
+
+        // Once an actual payment ledger record exists for the same gateway
+        // reference, the successful payment is already represented by the
+        // payments collection. Keep the attempt for failed/cancelled/pending
+        // states, but don't show a duplicate successful payment.
+        if (attempt.isSuccessful &&
+            attempt.hasGatewayReference &&
+            successfulPaymentRefs.contains(attempt.primaryReference)) {
+          continue;
+        }
+
+        final item = CustomerTransactionItem.fromAttempt(
+          attempt: attempt,
+          booking: booking,
+        );
+
+        if (_matchesCustomerTransactionFilter(item, filter)) {
+          items.add(item);
+        }
+      }
+    }
+
+    items.sort(
+      (a, b) => b.date.compareTo(a.date),
+    );
+
+    final nextCursor = bookingDocs.isEmpty ? null : bookingDocs.last;
+
+    return CustomerTransactionPage(
+      items: items,
+      hasMore: hasMoreBookings,
+      nextBookingCursor: nextCursor,
+    );
+  }
+
+  /// Convenience method for a complete history when the caller intentionally
+  /// wants to load all customer bookings. This uses the same tenant/customer
+  /// ownership checks as the paginated method.
+  Future<List<CustomerTransactionItem>> getAllCustomerTransactionHistory({
+    required String tenantId,
+    CustomerTransactionFilter filter = CustomerTransactionFilter.all,
+  }) async {
+    DocumentSnapshot<Map<String, dynamic>>? cursor;
+    final result = <CustomerTransactionItem>[];
+
+    do {
+      final page = await getCustomerTransactionHistory(
+        tenantId: tenantId,
+        pageSize: 50,
+        startAfterBooking: cursor,
+        filter: filter,
+      );
+
+      result.addAll(page.items);
+      cursor = page.nextBookingCursor;
+
+      if (!page.hasMore) {
+        break;
+      }
+    } while (cursor != null);
+
+    result.sort(
+      (a, b) => b.date.compareTo(a.date),
+    );
+
+    return result;
+  }
+
+  bool _matchesCustomerTransactionFilter(
+    CustomerTransactionItem item,
+    CustomerTransactionFilter filter,
+  ) {
+    switch (filter) {
+      case CustomerTransactionFilter.all:
+        return true;
+      case CustomerTransactionFilter.payments:
+        return item.kind == CustomerTransactionKind.payment;
+      case CustomerTransactionFilter.refunds:
+        return item.kind == CustomerTransactionKind.refund;
+      case CustomerTransactionFilter.attempts:
+        return item.kind == CustomerTransactionKind.paymentAttempt;
+    }
+  }
+
   PaymentTransaction _paymentWith(
     PaymentTransaction payment, {
     String? paymentId,
@@ -3140,6 +3419,365 @@ class BookingService {
         0;
   }
 
+}
+
+
+/// Customer-facing transaction categories.
+enum CustomerTransactionKind {
+  payment,
+  refund,
+  paymentAttempt,
+}
+
+/// Filters for the customer transaction history screen.
+enum CustomerTransactionFilter {
+  all,
+  payments,
+  refunds,
+  attempts,
+}
+
+/// Safe, UI-ready representation of a Razorpay payment attempt.
+class CustomerPaymentAttempt {
+  final String id;
+  final String tenantId;
+  final String bookingId;
+  final String customerId;
+  final double amount;
+  final int amountPaise;
+  final String currency;
+  final String gateway;
+  final String gatewayMode;
+  final String status;
+  final String paymentType;
+  final String razorpayOrderId;
+  final String razorpayPaymentId;
+  final String failureReason;
+  final String failureCode;
+  final DateTime? createdAt;
+  final DateTime? updatedAt;
+
+  const CustomerPaymentAttempt({
+    required this.id,
+    required this.tenantId,
+    required this.bookingId,
+    required this.customerId,
+    required this.amount,
+    required this.amountPaise,
+    required this.currency,
+    required this.gateway,
+    required this.gatewayMode,
+    required this.status,
+    required this.paymentType,
+    required this.razorpayOrderId,
+    required this.razorpayPaymentId,
+    required this.failureReason,
+    required this.failureCode,
+    required this.createdAt,
+    required this.updatedAt,
+  });
+
+  factory CustomerPaymentAttempt.fromFirestore({
+    required String id,
+    required Map<String, dynamic> data,
+  }) {
+    return CustomerPaymentAttempt(
+      id: id,
+      tenantId: data['tenantId']?.toString() ?? '',
+      bookingId: data['bookingId']?.toString() ?? '',
+      customerId: data['customerId']?.toString() ?? '',
+      amount: _dynamicDouble(data['amount']),
+      amountPaise: _dynamicInt(data['amountPaise']),
+      currency: data['currency']?.toString() ?? 'INR',
+      gateway: data['gateway']?.toString() ?? '',
+      gatewayMode: data['gatewayMode']?.toString() ?? '',
+      status: _normalizedString(data['status']),
+      paymentType: _normalizedString(data['paymentType']),
+      razorpayOrderId: data['razorpayOrderId']?.toString() ?? '',
+      razorpayPaymentId: data['razorpayPaymentId']?.toString() ?? '',
+      failureReason: data['failureReason']?.toString() ??
+          data['errorMessage']?.toString() ??
+          data['reason']?.toString() ??
+          '',
+      failureCode: data['failureCode']?.toString() ??
+          data['errorCode']?.toString() ??
+          '',
+      createdAt: _dynamicDate(data['createdAt']),
+      updatedAt: _dynamicDate(data['updatedAt']),
+    );
+  }
+
+  bool get isSuccessful {
+    final value = status.replaceAll('-', '_').toLowerCase();
+    return value == 'success' ||
+        value == 'successful' ||
+        value == 'paid' ||
+        value == 'captured' ||
+        value == 'verified';
+  }
+
+  bool get isFailed {
+    final value = status.replaceAll('-', '_').toLowerCase();
+    return value == 'failed' ||
+        value == 'failure' ||
+        value == 'payment_failed';
+  }
+
+  bool get isCancelled {
+    final value = status.replaceAll('-', '_').toLowerCase();
+    return value == 'cancelled' ||
+        value == 'canceled' ||
+        value == 'closed';
+  }
+
+  bool get isPending {
+    final value = status.replaceAll('-', '_').toLowerCase();
+    return value == 'created' ||
+        value == 'pending' ||
+        value == 'processing' ||
+        value == 'initiated' ||
+        value == 'authorized';
+  }
+
+  bool get hasGatewayReference =>
+      razorpayOrderId.trim().isNotEmpty ||
+      razorpayPaymentId.trim().isNotEmpty;
+
+  String get primaryReference =>
+      razorpayPaymentId.trim().isNotEmpty
+          ? razorpayPaymentId.trim()
+          : razorpayOrderId.trim();
+
+  DateTime get effectiveDate =>
+      updatedAt ?? createdAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+}
+
+/// Unified customer-facing transaction item. It is a presentation model only;
+/// the underlying source remains booking/payments/paymentAttempts.
+class CustomerTransactionItem {
+  final CustomerTransactionKind kind;
+  final String id;
+  final String tenantId;
+  final String bookingId;
+  final String customerId;
+  final double amount;
+  final String currency;
+  final String status;
+  final String paymentMethod;
+  final String gateway;
+  final String? razorpayOrderId;
+  final String? razorpayPaymentId;
+  final String? razorpayRefundId;
+  final String? transactionReference;
+  final String? failureReason;
+  final String? failureCode;
+  final String? paymentType;
+  final String description;
+  final DateTime date;
+  final DateTime? createdAt;
+  final Booking booking;
+  final PaymentTransaction? payment;
+  final CustomerPaymentAttempt? attempt;
+
+  const CustomerTransactionItem({
+    required this.kind,
+    required this.id,
+    required this.tenantId,
+    required this.bookingId,
+    required this.customerId,
+    required this.amount,
+    required this.currency,
+    required this.status,
+    required this.paymentMethod,
+    required this.gateway,
+    required this.razorpayOrderId,
+    required this.razorpayPaymentId,
+    required this.razorpayRefundId,
+    required this.transactionReference,
+    required this.failureReason,
+    required this.failureCode,
+    required this.paymentType,
+    required this.description,
+    required this.date,
+    required this.createdAt,
+    required this.booking,
+    required this.payment,
+    required this.attempt,
+  });
+
+  factory CustomerTransactionItem.fromPayment({
+    required PaymentTransaction payment,
+    required Booking booking,
+  }) {
+    final isRefund = payment.isRefund;
+    final amount = isRefund
+        ? (payment.refundAmount > 0
+            ? payment.refundAmount
+            : payment.amount)
+        : payment.amount;
+
+    return CustomerTransactionItem(
+      kind: isRefund
+          ? CustomerTransactionKind.refund
+          : CustomerTransactionKind.payment,
+      id: payment.paymentId,
+      tenantId: payment.tenantId,
+      bookingId: payment.bookingId,
+      customerId: payment.customerId,
+      amount: amount,
+      currency: payment.currency,
+      status: _paymentTransactionStatusLabel(payment),
+      paymentMethod: _paymentMethodLabel(payment.method),
+      gateway: payment.gateway ?? '',
+      razorpayOrderId: payment.razorpayOrderId,
+      razorpayPaymentId: payment.razorpayPaymentId,
+      razorpayRefundId: _readRefundId(payment),
+      transactionReference: payment.transactionReference,
+      failureReason: null,
+      failureCode: null,
+      paymentType: null,
+      description: isRefund ? 'Refund processed' : 'Payment received',
+      date: payment.paymentDate ??
+          payment.updatedAt ??
+          payment.createdAt ??
+          DateTime.fromMillisecondsSinceEpoch(0),
+      createdAt: payment.createdAt,
+      booking: booking,
+      payment: payment,
+      attempt: null,
+    );
+  }
+
+  factory CustomerTransactionItem.fromAttempt({
+    required CustomerPaymentAttempt attempt,
+    required Booking booking,
+  }) {
+    return CustomerTransactionItem(
+      kind: CustomerTransactionKind.paymentAttempt,
+      id: attempt.id,
+      tenantId: attempt.tenantId,
+      bookingId: attempt.bookingId,
+      customerId: attempt.customerId,
+      amount: attempt.amount,
+      currency: attempt.currency,
+      status: _attemptStatusLabel(attempt),
+      paymentMethod: attempt.gateway.isEmpty ? 'Payment' : attempt.gateway,
+      gateway: attempt.gateway,
+      razorpayOrderId: attempt.razorpayOrderId.isEmpty
+          ? null
+          : attempt.razorpayOrderId,
+      razorpayPaymentId: attempt.razorpayPaymentId.isEmpty
+          ? null
+          : attempt.razorpayPaymentId,
+      razorpayRefundId: null,
+      transactionReference: null,
+      failureReason:
+          attempt.failureReason.isEmpty ? null : attempt.failureReason,
+      failureCode: attempt.failureCode.isEmpty ? null : attempt.failureCode,
+      paymentType:
+          attempt.paymentType.isEmpty ? null : attempt.paymentType,
+      description: _attemptDescription(attempt),
+      date: attempt.effectiveDate,
+      createdAt: attempt.createdAt,
+      booking: booking,
+      payment: null,
+      attempt: attempt,
+    );
+  }
+
+  bool get isPayment => kind == CustomerTransactionKind.payment;
+  bool get isRefund => kind == CustomerTransactionKind.refund;
+  bool get isAttempt => kind == CustomerTransactionKind.paymentAttempt;
+}
+
+/// Paginated customer transaction result.
+class CustomerTransactionPage {
+  final List<CustomerTransactionItem> items;
+  final bool hasMore;
+  final DocumentSnapshot<Map<String, dynamic>>? nextBookingCursor;
+
+  const CustomerTransactionPage({
+    required this.items,
+    required this.hasMore,
+    required this.nextBookingCursor,
+  });
+}
+
+String _normalizedString(dynamic value) =>
+    value?.toString().trim().toLowerCase() ?? '';
+
+double _dynamicDouble(dynamic value) {
+  if (value is num) return value.toDouble();
+  return double.tryParse(value?.toString() ?? '') ?? 0.0;
+}
+
+int _dynamicInt(dynamic value) {
+  if (value is num) return value.toInt();
+  return int.tryParse(value?.toString() ?? '') ?? 0;
+}
+
+DateTime? _dynamicDate(dynamic value) {
+  if (value is Timestamp) return value.toDate();
+  if (value is DateTime) return value;
+  if (value is int) {
+    return DateTime.fromMillisecondsSinceEpoch(value);
+  }
+  if (value is String) return DateTime.tryParse(value);
+  return null;
+}
+
+String _paymentTransactionStatusLabel(PaymentTransaction payment) {
+  if (payment.isRefund) {
+    return 'refunded';
+  }
+  if (payment.isSuccessful) {
+    return 'success';
+  }
+  return payment.status.toString().split('.').last;
+}
+
+String _paymentMethodLabel(PaymentMethodType method) {
+  switch (method) {
+    case PaymentMethodType.razorpay:
+      return 'Razorpay';
+    case PaymentMethodType.cash:
+      return 'Cash';
+    case PaymentMethodType.upi:
+      return 'UPI';
+    case PaymentMethodType.card:
+      return 'Card';
+    case PaymentMethodType.bankTransfer:
+      return 'Bank Transfer';
+    case PaymentMethodType.other:
+      return 'Other';
+  }
+}
+
+String _attemptStatusLabel(CustomerPaymentAttempt attempt) {
+  if (attempt.isSuccessful) return 'success';
+  if (attempt.isFailed) return 'failed';
+  if (attempt.isCancelled) return 'cancelled';
+  if (attempt.isPending) return 'pending';
+  return attempt.status.isEmpty ? 'pending' : attempt.status;
+}
+
+String _attemptDescription(CustomerPaymentAttempt attempt) {
+  if (attempt.isFailed) {
+    return attempt.failureReason.isEmpty
+        ? 'Payment failed'
+        : 'Payment failed: ${attempt.failureReason}';
+  }
+  if (attempt.isCancelled) return 'Payment cancelled';
+  if (attempt.isSuccessful) return 'Payment successful';
+  return 'Payment attempt ${attempt.status.isEmpty ? 'pending' : attempt.status}';
+}
+
+String? _readRefundId(PaymentTransaction payment) {
+  // PaymentTransaction does not currently expose a refundId field. Refund
+  // gateway references are therefore read from gatewayTransactionId when the
+  // transaction is marked as a refund.
+  if (!payment.isRefund) return null;
+  return payment.gatewayTransactionId;
 }
 
 class _AvailabilityRange {
