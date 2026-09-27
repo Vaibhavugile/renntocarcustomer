@@ -51,6 +51,14 @@ class _PaymentScreenState extends State<PaymentScreen> {
 
   double? _activePaymentAmount;
 
+  // Selected payment amount for this checkout.
+  // null = Pay Remaining.
+  double? _requestedPaymentAmount;
+
+  // Customer's preferred Razorpay payment category.
+  // Razorpay still decides the methods actually available at checkout.
+  String _selectedPaymentMethod = 'UPI';
+
   // ============================================================
   // SERVICES
   // ============================================================
@@ -214,7 +222,9 @@ class _PaymentScreenState extends State<PaymentScreen> {
   // START RAZORPAY PAYMENT
   // ============================================================
 
-  Future<void> _completePayment() async {
+  Future<void> _completePayment({
+    double? requestedAmount,
+  }) async {
     if (_isProcessing ||
         _isRefreshing) {
       return;
@@ -226,6 +236,8 @@ class _PaymentScreenState extends State<PaymentScreen> {
 
     setState(() {
       _isProcessing = true;
+      _requestedPaymentAmount =
+          requestedAmount;
     });
 
     try {
@@ -337,13 +349,25 @@ class _PaymentScreenState extends State<PaymentScreen> {
         'createRazorpayOrder',
       );
 
-      final result =
-          await callable.call({
+      final callData =
+          <String, dynamic>{
         'tenantId':
             _tenantId,
         'bookingId':
             latestBooking.bookingId,
-      });
+      };
+
+      // Omit the field for Pay Remaining.
+      // Send it only for Pay Other Amount.
+      if (requestedAmount != null) {
+        callData['requestedAmount'] =
+            requestedAmount;
+      }
+
+      final result =
+          await callable.call(
+        callData,
+      );
 
       final response =
           Map<String, dynamic>.from(
@@ -1002,6 +1026,12 @@ class _PaymentScreenState extends State<PaymentScreen> {
     setState(() {
       _isProcessing =
           false;
+      _activeOrderId =
+          null;
+      _activePaymentAttemptId =
+          null;
+      _activePaymentAmount =
+          null;
     });
 
     _showMessage(
@@ -1498,6 +1528,14 @@ class _PaymentScreenState extends State<PaymentScreen> {
                     const SizedBox(
                       height: 20,
                     ),
+                    if (outstanding > 0.009)
+                      _buildPaymentOptions(
+                        outstanding,
+                      ),
+                    if (outstanding > 0.009)
+                      const SizedBox(
+                        height: 20,
+                      ),
                     _buildPaymentMethod(),
                     const SizedBox(
                       height: 20,
@@ -2079,25 +2117,31 @@ class _PaymentScreenState extends State<PaymentScreen> {
     );
   }
 
+
   // ============================================================
-  // PAYMENT METHOD
+  // PAYMENT AMOUNT OPTIONS
   // ============================================================
 
-  Widget _buildPaymentMethod() {
+  Widget _buildPaymentOptions(
+    double outstanding,
+  ) {
+    final selected =
+        _requestedPaymentAmount;
+
+    final isRemainingSelected =
+        selected == null;
+
+    final isCustomSelected =
+        selected != null;
+
     return Container(
-      padding:
-          const EdgeInsets.all(
-        18,
-      ),
-      decoration:
-          BoxDecoration(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
         color: card,
         borderRadius:
-            BorderRadius.circular(
-          20,
-        ),
-        border:
-            Border.all(
+            BorderRadius.circular(20),
+        border: Border.all(
           color: border,
         ),
       ),
@@ -2106,94 +2150,1242 @@ class _PaymentScreenState extends State<PaymentScreen> {
             CrossAxisAlignment.start,
         children: [
           const Text(
-            'Payment method',
-            style:
-                TextStyle(
-              fontFamily:
-                  'Manrope',
+            'Choose payment amount',
+            style: TextStyle(
+              fontFamily: 'Manrope',
               fontSize: 16,
-              fontWeight:
-                  FontWeight.w800,
-              color:
-                  heading,
+              fontWeight: FontWeight.w800,
+              color: heading,
             ),
           ),
-          const SizedBox(
-            height: 14,
+          const SizedBox(height: 5),
+          Text(
+            'You can pay the full remaining balance or any smaller amount.',
+            style: const TextStyle(
+              fontFamily: 'Manrope',
+              fontSize: 11,
+              height: 1.4,
+              color: body,
+              fontWeight: FontWeight.w500,
+            ),
           ),
-          Container(
+          const SizedBox(height: 14),
+
+          _paymentAmountChoice(
+            icon:
+                Icons.account_balance_wallet_rounded,
+            title: 'Pay remaining',
+            subtitle:
+                'Pay the complete outstanding balance',
+            amount:
+                _formatAmount(outstanding),
+            selected:
+                isRemainingSelected,
+            onTap: () {
+              if (!mounted) return;
+
+              setState(() {
+                _requestedPaymentAmount =
+                    null;
+              });
+            },
+          ),
+
+          const SizedBox(height: 10),
+
+          _paymentAmountChoice(
+            icon:
+                Icons.edit_rounded,
+            title: 'Pay other amount',
+            subtitle:
+                'Choose an amount up to the balance',
+            amount:
+                isCustomSelected
+                    ? _formatAmount(selected)
+                    : 'Choose',
+            selected:
+                isCustomSelected,
+            onTap:
+                _showCustomAmountDialog,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _paymentAmountChoice({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required String amount,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap:
+          _isProcessing
+              ? null
+              : onTap,
+      borderRadius:
+          BorderRadius.circular(16),
+      child: AnimatedContainer(
+        duration:
+            const Duration(
+          milliseconds: 180,
+        ),
+        padding:
+            const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color:
+              selected
+                  ? softAccent
+                  : background,
+          borderRadius:
+              BorderRadius.circular(16),
+          border: Border.all(
+            color:
+                selected
+                    ? accent
+                    : border,
+            width:
+                selected ? 1.3 : 1,
+          ),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 42,
+              height: 42,
+              decoration:
+                  BoxDecoration(
+                color:
+                    selected
+                        ? primary
+                        : Colors.white,
+                borderRadius:
+                    BorderRadius.circular(13),
+              ),
+              child: Icon(
+                icon,
+                size: 20,
+                color:
+                    selected
+                        ? Colors.white
+                        : primary,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment:
+                    CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style:
+                        const TextStyle(
+                      fontFamily:
+                          'Manrope',
+                      fontSize: 13,
+                      fontWeight:
+                          FontWeight.w800,
+                      color:
+                          heading,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    subtitle,
+                    style:
+                        const TextStyle(
+                      fontFamily:
+                          'Manrope',
+                      fontSize: 10,
+                      color:
+                          body,
+                      fontWeight:
+                          FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.end,
+              children: [
+                Text(
+                  amount,
+                  style:
+                      const TextStyle(
+                    fontFamily:
+                        'Manrope',
+                    fontSize: 13,
+                    fontWeight:
+                        FontWeight.w900,
+                    color:
+                        heading,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Icon(
+                  selected
+                      ? Icons
+                          .radio_button_checked_rounded
+                      : Icons
+                          .radio_button_off_rounded,
+                  size: 19,
+                  color:
+                      selected
+                          ? primary
+                          : muted,
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ============================================================
+  // PAYMENT AMOUNT SHEET
+  // ============================================================
+
+  Future<void> _showPaymentAmountSheet() async {
+    if (_isProcessing ||
+        _isRefreshing) {
+      return;
+    }
+
+    final booking =
+        _activeBooking;
+
+    final outstanding =
+        _outstandingAmount;
+
+    if (outstanding <= 0.009) {
+      _showMessage(
+        'There is no outstanding amount.',
+      );
+      return;
+    }
+
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor:
+          Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Container(
             padding:
-                const EdgeInsets.all(
-              14,
+                const EdgeInsets.fromLTRB(
+              20,
+              10,
+              20,
+              20,
             ),
             decoration:
-                BoxDecoration(
-              color:
-                  softAccent,
+                const BoxDecoration(
+              color: Colors.white,
               borderRadius:
-                  BorderRadius.circular(
-                15,
-              ),
-              border:
-                  Border.all(
-                color:
-                    accent.withOpacity(
-                  0.18,
-                ),
+                  BorderRadius.vertical(
+                top: Radius.circular(28),
               ),
             ),
-            child: const Row(
+            child: Column(
+              mainAxisSize:
+                  MainAxisSize.min,
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
               children: [
-                Icon(
-                  Icons
-                      .account_balance_wallet_outlined,
-                  color:
-                      primary,
+                Center(
+                  child: Container(
+                    width: 42,
+                    height: 4,
+                    decoration:
+                        BoxDecoration(
+                      color:
+                          border,
+                      borderRadius:
+                          BorderRadius.circular(
+                        10,
+                      ),
+                    ),
+                  ),
                 ),
-                SizedBox(
-                  width: 12,
+                const SizedBox(height: 20),
+                const Text(
+                  'Make a payment',
+                  style: TextStyle(
+                    fontFamily:
+                        'Manrope',
+                    fontSize: 20,
+                    fontWeight:
+                        FontWeight.w900,
+                    color:
+                        heading,
+                  ),
                 ),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment:
-                        CrossAxisAlignment.start,
+                const SizedBox(height: 5),
+                Text(
+                  'Booking #${booking.bookingId}',
+                  style: const TextStyle(
+                    fontFamily:
+                        'Manrope',
+                    fontSize: 11,
+                    color:
+                        muted,
+                    fontWeight:
+                        FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 18),
+
+                Container(
+                  width:
+                      double.infinity,
+                  padding:
+                      const EdgeInsets.all(16),
+                  decoration:
+                      BoxDecoration(
+                    color:
+                        softAccent,
+                    borderRadius:
+                        BorderRadius.circular(
+                      16,
+                    ),
+                  ),
+                  child: Row(
                     children: [
-                      Text(
-                        'Razorpay Secure Payment',
-                        style:
-                            TextStyle(
-                          fontFamily:
-                              'Manrope',
-                          fontSize: 14,
-                          fontWeight:
-                              FontWeight.w800,
-                          color:
-                              heading,
+                      const Icon(
+                        Icons
+                            .account_balance_wallet_rounded,
+                        color:
+                            primary,
+                      ),
+                      const SizedBox(width: 11),
+                      const Expanded(
+                        child: Text(
+                          'Outstanding balance',
+                          style:
+                              TextStyle(
+                            fontFamily:
+                                'Manrope',
+                            fontSize:
+                                12,
+                            fontWeight:
+                                FontWeight.w700,
+                            color:
+                                body,
+                          ),
                         ),
                       ),
-                      SizedBox(
-                        height: 3,
-                      ),
                       Text(
-                        'Pay securely using UPI, cards, net banking and supported wallets.',
+                        _formatAmount(
+                          outstanding,
+                        ),
                         style:
-                            TextStyle(
+                            const TextStyle(
                           fontFamily:
                               'Manrope',
-                          fontSize: 11,
+                          fontSize:
+                              17,
+                          fontWeight:
+                              FontWeight.w900,
                           color:
-                              body,
+                              heading,
                         ),
                       ),
                     ],
                   ),
                 ),
-                Icon(
-                  Icons
-                      .verified_rounded,
+
+                const SizedBox(height: 14),
+
+                _sheetAction(
+                  icon:
+                      Icons
+                          .check_circle_outline_rounded,
+                  title:
+                      'Pay remaining',
+                  subtitle:
+                      'Pay ${_formatAmount(outstanding)} now',
+                  onTap: () {
+                    Navigator.pop(
+                      sheetContext,
+                    );
+                    _completePayment();
+                  },
+                ),
+
+                const SizedBox(height: 10),
+
+                _sheetAction(
+                  icon:
+                      Icons
+                          .edit_outlined,
+                  title:
+                      'Pay other amount',
+                  subtitle:
+                      'Enter any amount up to ${_formatAmount(outstanding)}',
+                  onTap: () {
+                    Navigator.pop(
+                      sheetContext,
+                    );
+                    _showCustomAmountDialog();
+                  },
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _sheetAction({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius:
+          BorderRadius.circular(16),
+      child: Container(
+        width:
+            double.infinity,
+        padding:
+            const EdgeInsets.all(15),
+        decoration:
+            BoxDecoration(
+          color:
+              background,
+          borderRadius:
+              BorderRadius.circular(16),
+          border:
+              Border.all(
+            color:
+                border,
+          ),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 44,
+              height: 44,
+              decoration:
+                  BoxDecoration(
+                color:
+                    softAccent,
+                borderRadius:
+                    BorderRadius.circular(13),
+              ),
+              child: Icon(
+                icon,
+                color:
+                    primary,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment:
+                    CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style:
+                        const TextStyle(
+                      fontFamily:
+                          'Manrope',
+                      fontSize: 13,
+                      fontWeight:
+                          FontWeight.w800,
+                      color:
+                          heading,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    subtitle,
+                    style:
+                        const TextStyle(
+                      fontFamily:
+                          'Manrope',
+                      fontSize: 10,
+                      color:
+                          body,
+                      fontWeight:
+                          FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Icon(
+              Icons
+                  .arrow_forward_ios_rounded,
+              size: 15,
+              color:
+                  muted,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ============================================================
+  // CUSTOM PAYMENT AMOUNT DIALOG
+  // ============================================================
+
+  Future<void> _showCustomAmountDialog() async {
+    if (_isProcessing ||
+        _isRefreshing) {
+      return;
+    }
+
+    final outstanding =
+        _outstandingAmount;
+
+    if (outstanding <= 0.009) {
+      _showMessage(
+        'There is no outstanding amount.',
+      );
+      return;
+    }
+
+    final controller =
+        TextEditingController(
+      text:
+          _requestedPaymentAmount !=
+                  null
+              ? _requestedPaymentAmount!
+                  .toStringAsFixed(0)
+              : '',
+    );
+
+    final formKey =
+        GlobalKey<FormState>();
+
+    final result =
+        await showDialog<double>(
+      context: context,
+      barrierDismissible:
+          false,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor:
+              Colors.white,
+          shape:
+              RoundedRectangleBorder(
+            borderRadius:
+                BorderRadius.circular(
+              24,
+            ),
+          ),
+          title:
+              const Text(
+            'Pay other amount',
+            style:
+                TextStyle(
+              fontFamily:
+                  'Manrope',
+              fontSize: 19,
+              fontWeight:
+                  FontWeight.w900,
+              color:
+                  heading,
+            ),
+          ),
+          content:
+              Form(
+            key:
+                formKey,
+            child:
+                Column(
+              mainAxisSize:
+                  MainAxisSize.min,
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Enter an amount between ₹1 and ${_formatAmount(outstanding)}.',
+                  style:
+                      const TextStyle(
+                    fontFamily:
+                        'Manrope',
+                    fontSize: 11,
+                    height: 1.4,
+                    color:
+                        body,
+                    fontWeight:
+                        FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(
+                  height: 16,
+                ),
+                TextFormField(
+                  controller:
+                      controller,
+                  autofocus:
+                      true,
+                  keyboardType:
+                      const TextInputType
+                          .numberWithOptions(
+                    decimal: true,
+                  ),
+                  textInputAction:
+                      TextInputAction.done,
+                  style:
+                      const TextStyle(
+                    fontFamily:
+                        'Manrope',
+                    fontSize: 20,
+                    fontWeight:
+                        FontWeight.w800,
+                    color:
+                        heading,
+                  ),
+                  decoration:
+                      InputDecoration(
+                    prefixText:
+                        '₹ ',
+                    prefixStyle:
+                        const TextStyle(
+                      fontFamily:
+                          'Manrope',
+                      fontSize: 20,
+                      fontWeight:
+                          FontWeight.w800,
+                      color:
+                          heading,
+                    ),
+                    hintText:
+                        '0',
+                    filled:
+                        true,
+                    fillColor:
+                        background,
+                    border:
+                        OutlineInputBorder(
+                      borderRadius:
+                          BorderRadius.circular(
+                        15,
+                      ),
+                      borderSide:
+                          const BorderSide(
+                        color:
+                            border,
+                      ),
+                    ),
+                    enabledBorder:
+                        OutlineInputBorder(
+                      borderRadius:
+                          BorderRadius.circular(
+                        15,
+                      ),
+                      borderSide:
+                          const BorderSide(
+                        color:
+                            border,
+                      ),
+                    ),
+                    focusedBorder:
+                        OutlineInputBorder(
+                      borderRadius:
+                          BorderRadius.circular(
+                        15,
+                      ),
+                      borderSide:
+                          const BorderSide(
+                        color:
+                            primary,
+                        width:
+                            1.4,
+                      ),
+                    ),
+                  ),
+                  validator:
+                      (value) {
+                    final amount =
+                        double.tryParse(
+                      (value ?? '')
+                          .trim(),
+                    );
+
+                    if (amount ==
+                            null ||
+                        !amount
+                            .isFinite) {
+                      return 'Enter a valid amount.';
+                    }
+
+                    if (amount <= 0) {
+                      return 'Amount must be greater than ₹0.';
+                    }
+
+                    if (amount >
+                        outstanding +
+                            0.01) {
+                      return 'Amount cannot exceed ${_formatAmount(outstanding)}.';
+                    }
+
+                    return null;
+                  },
+                  onFieldSubmitted:
+                      (_) {
+                    if (formKey
+                        .currentState!
+                        .validate()) {
+                      final amount =
+                          double.parse(
+                        controller
+                            .text
+                            .trim(),
+                      );
+
+                      Navigator.pop(
+                        dialogContext,
+                        double.parse(
+                          amount
+                              .toStringAsFixed(
+                            2,
+                          ),
+                        ),
+                      );
+                    }
+                  },
+                ),
+              ],
+            ),
+          ),
+          actionsPadding:
+              const EdgeInsets.fromLTRB(
+            20,
+            0,
+            20,
+            18,
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.pop(
+                  dialogContext,
+                );
+              },
+              child:
+                  const Text(
+                'Cancel',
+                style:
+                    TextStyle(
+                  fontFamily:
+                      'Manrope',
+                  fontWeight:
+                      FontWeight.w700,
                   color:
-                      primary,
-                  size: 21,
+                      body,
+                ),
+              ),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                if (!formKey
+                    .currentState!
+                    .validate()) {
+                  return;
+                }
+
+                final amount =
+                    double.parse(
+                  controller
+                      .text
+                      .trim(),
+                );
+
+                Navigator.pop(
+                  dialogContext,
+                  double.parse(
+                    amount
+                        .toStringAsFixed(
+                      2,
+                    ),
+                  ),
+                );
+              },
+              style:
+                  ElevatedButton.styleFrom(
+                backgroundColor:
+                    primary,
+                foregroundColor:
+                    Colors.white,
+                elevation:
+                    0,
+                shape:
+                    RoundedRectangleBorder(
+                  borderRadius:
+                      BorderRadius.circular(
+                    13,
+                  ),
+                ),
+              ),
+              child:
+                  const Text(
+                'Continue',
+                style:
+                    TextStyle(
+                  fontFamily:
+                      'Manrope',
+                  fontWeight:
+                      FontWeight.w800,
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    controller.dispose();
+
+    if (!mounted ||
+        result == null) {
+      return;
+    }
+
+    if (result <= 0 ||
+        result >
+            _outstandingAmount +
+                0.01) {
+      _showMessage(
+        'Please enter a valid amount.',
+        error: true,
+      );
+      return;
+    }
+
+    setState(() {
+      _requestedPaymentAmount =
+          result;
+    });
+
+    await _showPaymentConfirmation(
+      result,
+    );
+  }
+
+  // ============================================================
+  // PAYMENT CONFIRMATION
+  // ============================================================
+
+  Future<void> _showPaymentConfirmation(
+    double amount,
+  ) async {
+    final outstanding =
+        _outstandingAmount;
+
+    final confirmed =
+        await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor:
+              Colors.white,
+          shape:
+              RoundedRectangleBorder(
+            borderRadius:
+                BorderRadius.circular(
+              24,
+            ),
+          ),
+          title:
+              const Text(
+            'Confirm payment',
+            style:
+                TextStyle(
+              fontFamily:
+                  'Manrope',
+              fontSize: 19,
+              fontWeight:
+                  FontWeight.w900,
+              color:
+                  heading,
+            ),
+          ),
+          content:
+              Column(
+            mainAxisSize:
+                MainAxisSize.min,
+            children: [
+              _confirmRow(
+                'Payment now',
+                _formatAmount(amount),
+              ),
+              const SizedBox(
+                height: 10,
+              ),
+              _confirmRow(
+                'Balance after payment',
+                _formatAmount(
+                  (outstanding -
+                          amount)
+                      .clamp(
+                    0,
+                    double.infinity,
+                  ),
+                ),
+              ),
+              const SizedBox(
+                height: 16,
+              ),
+              const Text(
+                'The final amount is validated again by the backend before the Razorpay order is created.',
+                style:
+                    TextStyle(
+                  fontFamily:
+                      'Manrope',
+                  fontSize: 10,
+                  height: 1.4,
+                  color:
+                      body,
+                  fontWeight:
+                      FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+          actionsPadding:
+              const EdgeInsets.fromLTRB(
+            20,
+            0,
+            20,
+            18,
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.pop(
+                  dialogContext,
+                  false,
+                );
+              },
+              child:
+                  const Text(
+                'Cancel',
+                style:
+                    TextStyle(
+                  fontFamily:
+                      'Manrope',
+                  fontWeight:
+                      FontWeight.w700,
+                  color:
+                      body,
+                ),
+              ),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(
+                  dialogContext,
+                  true,
+                );
+              },
+              style:
+                  ElevatedButton.styleFrom(
+                backgroundColor:
+                    primary,
+                foregroundColor:
+                    Colors.white,
+                elevation:
+                    0,
+                shape:
+                    RoundedRectangleBorder(
+                  borderRadius:
+                      BorderRadius.circular(
+                    13,
+                  ),
+                ),
+              ),
+              child:
+                  const Text(
+                'Pay with Razorpay',
+                style:
+                    TextStyle(
+                  fontFamily:
+                      'Manrope',
+                  fontWeight:
+                      FontWeight.w800,
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true ||
+        !mounted) {
+      return;
+    }
+
+    await _completePayment(
+      requestedAmount:
+          amount,
+    );
+  }
+
+  Widget _confirmRow(
+    String label,
+    String value,
+  ) {
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            label,
+            style:
+                const TextStyle(
+              fontFamily:
+                  'Manrope',
+              fontSize: 11,
+              color:
+                  body,
+              fontWeight:
+                  FontWeight.w600,
+            ),
+          ),
+        ),
+        Text(
+          value,
+          style:
+              const TextStyle(
+            fontFamily:
+                'Manrope',
+            fontSize: 14,
+            color:
+                heading,
+            fontWeight:
+                FontWeight.w900,
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ============================================================
+  // PAYMENT METHOD
+  // ============================================================
+
+  Widget _buildPaymentMethod() {
+    const methods = <Map<String, dynamic>>[
+      {
+        'title': 'UPI',
+        'subtitle': 'Google Pay, PhonePe, Paytm & other UPI apps',
+        'icon': Icons.account_balance_wallet_rounded,
+      },
+      {
+        'title': 'Scan QR',
+        'subtitle': 'Use a UPI QR option when provided by checkout',
+        'icon': Icons.qr_code_scanner_rounded,
+      },
+      {
+        'title': 'Cards',
+        'subtitle': 'Credit, debit and supported RuPay cards',
+        'icon': Icons.credit_card_rounded,
+      },
+      {
+        'title': 'Net Banking',
+        'subtitle': 'Pay through your supported bank',
+        'icon': Icons.account_balance_rounded,
+      },
+      {
+        'title': 'Wallets',
+        'subtitle': 'Supported wallets available in Razorpay',
+        'icon': Icons.wallet_rounded,
+      },
+      {
+        'title': 'EMI / Pay Later',
+        'subtitle': 'Only when enabled and eligible at checkout',
+        'icon': Icons.payments_outlined,
+      },
+    ];
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: card,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Choose payment method',
+            style: TextStyle(
+              fontFamily: 'Manrope',
+              fontSize: 16,
+              fontWeight: FontWeight.w800,
+              color: heading,
+            ),
+          ),
+          const SizedBox(height: 5),
+          const Text(
+            'Select your preferred method. Razorpay will show the methods currently available for this transaction.',
+            style: TextStyle(
+              fontFamily: 'Manrope',
+              fontSize: 10.5,
+              height: 1.4,
+              color: body,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: 14),
+          ...methods.map((method) {
+            final title = method['title'] as String;
+            final selected = _selectedPaymentMethod == title;
+            final icon = method['icon'] as IconData;
+            final subtitle = method['subtitle'] as String;
+
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 9),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(15),
+                onTap: _isProcessing
+                    ? null
+                    : () {
+                        setState(() {
+                          _selectedPaymentMethod = title;
+                        });
+                      },
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 160),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: selected ? softAccent : background,
+                    borderRadius: BorderRadius.circular(15),
+                    border: Border.all(
+                      color: selected ? accent : border,
+                      width: selected ? 1.3 : 1,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color: selected ? primary : Colors.white,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Icon(
+                          icon,
+                          size: 19,
+                          color: selected ? Colors.white : primary,
+                        ),
+                      ),
+                      const SizedBox(width: 11),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              title,
+                              style: const TextStyle(
+                                fontFamily: 'Manrope',
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w800,
+                                color: heading,
+                              ),
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              subtitle,
+                              style: const TextStyle(
+                                fontFamily: 'Manrope',
+                                fontSize: 9.5,
+                                height: 1.3,
+                                color: body,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Icon(
+                        selected
+                            ? Icons.radio_button_checked_rounded
+                            : Icons.radio_button_off_rounded,
+                        size: 20,
+                        color: selected ? primary : muted,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSecurePaymentNotice() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: border),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 38,
+            height: 38,
+            decoration: BoxDecoration(
+              color: softAccent,
+              borderRadius: BorderRadius.circular(11),
+            ),
+            child: const Icon(
+              Icons.verified_user_rounded,
+              color: primary,
+              size: 19,
+            ),
+          ),
+          const SizedBox(width: 10),
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Secure Razorpay checkout',
+                  style: TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w900,
+                    color: heading,
+                  ),
+                ),
+                SizedBox(height: 3),
+                Text(
+                  'Your payment is verified on the server before the booking balance is updated. Your Razorpay secret key is never stored in the app.',
+                  style: TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 9.5,
+                    height: 1.4,
+                    color: body,
+                    fontWeight: FontWeight.w500,
+                  ),
                 ),
               ],
             ),
@@ -2351,7 +3543,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
                             _isRefreshing ||
                             isPaid)
                         ? null
-                        : _completePayment,
+                        : _showPaymentAmountSheet,
                 style:
                     ElevatedButton.styleFrom(
                   backgroundColor:
@@ -2391,7 +3583,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
                         : Text(
                             isPaid
                                 ? 'Payment Completed'
-                                : 'Pay with Razorpay',
+                                : 'Choose Payment Amount',
                             style:
                                 const TextStyle(
                               fontFamily:
@@ -2501,8 +3693,10 @@ class PaymentSuccessScreen
                 height: 10,
               ),
 
-              const Text(
-                'Your payment has been verified and your booking is confirmed.',
+              Text(
+                booking.balanceAmount <= 0.009
+                    ? 'Your payment has been verified and your booking is confirmed.'
+                    : 'Your payment has been verified and your remaining balance has been updated.',
                 textAlign:
                     TextAlign.center,
                 style:
@@ -2625,7 +3819,9 @@ class PaymentSuccessScreen
 
           _row(
             'Status',
-            'Confirmed',
+            booking.balanceAmount <= 0.009
+                ? 'Confirmed'
+                : 'Partially Paid',
           ),
 
           const SizedBox(
@@ -2636,6 +3832,16 @@ class PaymentSuccessScreen
             'Paid',
             '₹${booking.paidAmount.toStringAsFixed(0)}',
           ),
+
+          if (booking.balanceAmount > 0.009) ...[
+            const SizedBox(
+              height: 12,
+            ),
+            _row(
+              'Remaining',
+              '₹${booking.balanceAmount.toStringAsFixed(0)}',
+            ),
+          ],
         ],
       ),
     );

@@ -53,18 +53,19 @@ const {
 // RAZORPAY MULTI-TENANT PAYMENT
 // ============================================================
 //
-// The actual Razorpay implementation is inside:
+// Actual Razorpay implementation:
+//     functions/razorpay.js
 //
-// functions/razorpay.js
-//
-// razorpay.js handles:
+// Handles:
 //
 // - Tenant Razorpay configuration
-// - Secret Manager
+// - Tenant-specific Secret Manager secret
 // - Razorpay client
 // - Razorpay order creation
-// - Outstanding amount calculation
+// - Outstanding calculation
+// - Partial/custom amount validation
 // - Booking ownership validation
+// - Payment attempt creation
 // - Razorpay signature verification
 //
 // Firestore:
@@ -84,7 +85,7 @@ const {
 // RAZORPAY_TENANT_002_KEY_SECRET
 // RAZORPAY_TENANT_003_KEY_SECRET
 //
-// The Razorpay Key Secret NEVER goes to Flutter.
+// Razorpay Key Secret NEVER goes to Flutter.
 //
 // ============================================================
 
@@ -191,7 +192,7 @@ exports.createCustomer = onCall(
       }
 
       // -------------------------------------------------------
-      // 4. Verify caller is an active admin
+      // 4. Verify caller is active admin
       // -------------------------------------------------------
 
       const adminRef =
@@ -487,38 +488,37 @@ exports.verifyMsg91Otp =
 // RAZORPAY CREATE ORDER
 // ============================================================
 //
-// IMPORTANT:
+// Supports:
 //
-// createRazorpayOrder() imported from razorpay.js is a NORMAL
-// helper function.
+// 1. PAY REMAINING
 //
-// Firebase requires the exported Cloud Function itself to be
-// wrapped with onCall().
-//
-// Flutter sends:
-//
+// Flutter:
 // {
 //   tenantId: "...",
 //   bookingId: "..."
-//
 // }
 //
-// Firebase Auth UID is taken from request.auth.uid.
+// requestedAmount is omitted.
 //
-// razorpay.js then:
+// razorpay.js reads the latest outstanding amount.
 //
-// 1. Loads tenant Razorpay configuration
-// 2. Loads tenant-specific secret from Secret Manager
-// 3. Loads booking from:
-//      tenants/{tenantId}/bookings/{bookingId}
-// 4. Verifies customer ownership
-// 5. Checks booking status
-// 6. Calculates outstanding amount from Firestore
-// 7. Creates Razorpay order
-// 8. Saves payment attempt
-// 9. Returns order details
 //
-// Razorpay Key Secret is NEVER returned to Flutter.
+//
+// 2. PAY OTHER AMOUNT
+//
+// Flutter:
+// {
+//   tenantId: "...",
+//   bookingId: "...",
+//   requestedAmount: 2000
+// }
+//
+// razorpay.js:
+//
+// requestedAmount > 0
+// requestedAmount <= latest outstanding
+//
+// The server is the final authority.
 //
 // ============================================================
 
@@ -559,6 +559,57 @@ exports.createRazorpayOrder = onCall(
           ).trim();
 
         // ------------------------------------------------------
+        // requestedAmount
+        // ------------------------------------------------------
+        //
+        // null / undefined / empty
+        //     = PAY REMAINING
+        //
+        // numeric value
+        //     = PAY OTHER AMOUNT
+        //
+        // IMPORTANT:
+        // We don't trust the amount from Flutter.
+        //
+        // razorpay.js checks it against the latest Firestore
+        // outstanding balance.
+        // ------------------------------------------------------
+
+        let requestedAmount = null;
+
+        if (
+          data.requestedAmount !==
+            undefined &&
+          data.requestedAmount !==
+            null &&
+          String(
+              data.requestedAmount,
+          ).trim() !== ""
+        ) {
+          requestedAmount =
+            Number(
+                data.requestedAmount,
+            );
+
+          if (
+            !Number.isFinite(
+                requestedAmount,
+            ) ||
+            requestedAmount <= 0
+          ) {
+            throw new HttpsError(
+                "invalid-argument",
+                "requestedAmount must be greater than zero.",
+            );
+          }
+
+          requestedAmount =
+            Number(
+                requestedAmount.toFixed(2),
+            );
+        }
+
+        // ------------------------------------------------------
         // Validate tenant
         // ------------------------------------------------------
 
@@ -581,7 +632,18 @@ exports.createRazorpayOrder = onCall(
         }
 
         // ------------------------------------------------------
-        // Call actual Razorpay service
+        // Call Razorpay service
+        // ------------------------------------------------------
+        //
+        // razorpay.js will:
+        //
+        // 1. Read latest booking.
+        // 2. Verify customer ownership.
+        // 3. Calculate latest outstanding.
+        // 4. Validate requestedAmount.
+        // 5. Create Razorpay order.
+        // 6. Save payment attempt.
+        //
         // ------------------------------------------------------
 
         const result =
@@ -594,6 +656,9 @@ exports.createRazorpayOrder = onCall(
 
             userId:
               userId,
+
+            requestedAmount:
+              requestedAmount,
           });
 
         return result;
@@ -603,17 +668,65 @@ exports.createRazorpayOrder = onCall(
             error,
         );
 
-        // Preserve Firebase HttpsError.
+        // ------------------------------------------------------
+        // Preserve Firebase HttpsError
+        // ------------------------------------------------------
+
         if (
           error instanceof HttpsError
         ) {
           throw error;
         }
 
+        const message =
+          error &&
+          error.message ?
+            error.message :
+            "Unable to create Razorpay order.";
+
+        // ------------------------------------------------------
+        // Expected payment validation errors
+        // ------------------------------------------------------
+
+        if (
+          message.includes(
+              "Payment amount",
+          ) ||
+          message.includes(
+              "outstanding",
+          ) ||
+          message.includes(
+              "no outstanding",
+          ) ||
+          message.includes(
+              "not available for payment",
+          ) ||
+          message.includes(
+              "not authorized",
+          ) ||
+          message.includes(
+              "not configured",
+          ) ||
+          message.includes(
+              "disabled",
+          ) ||
+          message.includes(
+              "Booking not found",
+          )
+        ) {
+          throw new HttpsError(
+              "failed-precondition",
+              message,
+          );
+        }
+
+        // ------------------------------------------------------
+        // Unknown backend error
+        // ------------------------------------------------------
+
         throw new HttpsError(
             "internal",
-            error.message ||
-              "Unable to create Razorpay order.",
+            message,
         );
       }
     },
@@ -630,15 +743,17 @@ exports.createRazorpayOrder = onCall(
 //   orderId: "...",
 //   paymentId: "...",
 //   signature: "..."
-//
 // }
 //
-// razorpay.js uses the tenant-specific Razorpay secret to
-// calculate:
+// razorpay.js verifies:
 //
-// HMAC-SHA256(orderId + "|" + paymentId)
+// HMAC-SHA256(
+//     orderId + "|" + paymentId
+// )
 //
-// and compares it securely against the Razorpay signature.
+// using the tenant-specific Razorpay Key Secret.
+//
+// Secret NEVER goes to Flutter.
 //
 // ============================================================
 
@@ -731,7 +846,7 @@ exports.verifyRazorpaySignature = onCall(
         // Verify actual Razorpay signature
         // ------------------------------------------------------
 
-        const verified =
+        const result =
           await verifyRazorpaySignature({
             tenantId:
               tenantId,
@@ -747,8 +862,29 @@ exports.verifyRazorpaySignature = onCall(
           });
 
         // ------------------------------------------------------
-        // Invalid signature
+        // Support both return formats
         // ------------------------------------------------------
+        //
+        // Your updated razorpay.js may return:
+        //
+        // true
+        //
+        // OR:
+        //
+        // {
+        //   verified: true,
+        //   ...
+        // }
+        //
+        // This wrapper supports both.
+        // ------------------------------------------------------
+
+        const verified =
+          result === true ||
+          (
+            result &&
+            result.verified === true
+          );
 
         if (!verified) {
           throw new HttpsError(
@@ -783,7 +919,10 @@ exports.verifyRazorpaySignature = onCall(
             error,
         );
 
-        // Preserve Firebase HttpsError.
+        // ------------------------------------------------------
+        // Preserve Firebase HttpsError
+        // ------------------------------------------------------
+
         if (
           error instanceof HttpsError
         ) {

@@ -9,6 +9,7 @@ import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../../../payment/screens/payment_screen.dart';
 
 import '../../../../core/config/app_config.dart';
 import '../../../booking/models/booking.dart';
@@ -3197,20 +3198,45 @@ class _AdminBookingDetailsScreenState
   // ============================================================
 
   Widget _paymentCard() {
-    final total = _booking.totalAmount <= 0 ? 1 : _booking.totalAmount;
-    final progress =
-        (_booking.paidAmount / total).clamp(0.0, 1.0);
+    final total = _booking.totalAmount.clamp(0.0, double.infinity);
+    final paid = _booking.paidAmount.clamp(0.0, double.infinity);
+    final refunded = _booking.refundAmount.clamp(0.0, double.infinity);
+    final balance = _booking.balanceAmount.clamp(0.0, double.infinity);
+    final netPaid = (paid - refunded).clamp(0.0, double.infinity);
+    final progress = total <= 0 ? 0.0 : (netPaid / total).clamp(0.0, 1.0);
+
+    final canCollect = balance > 0.009 &&
+        _booking.status != BookingStatus.cancelled &&
+        _booking.status != BookingStatus.rejected &&
+        _booking.status != BookingStatus.completed &&
+        _booking.status != BookingStatus.noShow;
 
     return _card(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _sectionTitle(
-            'Payment',
-            'Collection and balance status',
-            Icons.account_balance_wallet_rounded,
+          Row(
+            children: [
+              Expanded(
+                child: _sectionTitle(
+                  'Payment Control Center',
+                  'Collection, balance, transactions and admin payment actions',
+                  Icons.account_balance_wallet_rounded,
+                ),
+              ),
+              if (_actionBusy)
+                const SizedBox(
+                  width: 17,
+                  height: 17,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: primary,
+                  ),
+                ),
+            ],
           ),
           const SizedBox(height: 15),
+
           Row(
             children: [
               Expanded(
@@ -3223,7 +3249,7 @@ class _AdminBookingDetailsScreenState
               ),
               _text(
                 '${(progress * 100).round()}% paid',
-                size: 11,
+                size: 10.5,
                 color: muted,
                 weight: FontWeight.w800,
               ),
@@ -3237,30 +3263,95 @@ class _AdminBookingDetailsScreenState
               value: progress,
               backgroundColor: const Color(0xFFE9EDF3),
               valueColor: AlwaysStoppedAnimation<Color>(
-                _booking.hasBalance ? warning : success,
+                canCollect ? warning : success,
               ),
             ),
           ),
+
           const SizedBox(height: 15),
-          _amountRow('Total', _booking.totalAmount, strong: true),
-          _amountRow(
-            'Paid',
-            _booking.paidAmount,
-            valueColor: success,
+
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final compact = constraints.maxWidth < 620;
+              final cards = [
+                _adminPaymentMetric(
+                  'TOTAL',
+                  _money(total),
+                  Icons.receipt_long_rounded,
+                  primary,
+                ),
+                _adminPaymentMetric(
+                  'PAID',
+                  _money(paid),
+                  Icons.check_circle_rounded,
+                  success,
+                ),
+                _adminPaymentMetric(
+                  'REFUNDED',
+                  _money(refunded),
+                  Icons.undo_rounded,
+                  purple,
+                ),
+                _adminPaymentMetric(
+                  'DUE',
+                  _money(balance),
+                  balance > 0.009
+                      ? Icons.warning_amber_rounded
+                      : Icons.verified_rounded,
+                  balance > 0.009 ? danger : success,
+                ),
+              ];
+
+              if (compact) {
+                return Column(
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(child: cards[0]),
+                        const SizedBox(width: 8),
+                        Expanded(child: cards[1]),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(child: cards[2]),
+                        const SizedBox(width: 8),
+                        Expanded(child: cards[3]),
+                      ],
+                    ),
+                  ],
+                );
+              }
+
+              return Row(
+                children: [
+                  for (var i = 0; i < cards.length; i++) ...[
+                    if (i > 0) const SizedBox(width: 8),
+                    Expanded(child: cards[i]),
+                  ],
+                ],
+              );
+            },
           ),
-          _amountRow(
-            'Refund',
-            _booking.refundAmount,
-            valueColor:
-                _booking.hasRefund ? warning : muted,
-          ),
+
+          const SizedBox(height: 15),
+
+          _amountRow('Booking total', total, strong: true),
+          _amountRow('Paid', paid, valueColor: success),
+          if (refunded > 0.009)
+            _amountRow('Refunded', refunded, valueColor: warning),
           _amountRow(
             'Outstanding',
-            _booking.balanceAmount,
+            balance,
             strong: true,
-            valueColor:
-                _booking.hasBalance ? danger : success,
+            valueColor: balance > 0.009 ? danger : success,
           ),
+
+          const SizedBox(height: 8),
+          const Divider(color: border, height: 1),
+          const SizedBox(height: 8),
+
           _infoRow(
             'Payment method',
             _booking.paymentMethod ?? 'Not recorded',
@@ -3270,18 +3361,247 @@ class _AdminBookingDetailsScreenState
             _booking.paymentId ?? 'Not recorded',
           ),
           _infoRow(
-            'Order ID',
+            'Razorpay order',
             _booking.paymentOrderId ?? 'Not recorded',
           ),
           _infoRow(
             'Transaction ID',
             _booking.paymentTransactionId ?? 'Not recorded',
           ),
+
+          if (canCollect) ...[
+            const SizedBox(height: 15),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(13),
+              decoration: BoxDecoration(
+                color: primary.withOpacity(.05),
+                borderRadius: BorderRadius.circular(15),
+                border: Border.all(color: border),
+              ),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.payments_outlined,
+                    color: primary,
+                    size: 20,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _text(
+                          'Customer payment pending',
+                          size: 11,
+                          color: heading,
+                          weight: FontWeight.w900,
+                        ),
+                        const SizedBox(height: 3),
+                        _text(
+                          '${_money(balance)} is currently outstanding.',
+                          size: 9.5,
+                          color: body,
+                          weight: FontWeight.w700,
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 10),
+
+            // Customer-facing Razorpay payment screen. This is useful when
+            // an admin wants to let the customer complete the remaining
+            // payment using UPI, QR, cards, net banking or wallets.
+            SizedBox(
+              width: double.infinity,
+              height: 47,
+              child: OutlinedButton.icon(
+                onPressed: _actionBusy ? null : _openCustomerPaymentScreen,
+                icon: const Icon(Icons.open_in_new_rounded, size: 17),
+                label: const Text(
+                  'Open Customer Payment Screen',
+                  style: TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: primary,
+                  side: const BorderSide(color: primary),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(13),
+                  ),
+                ),
+              ),
+            ),
+          ] else if (balance <= 0.009) ...[
+            const SizedBox(height: 11),
+            _adminPaymentStatusBanner(
+              icon: Icons.verified_rounded,
+              title: 'Fully paid',
+              message: 'No outstanding amount is currently due for this booking.',
+              color: success,
+            ),
+          ] else ...[
+            const SizedBox(height: 11),
+            _adminPaymentStatusBanner(
+              icon: Icons.block_rounded,
+              title: 'Payment collection unavailable',
+              message: 'This booking status does not allow a new customer payment.',
+              color: muted,
+            ),
+          ],
         ],
       ),
     );
   }
 
+  Widget _adminPaymentMetric(
+    String label,
+    String value,
+    IconData icon,
+    Color color,
+  ) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(11),
+      decoration: BoxDecoration(
+        color: color.withOpacity(.045),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: color.withOpacity(.13)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+              color: color.withOpacity(.10),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Icon(icon, size: 16, color: color),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _text(
+                  label,
+                  size: 7.2,
+                  color: muted,
+                  weight: FontWeight.w900,
+                  letterSpacing: .7,
+                ),
+                const SizedBox(height: 2),
+                _text(
+                  value,
+                  size: 10.5,
+                  color: color,
+                  weight: FontWeight.w900,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _adminPaymentStatusBanner({
+    required IconData icon,
+    required String title,
+    required String message,
+    required Color color,
+  }) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(13),
+      decoration: BoxDecoration(
+        color: color.withOpacity(.055),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: color.withOpacity(.15)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: color, size: 20),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _text(title, size: 10.5, color: color, weight: FontWeight.w900),
+                const SizedBox(height: 3),
+                _text(
+                  message,
+                  size: 9,
+                  color: body,
+                  weight: FontWeight.w700,
+                  height: 1.35,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openCustomerPaymentScreen() async {
+    if (_actionBusy || !mounted) return;
+
+    // Always re-read the booking before opening checkout so the admin does
+    // not accidentally start a payment against an old balance.
+    setState(() => _actionBusy = true);
+
+    try {
+      await _revalidateBookingBeforeAction();
+
+      if (!mounted) return;
+
+      if (_booking.balanceAmount <= 0.009) {
+        _showMessage('This booking has no outstanding balance.');
+        return;
+      }
+
+      if (_booking.status == BookingStatus.cancelled ||
+          _booking.status == BookingStatus.rejected ||
+          _booking.status == BookingStatus.completed ||
+          _booking.status == BookingStatus.noShow) {
+        _showMessage(
+          'This booking status does not allow customer payment.',
+          error: true,
+        );
+        return;
+      }
+
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => PaymentScreen(
+            booking: _booking,
+          ),
+        ),
+      );
+
+      if (!mounted) return;
+
+      // PaymentScreen verifies the transaction server-side. Re-read the
+      // booking/ledger after returning so admin sees the authoritative values.
+      await _loadAll(showLoader: false);
+    } catch (e) {
+      if (!mounted) return;
+      _showMessage(_cleanError(e.toString()), error: true);
+    } finally {
+      if (mounted) {
+        setState(() => _actionBusy = false);
+      }
+    }
+  }
 
   Widget _paymentLedgerCard() {
     final refundable =

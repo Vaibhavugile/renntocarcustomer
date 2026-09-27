@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 
 import '../models/booking.dart';
 import '../services/booking_service.dart';
+import '../../payment/screens/payment_screen.dart';
 
 /// Customer-facing read-only 360° booking details screen.
 ///
@@ -635,41 +636,410 @@ class _CustomerBookingDetailsScreenState
 
   Widget _paymentCard() {
     final total = _booking.totalAmount <= 0 ? 1.0 : _booking.totalAmount;
-    final progress = (_booking.paidAmount / total).clamp(0.0, 1.0);
+    final paid = _booking.paidAmount.clamp(0.0, double.infinity);
+    final balance = _booking.balanceAmount.clamp(0.0, double.infinity);
+    final progress = (paid / total).clamp(0.0, 1.0);
+    final canPay = _booking.hasBalance &&
+        _booking.status != BookingStatus.cancelled &&
+        _booking.status != BookingStatus.rejected &&
+        _booking.status != BookingStatus.completed &&
+        _booking.status != BookingStatus.noShow;
+
     return _card(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _sectionTitle('Payment', 'Current payment and outstanding balance.', Icons.account_balance_wallet_rounded),
+          _sectionTitle(
+            'Payment',
+            canPay
+                ? 'Track your payment and pay any outstanding balance securely.'
+                : 'Current payment and outstanding balance.',
+            Icons.account_balance_wallet_rounded,
+          ),
           const SizedBox(height: 14),
+
+          // Payment status + percentage.
           Row(
             children: [
-              Expanded(child: _text(_paymentLabel(_booking.paymentStatus), size: 14, weight: FontWeight.w900, color: _paymentColor(_booking.paymentStatus))),
-              _text('${(progress * 100).round()}% paid', size: 10.5, color: muted, weight: FontWeight.w800),
+              Expanded(
+                child: _text(
+                  _paymentLabel(_booking.paymentStatus),
+                  size: 14,
+                  weight: FontWeight.w900,
+                  color: _paymentColor(_booking.paymentStatus),
+                ),
+              ),
+              _text(
+                '${(progress * 100).round()}% paid',
+                size: 10.5,
+                color: muted,
+                weight: FontWeight.w800,
+              ),
             ],
           ),
           const SizedBox(height: 8),
+
           ClipRRect(
             borderRadius: BorderRadius.circular(99),
             child: LinearProgressIndicator(
               minHeight: 8,
               value: progress,
               backgroundColor: const Color(0xFFE9EDF3),
-              valueColor: AlwaysStoppedAnimation<Color>(_booking.hasBalance ? warning : success),
+              valueColor: AlwaysStoppedAnimation<Color>(
+                _booking.hasBalance ? warning : success,
+              ),
             ),
           ),
+
+          const SizedBox(height: 15),
+
+          // Three important payment numbers.
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final compact = constraints.maxWidth < 560;
+
+              final cards = [
+                _paymentMetric(
+                  'TOTAL',
+                  _money(_booking.totalAmount),
+                  primary,
+                  Icons.receipt_long_rounded,
+                ),
+                _paymentMetric(
+                  'PAID',
+                  _money(paid),
+                  success,
+                  Icons.check_circle_rounded,
+                ),
+                _paymentMetric(
+                  'REMAINING',
+                  _money(balance),
+                  balance > 0 ? danger : success,
+                  balance > 0
+                      ? Icons.account_balance_wallet_rounded
+                      : Icons.verified_rounded,
+                ),
+              ];
+
+              if (compact) {
+                return Column(
+                  children: [
+                    cards[0],
+                    const SizedBox(height: 8),
+                    cards[1],
+                    const SizedBox(height: 8),
+                    cards[2],
+                  ],
+                );
+              }
+
+              return Row(
+                children: [
+                  Expanded(child: cards[0]),
+                  const SizedBox(width: 8),
+                  Expanded(child: cards[1]),
+                  const SizedBox(width: 8),
+                  Expanded(child: cards[2]),
+                ],
+              );
+            },
+          ),
+
           const SizedBox(height: 14),
-          _amountRow('Total', _booking.totalAmount, strong: true),
-          _amountRow('Paid', _booking.paidAmount, valueColor: success),
-          _amountRow('Refund', _booking.refundAmount, valueColor: _booking.hasRefund ? warning : muted),
-          _amountRow('Outstanding', _booking.balanceAmount, strong: true, valueColor: _booking.hasBalance ? danger : success),
-          _infoRow('Payment method', _booking.paymentMethod ?? 'Not recorded'),
-          _infoRow('Payment ID', _booking.paymentId ?? 'Not recorded'),
-          _infoRow('Order ID', _booking.paymentOrderId ?? 'Not recorded'),
-          _infoRow('Transaction ID', _booking.paymentTransactionId ?? 'Not recorded'),
+
+          _amountRow(
+            'Total booking',
+            _booking.totalAmount,
+            strong: true,
+          ),
+          _amountRow(
+            'Paid',
+            _booking.paidAmount,
+            valueColor: success,
+          ),
+          if (_booking.refundAmount > 0)
+            _amountRow(
+              'Refunded',
+              _booking.refundAmount,
+              valueColor: warning,
+            ),
+          _amountRow(
+            'Outstanding',
+            _booking.balanceAmount,
+            strong: true,
+            valueColor: _booking.hasBalance ? danger : success,
+          ),
+
+          const SizedBox(height: 7),
+          const Divider(color: border, height: 1),
+          const SizedBox(height: 7),
+
+          _infoRow(
+            'Payment method',
+            _booking.paymentMethod ?? 'Not recorded',
+          ),
+          _infoRow(
+            'Payment ID',
+            _booking.paymentId ?? 'Not recorded',
+          ),
+          _infoRow(
+            'Order ID',
+            _booking.paymentOrderId ?? 'Not recorded',
+          ),
+          _infoRow(
+            'Transaction ID',
+            _booking.paymentTransactionId ?? 'Not recorded',
+          ),
+
+          if (canPay && balance > 0.009) ...[
+            const SizedBox(height: 14),
+
+            // Primary action: pay the complete remaining balance.
+            SizedBox(
+              width: double.infinity,
+              height: 50,
+              child: FilledButton.icon(
+                onPressed: () => _openPaymentScreen(),
+                icon: const Icon(
+                  Icons.lock_rounded,
+                  size: 18,
+                ),
+                label: Text(
+                  'Pay Remaining ${_money(balance)}',
+                  style: const TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 12,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                style: FilledButton.styleFrom(
+                  backgroundColor: primary,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 9),
+
+            // Secondary action: payment screen also provides Pay Other Amount.
+            SizedBox(
+              width: double.infinity,
+              height: 46,
+              child: OutlinedButton.icon(
+                onPressed: () => _openPaymentScreen(),
+                icon: const Icon(
+                  Icons.edit_rounded,
+                  size: 17,
+                ),
+                label: const Text(
+                  'Pay Other Amount',
+                  style: TextStyle(
+                    fontFamily: 'Manrope',
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: primary,
+                  side: const BorderSide(color: primary),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 9),
+
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(
+                  Icons.security_rounded,
+                  size: 15,
+                  color: muted,
+                ),
+                const SizedBox(width: 7),
+                Expanded(
+                  child: _text(
+                    'Payment is verified by the secure payment gateway before your booking balance is updated.',
+                    size: 9,
+                    color: muted,
+                    weight: FontWeight.w700,
+                    height: 1.35,
+                  ),
+                ),
+              ],
+            ),
+          ] else if (!_booking.hasBalance) ...[
+            const SizedBox(height: 12),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(13),
+              decoration: BoxDecoration(
+                color: success.withOpacity(.06),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                  color: success.withOpacity(.16),
+                ),
+              ),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.verified_rounded,
+                    color: success,
+                    size: 20,
+                  ),
+                  const SizedBox(width: 9),
+                  Expanded(
+                    child: _text(
+                      'Your booking is fully paid. No outstanding payment is currently due.',
+                      size: 10,
+                      color: success,
+                      weight: FontWeight.w800,
+                      height: 1.35,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ],
       ),
     );
+  }
+
+  Widget _paymentMetric(
+    String label,
+    String value,
+    Color color,
+    IconData icon,
+  ) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(11),
+      decoration: BoxDecoration(
+        color: color.withOpacity(.045),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: color.withOpacity(.13),
+        ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+              color: color.withOpacity(.10),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Icon(
+              icon,
+              size: 16,
+              color: color,
+            ),
+          ),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _text(
+                  label,
+                  size: 7.5,
+                  color: muted,
+                  weight: FontWeight.w900,
+                  letterSpacing: .7,
+                ),
+                const SizedBox(height: 2),
+                _text(
+                  value,
+                  size: 11,
+                  color: color,
+                  weight: FontWeight.w900,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openPaymentScreen() async {
+    if (!mounted) return;
+
+    // Always refresh immediately before opening payment so the customer
+    // cannot start checkout using an old paid/balance value.
+    await _load(fullLoader: false);
+
+    if (!mounted || _booking.balanceAmount <= 0.009) {
+      if (mounted) {
+        _showPaymentInfo(
+          'There is no outstanding payment for this booking.',
+          error: false,
+        );
+      }
+      return;
+    }
+
+    if (_booking.status == BookingStatus.cancelled ||
+        _booking.status == BookingStatus.rejected ||
+        _booking.status == BookingStatus.completed ||
+        _booking.status == BookingStatus.noShow) {
+      _showPaymentInfo(
+        'This booking is no longer available for payment.',
+        error: true,
+      );
+      return;
+    }
+
+    final updatedBooking = await Navigator.of(context).push<Booking>(
+      MaterialPageRoute(
+        builder: (_) => PaymentScreen(
+          booking: _booking,
+        ),
+      ),
+    );
+
+    // PaymentScreen may return a refreshed booking after successful payment.
+    // Regardless, reload from Firestore so this screen is always authoritative.
+    if (!mounted) return;
+
+    if (updatedBooking != null) {
+      setState(() {
+        _booking = updatedBooking;
+      });
+    }
+
+    await _load(fullLoader: false);
+  }
+
+  void _showPaymentInfo(String message, {required bool error}) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: error ? danger : heading,
+          content: Text(
+            message,
+            style: const TextStyle(
+              fontFamily: 'Manrope',
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+        ),
+      );
   }
 
   Widget _paymentLedgerCard() {

@@ -1,11 +1,12 @@
 "use strict";
+
 /* eslint-disable require-jsdoc */
 /* eslint-disable valid-jsdoc */
 
-
-// ... rest of your existing razorpay.js
 const admin = require("firebase-admin");
-const {SecretManagerServiceClient} = require("@google-cloud/secret-manager");
+const {
+  SecretManagerServiceClient,
+} = require("@google-cloud/secret-manager");
 const Razorpay = require("razorpay");
 const crypto = require("crypto");
 
@@ -26,7 +27,6 @@ const secretManager = new SecretManagerServiceClient();
  *     keyId: "rzp_live_xxxxx"
  *     currency: "INR"
  *     configured: true
- *
  *
  * Secret Manager:
  *
@@ -95,11 +95,12 @@ async function getTenantRazorpaySecret(tenantId) {
       });
 
     const secret =
-  version &&
-  version.payload &&
-  version.payload.data ?
-    version.payload.data.toString("utf8").trim() :
-    "";
+      version &&
+      version.payload &&
+      version.payload.data ?
+        version.payload.data.toString("utf8").trim() :
+        "";
+
     if (!secret) {
       throw new Error(
           `Razorpay secret is empty for tenant ${tenantId}.`,
@@ -183,8 +184,8 @@ async function getTenantRazorpayConfig(tenantId) {
   const currency =
     String(
         razorpay.currency ||
-        tenant.currency ||
-        "INR",
+      tenant.currency ||
+      "INR",
     )
         .trim()
         .toUpperCase();
@@ -280,6 +281,18 @@ async function getTenantBooking({
 /**
  * Calculates the amount that may actually be paid.
  *
+ * Total:
+ * booking.totalAmount
+ *
+ * Paid:
+ * booking.paidAmount
+ *
+ * Refund:
+ * booking.refundAmount
+ *
+ * Outstanding:
+ * total - paid + refund
+ *
  * We DO NOT trust an amount sent from Flutter.
  */
 function getOutstandingAmount(booking) {
@@ -304,6 +317,54 @@ function getOutstandingAmount(booking) {
 }
 
 /**
+ * Validates a customer requested payment amount
+ * against the latest Firestore outstanding balance.
+ *
+ * IMPORTANT:
+ * This validation happens on the backend.
+ */
+function validateRequestedPaymentAmount(
+    requestedAmount,
+    outstandingAmount,
+) {
+  const amount =
+    Number(requestedAmount);
+
+  if (
+    !Number.isFinite(amount) ||
+    amount <= 0
+  ) {
+    throw new Error(
+        "Payment amount must be greater than zero.",
+    );
+  }
+
+  if (
+    !Number.isFinite(outstandingAmount) ||
+    outstandingAmount <= 0
+  ) {
+    throw new Error(
+        "There is no outstanding amount for this booking.",
+    );
+  }
+
+  // Small tolerance for floating point calculations.
+  const epsilon = 0.01;
+
+  if (
+    amount >
+    outstandingAmount + epsilon
+  ) {
+    throw new Error(
+        `Payment amount cannot exceed the
+         outstanding balance of ${outstandingAmount.toFixed(2)}.`,
+    );
+  }
+
+  return Number(amount.toFixed(2));
+}
+
+/**
  * Razorpay expects amount in paise.
  *
  * ₹1000.50
@@ -311,7 +372,10 @@ function getOutstandingAmount(booking) {
  * 100050
  */
 function rupeesToPaise(amount) {
-  if (!Number.isFinite(amount) || amount <= 0) {
+  if (
+    !Number.isFinite(amount) ||
+    amount <= 0
+  ) {
     throw new Error(
         "Invalid payment amount.",
     );
@@ -329,37 +393,61 @@ function rupeesToPaise(amount) {
 /**
  * Creates a Razorpay order for a tenant booking.
  *
+ * Supports:
+ *
+ * 1. Pay Remaining
+ *
+ * requestedAmount omitted
+ *        ↓
+ * current outstanding is used
+ *
+ * 2. Pay Other Amount
+ *
+ * requestedAmount provided
+ *        ↓
+ * backend validates it
+ *        ↓
+ * custom amount is used
+ *
  * Input:
  *
  * {
  *   tenantId: "tenant_001",
- *   bookingId: "BOOKING_ID"
+ *   bookingId: "BOOKING_ID",
+ *   userId: "CUSTOMER_UID",
+ *   requestedAmount: 2000
  * }
  *
- * Returns:
+ * requestedAmount is optional.
  *
- * {
- *   success: true,
- *   orderId: "...",
- *   keyId: "...",
- *   amount: 500000,
- *   amountRupees: 5000,
- *   currency: "INR"
- * }
+ * If omitted:
+ *
+ *     full outstanding amount is used.
+ *
+ * If provided:
+ *
+ *     requestedAmount must be:
+ *
+ *     > 0
+ *     <= current outstanding
  */
 async function createRazorpayOrder({
   tenantId,
   bookingId,
   userId = null,
+  requestedAmount = null,
 }) {
+  const normalizedTenantId =
+    normalizeTenantId(tenantId);
+
   const config =
     await getTenantRazorpayConfig(
-        tenantId,
+        normalizedTenantId,
     );
 
   const booking =
     await getTenantBooking({
-      tenantId,
+      tenantId: normalizedTenantId,
       bookingId,
     });
 
@@ -387,7 +475,9 @@ async function createRazorpayOrder({
   const status =
     String(
         bookingData.status || "",
-    ).trim().toLowerCase();
+    )
+        .trim()
+        .toLowerCase();
 
   const blockedStatuses = [
     "cancelled",
@@ -406,7 +496,7 @@ async function createRazorpayOrder({
   }
 
   // ----------------------------------------------------------
-  // Calculate amount from Firestore
+  // ALWAYS calculate latest outstanding from Firestore
   // ----------------------------------------------------------
 
   const outstandingAmount =
@@ -414,15 +504,54 @@ async function createRazorpayOrder({
         bookingData,
     );
 
-  if (outstandingAmount <= 0) {
+  if (
+    outstandingAmount <= 0
+  ) {
     throw new Error(
         "There is no outstanding amount for this booking.",
     );
   }
 
+  // ----------------------------------------------------------
+  // Determine payment amount
+  // ----------------------------------------------------------
+  //
+  // If requestedAmount is null/undefined/empty:
+  //
+  //     PAY REMAINING
+  //
+  // Otherwise:
+  //
+  //     PAY OTHER AMOUNT
+  //
+  // The server validates the amount.
+  // ----------------------------------------------------------
+
+  let paymentAmount;
+
+  const hasRequestedAmount =
+    requestedAmount !== null &&
+    requestedAmount !== undefined &&
+    String(requestedAmount).trim() !== "";
+
+  if (hasRequestedAmount) {
+    paymentAmount =
+      validateRequestedPaymentAmount(
+          requestedAmount,
+          outstandingAmount,
+      );
+  } else {
+    paymentAmount =
+      outstandingAmount;
+  }
+
+  // ----------------------------------------------------------
+  // Convert to paise
+  // ----------------------------------------------------------
+
   const amountPaise =
     rupeesToPaise(
-        outstandingAmount,
+        paymentAmount,
     );
 
   // ----------------------------------------------------------
@@ -432,17 +561,24 @@ async function createRazorpayOrder({
   const {
     razorpay,
   } = await getTenantRazorpayClient(
-      tenantId,
+      normalizedTenantId,
   );
 
   // ----------------------------------------------------------
-  // Razorpay order
+  // Razorpay order receipt
   // ----------------------------------------------------------
 
   const receipt =
-    `rentocar_${tenantId}_${bookingId}_${Date.now()}`
-        .replace(/[^a-zA-Z0-9_-]/g, "_")
+    `rentocar_${normalizedTenantId}_${bookingId}_${Date.now()}`
+        .replace(
+            /[^a-zA-Z0-9_-]/g,
+            "_",
+        )
         .substring(0, 40);
+
+  // ----------------------------------------------------------
+  // Create Razorpay order
+  // ----------------------------------------------------------
 
   const order =
     await razorpay.orders.create({
@@ -450,16 +586,27 @@ async function createRazorpayOrder({
       currency: config.currency,
       receipt,
       notes: {
-        tenantId,
-        bookingId,
+        tenantId: normalizedTenantId,
+        bookingId: String(bookingId),
         customerId:
           String(
               bookingData.customerId || "",
           ),
+        paymentType:
+          hasRequestedAmount ?
+            "partial" :
+            "remaining",
+        requestedAmount:
+          String(paymentAmount),
+        outstandingAtOrder:
+          String(outstandingAmount),
       },
     });
 
-  if (!order || !order.id) {
+  if (
+    !order ||
+    !order.id
+  ) {
     throw new Error(
         "Razorpay did not return an order ID.",
     );
@@ -475,15 +622,27 @@ async function createRazorpayOrder({
         .doc();
 
   await paymentAttemptRef.set({
-    tenantId,
-    bookingId,
+    tenantId:
+      normalizedTenantId,
+
+    bookingId:
+      String(bookingId),
+
     customerId:
-      bookingData.customerId || null,
+      bookingData.customerId ||
+      null,
 
+    // Actual amount customer is paying.
     amount:
-      outstandingAmount,
+      paymentAmount,
 
-    amountPaise,
+    amountPaise:
+      amountPaise,
+
+    // Balance at the exact moment
+    // the order was created.
+    outstandingAtOrder:
+      outstandingAmount,
 
     currency:
       config.currency,
@@ -494,6 +653,11 @@ async function createRazorpayOrder({
     gatewayMode:
       config.mode,
 
+    paymentType:
+      hasRequestedAmount ?
+        "partial" :
+        "remaining",
+
     razorpayOrderId:
       order.id,
 
@@ -501,33 +665,55 @@ async function createRazorpayOrder({
       "created",
 
     createdAt:
-      admin.firestore.FieldValue.serverTimestamp(),
+      admin.firestore.FieldValue
+          .serverTimestamp(),
 
     updatedAt:
-      admin.firestore.FieldValue.serverTimestamp(),
+      admin.firestore.FieldValue
+          .serverTimestamp(),
   });
+
+  // ----------------------------------------------------------
+  // Return only public values to Flutter
+  // ----------------------------------------------------------
 
   return {
     success: true,
 
-    tenantId,
+    tenantId:
+      normalizedTenantId,
 
-    bookingId,
+    bookingId:
+      String(bookingId),
 
     orderId:
       order.id,
 
+    // PUBLIC Razorpay Key ID only.
+    //
+    // Secret is NEVER returned.
     keyId:
       config.keyId,
 
+    // Razorpay expects paise.
     amount:
       amountPaise,
 
+    // Convenient for Flutter.
     amountRupees:
+      paymentAmount,
+
+    // Latest balance before creating order.
+    outstandingAmount:
       outstandingAmount,
 
     currency:
       config.currency,
+
+    paymentType:
+      hasRequestedAmount ?
+        "partial" :
+        "remaining",
 
     paymentAttemptId:
       paymentAttemptRef.id,
@@ -554,11 +740,8 @@ async function verifyRazorpaySignature({
   paymentId,
   signature,
 }) {
-  if (!tenantId) {
-    throw new Error(
-        "Tenant ID is required.",
-    );
-  }
+  const normalizedTenantId =
+    normalizeTenantId(tenantId);
 
   if (!orderId) {
     throw new Error(
@@ -580,7 +763,7 @@ async function verifyRazorpaySignature({
 
   const secret =
     await getTenantRazorpaySecret(
-        tenantId,
+        normalizedTenantId,
     );
 
   const payload =
@@ -628,8 +811,15 @@ module.exports = {
   getTenantRazorpayConfig,
   getTenantRazorpaySecret,
   getTenantRazorpayClient,
+
   createRazorpayOrder,
+
   verifyRazorpaySignature,
+
   getTenantBooking,
   getOutstandingAmount,
+
+  // Exported in case index.js
+  // needs direct server-side validation.
+  validateRequestedPaymentAmount,
 };
