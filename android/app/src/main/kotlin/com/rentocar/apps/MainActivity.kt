@@ -1,4 +1,4 @@
-package com.rentocar.app
+package com.rentocar.apps
 
 import io.flutter.embedding.android.FlutterActivity
 

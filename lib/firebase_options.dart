@@ -51,17 +51,17 @@ class DefaultFirebaseOptions {
 
   static const FirebaseOptions android = FirebaseOptions(
     apiKey: 'AIzaSyBQ_dwQGEJ8wT3figP3jmoStLKNmsB_yGs',
-    appId: '1:113294411058:android:6a63c2a7c8a6197492032b',
+    appId: '1:113294411058:android:9f92a07c1560543592032b',
     messagingSenderId: '113294411058',
     projectId: 'carrental-fd6eb',
     storageBucket: 'carrental-fd6eb.firebasestorage.app',
   );
   static const FirebaseOptions ios = FirebaseOptions(
     apiKey: 'AIzaSyA7cmJ-tyJG2ZesmMLLQGYSu0aJcEiy4vI',
-    appId: '1:113294411058:ios:dae87ef6c8c7087292032b',
+    appId: '1:113294411058:ios:5fd8997a6856ff7392032b',
     messagingSenderId: '113294411058',
     projectId: 'carrental-fd6eb',
     storageBucket: 'carrental-fd6eb.firebasestorage.app',
-    iosBundleId: 'com.example.customerAppCarRental',
+    iosBundleId: 'com.rentocar.apps',
   );
 }

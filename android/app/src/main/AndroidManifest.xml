@@ -8,7 +8,7 @@
         android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
-        android:label="customer_app_car_rental"
+        android:label="Rentocar"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
 
