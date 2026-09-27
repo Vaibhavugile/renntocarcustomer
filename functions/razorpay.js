@@ -1,9 +1,13 @@
-'use strict';
+"use strict";
+/* eslint-disable require-jsdoc */
+/* eslint-disable valid-jsdoc */
 
-const admin = require('firebase-admin');
-const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
-const Razorpay = require('razorpay');
-const crypto = require('crypto');
+
+// ... rest of your existing razorpay.js
+const admin = require("firebase-admin");
+const {SecretManagerServiceClient} = require("@google-cloud/secret-manager");
+const Razorpay = require("razorpay");
+const crypto = require("crypto");
 
 const db = admin.firestore();
 const secretManager = new SecretManagerServiceClient();
@@ -40,15 +44,15 @@ const secretManager = new SecretManagerServiceClient();
 // ------------------------------------------------------------
 
 function normalizeTenantId(tenantId) {
-  const value = String(tenantId || '').trim();
+  const value = String(tenantId || "").trim();
 
   if (!value) {
-    throw new Error('Tenant ID is required.');
+    throw new Error("Tenant ID is required.");
   }
 
   // Only allow safe characters for Secret Manager secret names.
   if (!/^[a-zA-Z0-9_-]+$/.test(value)) {
-    throw new Error('Invalid tenant ID.');
+    throw new Error("Invalid tenant ID.");
   }
 
   return value;
@@ -77,7 +81,7 @@ async function getTenantRazorpaySecret(tenantId) {
 
   if (!projectId) {
     throw new Error(
-      'Firebase project ID is not available.'
+        "Firebase project ID is not available.",
     );
   }
 
@@ -91,27 +95,30 @@ async function getTenantRazorpaySecret(tenantId) {
       });
 
     const secret =
-      version.payload?.data?.toString('utf8')?.trim();
-
+  version &&
+  version.payload &&
+  version.payload.data ?
+    version.payload.data.toString("utf8").trim() :
+    "";
     if (!secret) {
       throw new Error(
-        `Razorpay secret is empty for tenant ${tenantId}.`
+          `Razorpay secret is empty for tenant ${tenantId}.`,
       );
     }
 
     return secret;
   } catch (error) {
     console.error(
-      'Unable to load Razorpay secret.',
-      {
-        tenantId,
-        secretName,
-        error: error.message,
-      }
+        "Unable to load Razorpay secret.",
+        {
+          tenantId,
+          secretName,
+          error: error.message,
+        },
     );
 
     throw new Error(
-      `Razorpay credentials are not configured for tenant ${tenantId}.`
+        `Razorpay credentials are not configured for tenant ${tenantId}.`,
     );
   }
 }
@@ -125,14 +132,14 @@ async function getTenantRazorpayConfig(tenantId) {
     normalizeTenantId(tenantId);
 
   const tenantRef = db
-    .collection('tenants')
-    .doc(normalizedTenantId);
+      .collection("tenants")
+      .doc(normalizedTenantId);
 
   const snapshot = await tenantRef.get();
 
   if (!snapshot.exists) {
     throw new Error(
-      'Tenant configuration was not found.'
+        "Tenant configuration was not found.",
     );
   }
 
@@ -143,44 +150,44 @@ async function getTenantRazorpayConfig(tenantId) {
 
   if (razorpay.enabled !== true) {
     throw new Error(
-      'Razorpay is disabled for this tenant.'
+        "Razorpay is disabled for this tenant.",
     );
   }
 
   if (razorpay.configured !== true) {
     throw new Error(
-      'Razorpay is not configured for this tenant.'
+        "Razorpay is not configured for this tenant.",
     );
   }
 
   const keyId =
-    String(razorpay.keyId || '').trim();
+    String(razorpay.keyId || "").trim();
 
   if (!keyId) {
     throw new Error(
-      'Razorpay Key ID is missing.'
+        "Razorpay Key ID is missing.",
     );
   }
 
   const mode =
-    String(razorpay.mode || 'test')
-      .trim()
-      .toLowerCase();
+    String(razorpay.mode || "test")
+        .trim()
+        .toLowerCase();
 
-  if (mode !== 'test' && mode !== 'live') {
+  if (mode !== "test" && mode !== "live") {
     throw new Error(
-      'Invalid Razorpay mode.'
+        "Invalid Razorpay mode.",
     );
   }
 
   const currency =
     String(
-      razorpay.currency ||
+        razorpay.currency ||
         tenant.currency ||
-        'INR'
+        "INR",
     )
-      .trim()
-      .toUpperCase();
+        .trim()
+        .toUpperCase();
 
   return {
     tenantId: normalizedTenantId,
@@ -228,26 +235,26 @@ async function getTenantBooking({
     normalizeTenantId(tenantId);
 
   const normalizedBookingId =
-    String(bookingId || '').trim();
+    String(bookingId || "").trim();
 
   if (!normalizedBookingId) {
     throw new Error(
-      'Booking ID is required.'
+        "Booking ID is required.",
     );
   }
 
   const bookingRef = db
-    .collection('tenants')
-    .doc(normalizedTenantId)
-    .collection('bookings')
-    .doc(normalizedBookingId);
+      .collection("tenants")
+      .doc(normalizedTenantId)
+      .collection("bookings")
+      .doc(normalizedBookingId);
 
   const snapshot =
     await bookingRef.get();
 
   if (!snapshot.exists) {
     throw new Error(
-      'Booking not found.'
+        "Booking not found.",
     );
   }
 
@@ -255,11 +262,11 @@ async function getTenantBooking({
     snapshot.data() || {};
 
   if (
-    String(booking.tenantId || '').trim() !==
+    String(booking.tenantId || "").trim() !==
     normalizedTenantId
   ) {
     throw new Error(
-      'Booking does not belong to this tenant.'
+        "Booking does not belong to this tenant.",
     );
   }
 
@@ -291,8 +298,8 @@ function getOutstandingAmount(booking) {
     refundAmount;
 
   return Math.max(
-    0,
-    Number(outstanding.toFixed(2))
+      0,
+      Number(outstanding.toFixed(2)),
   );
 }
 
@@ -306,12 +313,12 @@ function getOutstandingAmount(booking) {
 function rupeesToPaise(amount) {
   if (!Number.isFinite(amount) || amount <= 0) {
     throw new Error(
-      'Invalid payment amount.'
+        "Invalid payment amount.",
     );
   }
 
   return Math.round(
-    amount * 100
+      amount * 100,
   );
 }
 
@@ -347,7 +354,7 @@ async function createRazorpayOrder({
 }) {
   const config =
     await getTenantRazorpayConfig(
-      tenantId
+        tenantId,
     );
 
   const booking =
@@ -365,11 +372,11 @@ async function createRazorpayOrder({
 
   if (
     userId &&
-    String(bookingData.customerId || '').trim() !==
+    String(bookingData.customerId || "").trim() !==
       String(userId).trim()
   ) {
     throw new Error(
-      'You are not authorized to pay for this booking.'
+        "You are not authorized to pay for this booking.",
     );
   }
 
@@ -379,22 +386,22 @@ async function createRazorpayOrder({
 
   const status =
     String(
-      bookingData.status || ''
+        bookingData.status || "",
     ).trim().toLowerCase();
 
   const blockedStatuses = [
-    'cancelled',
-    'rejected',
-    'completed',
-    'noshow',
-    'no_show',
+    "cancelled",
+    "rejected",
+    "completed",
+    "noshow",
+    "no_show",
   ];
 
   if (
     blockedStatuses.includes(status)
   ) {
     throw new Error(
-      'This booking is no longer available for payment.'
+        "This booking is no longer available for payment.",
     );
   }
 
@@ -404,18 +411,18 @@ async function createRazorpayOrder({
 
   const outstandingAmount =
     getOutstandingAmount(
-      bookingData
+        bookingData,
     );
 
   if (outstandingAmount <= 0) {
     throw new Error(
-      'There is no outstanding amount for this booking.'
+        "There is no outstanding amount for this booking.",
     );
   }
 
   const amountPaise =
     rupeesToPaise(
-      outstandingAmount
+        outstandingAmount,
     );
 
   // ----------------------------------------------------------
@@ -425,7 +432,7 @@ async function createRazorpayOrder({
   const {
     razorpay,
   } = await getTenantRazorpayClient(
-    tenantId
+      tenantId,
   );
 
   // ----------------------------------------------------------
@@ -434,8 +441,8 @@ async function createRazorpayOrder({
 
   const receipt =
     `rentocar_${tenantId}_${bookingId}_${Date.now()}`
-      .replace(/[^a-zA-Z0-9_-]/g, '_')
-      .substring(0, 40);
+        .replace(/[^a-zA-Z0-9_-]/g, "_")
+        .substring(0, 40);
 
   const order =
     await razorpay.orders.create({
@@ -447,14 +454,14 @@ async function createRazorpayOrder({
         bookingId,
         customerId:
           String(
-            bookingData.customerId || ''
+              bookingData.customerId || "",
           ),
       },
     });
 
   if (!order || !order.id) {
     throw new Error(
-      'Razorpay did not return an order ID.'
+        "Razorpay did not return an order ID.",
     );
   }
 
@@ -464,8 +471,8 @@ async function createRazorpayOrder({
 
   const paymentAttemptRef =
     booking.ref
-      .collection('paymentAttempts')
-      .doc();
+        .collection("paymentAttempts")
+        .doc();
 
   await paymentAttemptRef.set({
     tenantId,
@@ -482,7 +489,7 @@ async function createRazorpayOrder({
       config.currency,
 
     gateway:
-      'razorpay',
+      "razorpay",
 
     gatewayMode:
       config.mode,
@@ -491,7 +498,7 @@ async function createRazorpayOrder({
       order.id,
 
     status:
-      'created',
+      "created",
 
     createdAt:
       admin.firestore.FieldValue.serverTimestamp(),
@@ -549,31 +556,31 @@ async function verifyRazorpaySignature({
 }) {
   if (!tenantId) {
     throw new Error(
-      'Tenant ID is required.'
+        "Tenant ID is required.",
     );
   }
 
   if (!orderId) {
     throw new Error(
-      'Razorpay order ID is required.'
+        "Razorpay order ID is required.",
     );
   }
 
   if (!paymentId) {
     throw new Error(
-      'Razorpay payment ID is required.'
+        "Razorpay payment ID is required.",
     );
   }
 
   if (!signature) {
     throw new Error(
-      'Razorpay signature is required.'
+        "Razorpay signature is required.",
     );
   }
 
   const secret =
     await getTenantRazorpaySecret(
-      tenantId
+        tenantId,
     );
 
   const payload =
@@ -581,23 +588,23 @@ async function verifyRazorpaySignature({
 
   const expectedSignature =
     crypto
-      .createHmac(
-        'sha256',
-        secret
-      )
-      .update(payload)
-      .digest('hex');
+        .createHmac(
+            "sha256",
+            secret,
+        )
+        .update(payload)
+        .digest("hex");
 
   const received =
     Buffer.from(
-      String(signature),
-      'utf8'
+        String(signature),
+        "utf8",
     );
 
   const expected =
     Buffer.from(
-      expectedSignature,
-      'utf8'
+        expectedSignature,
+        "utf8",
     );
 
   if (
@@ -608,8 +615,8 @@ async function verifyRazorpaySignature({
   }
 
   return crypto.timingSafeEqual(
-    received,
-    expected
+      received,
+      expected,
   );
 }
 

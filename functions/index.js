@@ -16,7 +16,6 @@ const {
   FieldValue,
 } = require("firebase-admin/firestore");
 
-
 // ============================================================
 // BOOKING LIFECYCLE FUNCTION
 // ============================================================
@@ -25,115 +24,24 @@ const {
   syncBookingLifecycle,
 } = require("./bookingLifecycle");
 
-
 // ============================================================
 // ADMIN BOOKING NOTIFICATION FUNCTION
-// ============================================================
-//
-// bookingNotifications.js contains:
-//
-// tenants/{tenantId}/bookings/{bookingId}
-//                  ↓
-//          New booking created
-//                  ↓
-//       Find active admin devices
-//                  ↓
-//          Send FCM notification
-//
 // ============================================================
 
 const {
   notifyAdminsOnNewBooking,
 } = require("./bookingNotifications");
 
-
 // ============================================================
 // CUSTOMER BOOKING NOTIFICATION FUNCTION
-// ============================================================
-//
-// customerBookingNotifications.js contains:
-//
-// tenants/{tenantId}/bookings/{bookingId}
-//                  ↓
-//            Booking updated
-//                  ↓
-//       Detect meaningful changes
-//                  ↓
-//       Find customer devices
-//                  ↓
-//          Send FCM notification
-//
-// Customer events include:
-//
-// • Booking confirmed
-// • Pickup pending
-// • Rental started
-// • Return pending
-// • Booking completed
-// • Booking cancelled
-// • Booking rejected
-// • No-show
-// • Payment received
-// • Payment refunded
-// • Payment updated
-// • Booking amount changed
-// • Discount changed
-// • Pickup schedule changed
-// • Return schedule changed
-// • Pickup branch changed
-// • Security deposit changed
-// • KM package changed
-// • Add-ons changed
-//
 // ============================================================
 
 const {
   notifyCustomerOnBookingUpdate,
 } = require("./customerBookingNotifications");
 
-
 // ============================================================
 // MSG91 WHATSAPP OTP
-// ============================================================
-//
-// msg91Otp.js contains:
-//
-// SEND OTP:
-//
-// Flutter
-//      ↓
-// sendMsg91Otp()
-//      ↓
-// tenants/{tenantId}.msg91
-//      ↓
-// Generate secure 6-digit OTP
-//      ↓
-// Store HASHED OTP
-//      ↓
-// Send WhatsApp template through MSG91
-//
-// VERIFY OTP:
-//
-// Flutter
-//      ↓
-// verifyMsg91Otp()
-//      ↓
-// Read hashed OTP
-//      ↓
-// Validate OTP
-//      ↓
-// Check expiry
-//      ↓
-// Check maximum attempts
-//      ↓
-// Find existing Firebase Auth user by phone
-//      ↓
-// Create Firebase user if required
-//      ↓
-// Create Firebase Custom Token
-//      ↓
-// Flutter signInWithCustomToken()
-//
 // ============================================================
 
 const {
@@ -141,6 +49,49 @@ const {
   verifyMsg91Otp,
 } = require("./msg91Otp");
 
+// ============================================================
+// RAZORPAY MULTI-TENANT PAYMENT
+// ============================================================
+//
+// The actual Razorpay implementation is inside:
+//
+// functions/razorpay.js
+//
+// razorpay.js handles:
+//
+// - Tenant Razorpay configuration
+// - Secret Manager
+// - Razorpay client
+// - Razorpay order creation
+// - Outstanding amount calculation
+// - Booking ownership validation
+// - Razorpay signature verification
+//
+// Firestore:
+//
+// tenants/{tenantId}
+//
+//     razorpay:
+//       enabled
+//       configured
+//       mode
+//       keyId
+//       currency
+//
+// Secret Manager:
+//
+// RAZORPAY_TENANT_001_KEY_SECRET
+// RAZORPAY_TENANT_002_KEY_SECRET
+// RAZORPAY_TENANT_003_KEY_SECRET
+//
+// The Razorpay Key Secret NEVER goes to Flutter.
+//
+// ============================================================
+
+const {
+  createRazorpayOrder,
+  verifyRazorpaySignature,
+} = require("./razorpay");
 
 // ============================================================
 // FIREBASE ADMIN INITIALIZATION
@@ -152,16 +103,15 @@ const auth = getAuth();
 
 const db = getFirestore();
 
-
 // ============================================================
 // CREATE CUSTOMER
 // ============================================================
 
 exports.createCustomer = onCall(
     async (request) => {
-    // -------------------------------------------------------
-    // 1. Verify caller is authenticated
-    // -------------------------------------------------------
+      // -------------------------------------------------------
+      // 1. Verify caller is authenticated
+      // -------------------------------------------------------
 
       if (!request.auth) {
         throw new HttpsError(
@@ -171,36 +121,34 @@ exports.createCustomer = onCall(
       }
 
       const callerUid =
-      request.auth.uid;
-
+        request.auth.uid;
 
       // -------------------------------------------------------
       // 2. Validate request
       // -------------------------------------------------------
 
       const data =
-      request.data || {};
+        request.data || {};
 
       const tenantId =
-      String(
-          data.tenantId || "",
-      ).trim();
+        String(
+            data.tenantId || "",
+        ).trim();
 
       const fullName =
-      String(
-          data.fullName || "",
-      ).trim();
+        String(
+            data.fullName || "",
+        ).trim();
 
       const phone =
-      String(
-          data.phone || "",
-      ).trim();
+        String(
+            data.phone || "",
+        ).trim();
 
       const email =
-      String(
-          data.email || "",
-      ).trim();
-
+        String(
+            data.email || "",
+        ).trim();
 
       if (!tenantId) {
         throw new HttpsError(
@@ -209,14 +157,12 @@ exports.createCustomer = onCall(
         );
       }
 
-
       if (!fullName) {
         throw new HttpsError(
             "invalid-argument",
             "Customer name is required.",
         );
       }
-
 
       if (!phone) {
         throw new HttpsError(
@@ -225,19 +171,17 @@ exports.createCustomer = onCall(
         );
       }
 
-
       // -------------------------------------------------------
       // 3. Verify tenant exists
       // -------------------------------------------------------
 
       const tenantRef =
-      db
-          .collection("tenants")
-          .doc(tenantId);
+        db
+            .collection("tenants")
+            .doc(tenantId);
 
       const tenantSnap =
-      await tenantRef.get();
-
+        await tenantRef.get();
 
       if (!tenantSnap.exists) {
         throw new HttpsError(
@@ -246,19 +190,17 @@ exports.createCustomer = onCall(
         );
       }
 
-
       // -------------------------------------------------------
       // 4. Verify caller is an active admin
       // -------------------------------------------------------
 
       const adminRef =
-      tenantRef
-          .collection("admins")
-          .doc(callerUid);
+        tenantRef
+            .collection("admins")
+            .doc(callerUid);
 
       const adminSnap =
-      await adminRef.get();
-
+        await adminRef.get();
 
       if (!adminSnap.exists) {
         throw new HttpsError(
@@ -267,10 +209,8 @@ exports.createCustomer = onCall(
         );
       }
 
-
       const adminData =
-      adminSnap.data() || {};
-
+        adminSnap.data() || {};
 
       if (adminData.isActive !== true) {
         throw new HttpsError(
@@ -279,41 +219,38 @@ exports.createCustomer = onCall(
         );
       }
 
-
       // -------------------------------------------------------
       // 5. Check duplicate customer by phone
       // -------------------------------------------------------
 
       const customersRef =
-      tenantRef.collection(
-          "customers",
-      );
+        tenantRef.collection(
+            "customers",
+        );
 
       const existingSnapshot =
-      await customersRef
-          .where(
-              "phone",
-              "==",
-              phone,
-          )
-          .limit(1)
-          .get();
-
+        await customersRef
+            .where(
+                "phone",
+                "==",
+                phone,
+            )
+            .limit(1)
+            .get();
 
       if (!existingSnapshot.empty) {
         const existingDoc =
-        existingSnapshot.docs[0];
+          existingSnapshot.docs[0];
 
         throw new HttpsError(
             "already-exists",
             "A customer with this phone number already exists.",
             {
               customerId:
-            existingDoc.id,
+                existingDoc.id,
             },
         );
       }
-
 
       // -------------------------------------------------------
       // 6. Create Firebase Authentication user
@@ -323,33 +260,32 @@ exports.createCustomer = onCall(
 
       try {
         firebaseUser =
-        await auth.createUser({
-          phoneNumber:
-            phone,
+          await auth.createUser({
+            phoneNumber:
+              phone,
 
-          ...(email ?
-            {
-              email:
+            ...(email ?
+              {
+                email:
                   email,
-            } :
-            {}),
+              } :
+              {}),
 
-          displayName:
-            fullName,
+            displayName:
+              fullName,
 
-          disabled:
-            false,
-        });
+            disabled:
+              false,
+          });
       } catch (error) {
         console.error(
             "Firebase Auth user creation failed:",
             error,
         );
 
-
         if (
           error.code ===
-        "auth/phone-number-already-exists"
+          "auth/phone-number-already-exists"
         ) {
           throw new HttpsError(
               "already-exists",
@@ -357,10 +293,9 @@ exports.createCustomer = onCall(
           );
         }
 
-
         if (
           error.code ===
-        "auth/invalid-phone-number"
+          "auth/invalid-phone-number"
         ) {
           throw new HttpsError(
               "invalid-argument",
@@ -368,10 +303,9 @@ exports.createCustomer = onCall(
           );
         }
 
-
         if (
           error.code ===
-        "auth/email-already-exists"
+          "auth/email-already-exists"
         ) {
           throw new HttpsError(
               "already-exists",
@@ -379,115 +313,107 @@ exports.createCustomer = onCall(
           );
         }
 
-
         throw new HttpsError(
             "internal",
             "Unable to create Firebase customer account.",
         );
       }
 
-
       const uid =
-      firebaseUser.uid;
-
+        firebaseUser.uid;
 
       // -------------------------------------------------------
       // 7. Create customer Firestore document
       // -------------------------------------------------------
 
       const customerRef =
-      customersRef.doc(uid);
-
+        customersRef.doc(uid);
 
       try {
         await customerRef.set({
-
           customerId:
-          uid,
+            uid,
 
           tenantId:
-          tenantId,
+            tenantId,
 
           fullName:
-          fullName,
+            fullName,
 
           phone:
-          phone,
+            phone,
 
           email:
-          email,
+            email,
 
           profileImageUrl:
-          "",
+            "",
 
           dateOfBirth:
-          "",
+            "",
 
           gender:
-          "",
+            "",
 
           address:
-          null,
+            null,
 
           emergencyContact:
-          null,
+            null,
 
           kycStatus:
-          "not_started",
+            "not_started",
 
           profileCompleted:
-          false,
+            false,
 
           isActive:
-          true,
+            true,
 
           totalBookings:
-          0,
+            0,
 
           completedBookings:
-          0,
+            0,
 
           createdAt:
-          FieldValue.serverTimestamp(),
+            FieldValue.serverTimestamp(),
 
           updatedAt:
-          FieldValue.serverTimestamp(),
+            FieldValue.serverTimestamp(),
 
           createdByAdminId:
-          callerUid,
+            callerUid,
 
           createdByAdminName:
-          adminData.name || "",
+            adminData.name || "",
         });
-
 
         // -----------------------------------------------------
         // 8. Return success
         // -----------------------------------------------------
 
         return {
-
           success:
-          true,
+            true,
 
           customerId:
-          uid,
+            uid,
 
           firebaseUid:
-          uid,
+            uid,
 
           tenantId:
-          tenantId,
+            tenantId,
 
           message:
-          "Customer created successfully.",
+            "Customer created successfully.",
         };
       } catch (error) {
         console.error(
             "Customer Firestore creation failed:",
             error,
         );
-
 
         // -----------------------------------------------------
         // Rollback Firebase Auth user
@@ -504,7 +430,6 @@ exports.createCustomer = onCall(
           );
         }
 
-
         throw new HttpsError(
             "internal",
             "Customer account could not be created.",
@@ -513,9 +438,8 @@ exports.createCustomer = onCall(
     },
 );
 
-
 // ============================================================
-// EXPORT AUTOMATIC BOOKING LIFECYCLE
+// AUTOMATIC BOOKING LIFECYCLE
 // ============================================================
 //
 // bookingLifecycle.js contains:
@@ -535,82 +459,22 @@ exports.createCustomer = onCall(
 exports.syncBookingLifecycle =
   syncBookingLifecycle;
 
-
 // ============================================================
-// EXPORT NEW BOOKING ADMIN NOTIFICATION
-// ============================================================
-//
-// bookingNotifications.js contains:
-//
-// tenants/{tenantId}/bookings/{bookingId}
-//              ↓
-//       New booking created
-//              ↓
-//    Find active admin devices
-//              ↓
-//          Send FCM
-//
-// Premium notification:
-//
-// 🚗 New Booking • ₹2,360
-//
-// vaibhav reddy booked Reddy.
-// Pickup: 24 Sep, 7:00 PM • Rentocar Baner
-//
+// NEW BOOKING ADMIN NOTIFICATION
 // ============================================================
 
 exports.notifyAdminsOnNewBooking =
   notifyAdminsOnNewBooking;
 
-
 // ============================================================
-// EXPORT CUSTOMER BOOKING NOTIFICATIONS
-// ============================================================
-//
-// customerBookingNotifications.js contains:
-//
-// tenants/{tenantId}/bookings/{bookingId}
-//              ↓
-//       Booking document updated
-//              ↓
-//      Compare BEFORE / AFTER
-//              ↓
-//      Detect meaningful event
-//              ↓
-//     Find active customer devices
-//              ↓
-//          Send FCM
-//
+// CUSTOMER BOOKING NOTIFICATIONS
 // ============================================================
 
 exports.notifyCustomerOnBookingUpdate =
   notifyCustomerOnBookingUpdate;
 
-
 // ============================================================
-// EXPORT MSG91 WHATSAPP OTP
-// ============================================================
-//
-// SEND:
-//
-// Flutter
-//      ↓
-// sendMsg91Otp()
-//      ↓
-// MSG91 WhatsApp
-//
-// VERIFY:
-//
-// Flutter
-//      ↓
-// verifyMsg91Otp()
-//      ↓
-// Verify hashed OTP
-//      ↓
-// Firebase Auth user lookup
-//      ↓
-// Firebase Custom Token
-//
+// MSG91 WHATSAPP OTP
 // ============================================================
 
 exports.sendMsg91Otp =
@@ -618,3 +482,319 @@ exports.sendMsg91Otp =
 
 exports.verifyMsg91Otp =
   verifyMsg91Otp;
+
+// ============================================================
+// RAZORPAY CREATE ORDER
+// ============================================================
+//
+// IMPORTANT:
+//
+// createRazorpayOrder() imported from razorpay.js is a NORMAL
+// helper function.
+//
+// Firebase requires the exported Cloud Function itself to be
+// wrapped with onCall().
+//
+// Flutter sends:
+//
+// {
+//   tenantId: "...",
+//   bookingId: "..."
+//
+// }
+//
+// Firebase Auth UID is taken from request.auth.uid.
+//
+// razorpay.js then:
+//
+// 1. Loads tenant Razorpay configuration
+// 2. Loads tenant-specific secret from Secret Manager
+// 3. Loads booking from:
+//      tenants/{tenantId}/bookings/{bookingId}
+// 4. Verifies customer ownership
+// 5. Checks booking status
+// 6. Calculates outstanding amount from Firestore
+// 7. Creates Razorpay order
+// 8. Saves payment attempt
+// 9. Returns order details
+//
+// Razorpay Key Secret is NEVER returned to Flutter.
+//
+// ============================================================
+
+exports.createRazorpayOrder = onCall(
+    async (request) => {
+      try {
+        // ------------------------------------------------------
+        // Authentication
+        // ------------------------------------------------------
+
+        if (!request.auth) {
+          throw new HttpsError(
+              "unauthenticated",
+              "You must be logged in to make a payment.",
+          );
+        }
+
+        // ------------------------------------------------------
+        // Request data
+        // ------------------------------------------------------
+
+        const data =
+          request.data || {};
+
+        const tenantId =
+          String(
+              data.tenantId || "",
+          ).trim();
+
+        const bookingId =
+          String(
+              data.bookingId || "",
+          ).trim();
+
+        const userId =
+          String(
+              request.auth.uid || "",
+          ).trim();
+
+        // ------------------------------------------------------
+        // Validate tenant
+        // ------------------------------------------------------
+
+        if (!tenantId) {
+          throw new HttpsError(
+              "invalid-argument",
+              "tenantId is required.",
+          );
+        }
+
+        // ------------------------------------------------------
+        // Validate booking
+        // ------------------------------------------------------
+
+        if (!bookingId) {
+          throw new HttpsError(
+              "invalid-argument",
+              "bookingId is required.",
+          );
+        }
+
+        // ------------------------------------------------------
+        // Call actual Razorpay service
+        // ------------------------------------------------------
+
+        const result =
+          await createRazorpayOrder({
+            tenantId:
+              tenantId,
+
+            bookingId:
+              bookingId,
+
+            userId:
+              userId,
+          });
+
+        return result;
+      } catch (error) {
+        console.error(
+            "createRazorpayOrder failed:",
+            error,
+        );
+
+        // Preserve Firebase HttpsError.
+        if (
+          error instanceof HttpsError
+        ) {
+          throw error;
+        }
+
+        throw new HttpsError(
+            "internal",
+            error.message ||
+              "Unable to create Razorpay order.",
+        );
+      }
+    },
+);
+
+// ============================================================
+// RAZORPAY VERIFY PAYMENT
+// ============================================================
+//
+// Flutter sends:
+//
+// {
+//   tenantId: "...",
+//   orderId: "...",
+//   paymentId: "...",
+//   signature: "..."
+//
+// }
+//
+// razorpay.js uses the tenant-specific Razorpay secret to
+// calculate:
+//
+// HMAC-SHA256(orderId + "|" + paymentId)
+//
+// and compares it securely against the Razorpay signature.
+//
+// ============================================================
+
+exports.verifyRazorpaySignature = onCall(
+    async (request) => {
+      try {
+        // ------------------------------------------------------
+        // Authentication
+        // ------------------------------------------------------
+
+        if (!request.auth) {
+          throw new HttpsError(
+              "unauthenticated",
+              "You must be logged in to verify payment.",
+          );
+        }
+
+        // ------------------------------------------------------
+        // Request data
+        // ------------------------------------------------------
+
+        const data =
+          request.data || {};
+
+        const tenantId =
+          String(
+              data.tenantId || "",
+          ).trim();
+
+        const orderId =
+          String(
+              data.orderId || "",
+          ).trim();
+
+        const paymentId =
+          String(
+              data.paymentId || "",
+          ).trim();
+
+        const signature =
+          String(
+              data.signature || "",
+          ).trim();
+
+        // ------------------------------------------------------
+        // Validate tenant
+        // ------------------------------------------------------
+
+        if (!tenantId) {
+          throw new HttpsError(
+              "invalid-argument",
+              "tenantId is required.",
+          );
+        }
+
+        // ------------------------------------------------------
+        // Validate order
+        // ------------------------------------------------------
+
+        if (!orderId) {
+          throw new HttpsError(
+              "invalid-argument",
+              "orderId is required.",
+          );
+        }
+
+        // ------------------------------------------------------
+        // Validate payment
+        // ------------------------------------------------------
+
+        if (!paymentId) {
+          throw new HttpsError(
+              "invalid-argument",
+              "paymentId is required.",
+          );
+        }
+
+        // ------------------------------------------------------
+        // Validate signature
+        // ------------------------------------------------------
+
+        if (!signature) {
+          throw new HttpsError(
+              "invalid-argument",
+              "signature is required.",
+          );
+        }
+
+        // ------------------------------------------------------
+        // Verify actual Razorpay signature
+        // ------------------------------------------------------
+
+        const verified =
+          await verifyRazorpaySignature({
+            tenantId:
+              tenantId,
+
+            orderId:
+              orderId,
+
+            paymentId:
+              paymentId,
+
+            signature:
+              signature,
+          });
+
+        // ------------------------------------------------------
+        // Invalid signature
+        // ------------------------------------------------------
+
+        if (!verified) {
+          throw new HttpsError(
+              "permission-denied",
+              "Invalid Razorpay payment signature.",
+          );
+        }
+
+        // ------------------------------------------------------
+        // Success
+        // ------------------------------------------------------
+
+        return {
+          success:
+            true,
+
+          verified:
+            true,
+
+          tenantId:
+            tenantId,
+
+          orderId:
+            orderId,
+
+          paymentId:
+            paymentId,
+        };
+      } catch (error) {
+        console.error(
+            "verifyRazorpaySignature failed:",
+            error,
+        );
+
+        // Preserve Firebase HttpsError.
+        if (
+          error instanceof HttpsError
+        ) {
+          throw error;
+        }
+
+        throw new HttpsError(
+            "internal",
+            error.message ||
+              "Unable to verify Razorpay payment.",
+        );
+      }
+    },
+);
