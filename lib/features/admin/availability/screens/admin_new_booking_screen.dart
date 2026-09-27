@@ -3982,17 +3982,602 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     return null;
   }
 
+  // ============================================================================
+  // PREMIUM AVAILABLE VEHICLES PDF
+  //
+  // IMPORTANT:
+  // - The availability PDF is generated BEFORE a rental type is selected.
+  // - Therefore it must NOT depend on _rentalType / _pricingRentalType.
+  // - Every selected vehicle loads its OWN pricing profile using its
+  //   pricingProfileId.
+  // - Both hourlyPackages and dailyPackages are shown in the PDF.
+  // - Live availability is rechecked immediately before the PDF is generated.
+  // ============================================================================
+
+  Future<PricingProfile?> _loadPdfPricingProfile(Car car) async {
+    final profileId = car.pricingProfileId.trim();
+
+    if (profileId.isEmpty) {
+      developer.log(
+        'PDF pricing skipped: vehicle ${car.id} has no pricingProfileId.',
+        name: 'AdminNewBooking',
+      );
+      return null;
+    }
+
+    try {
+      final profile = await PricingManager.instance.loadPricingForCar(
+        tenantId: _tenantId,
+        pricingProfileId: profileId,
+      );
+
+      if (profile != null) {
+        developer.log(
+          'PDF pricing profile loaded: id=${profile.id}, '
+          'hourly=${profile.hourlyPackages.length}, '
+          'daily=${profile.dailyPackages.length}',
+          name: 'AdminNewBooking',
+        );
+      }
+
+      return profile;
+    } catch (e, stackTrace) {
+      developer.log(
+        'Unable to load PDF pricing profile for vehicle ${car.id}',
+        name: 'AdminNewBooking',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      return null;
+    }
+  }
+
+  Future<Map<String, dynamic>?> _loadPdfPricingRawData(Car car) async {
+    final profileId = car.pricingProfileId.trim();
+    if (profileId.isEmpty) return null;
+
+    try {
+      final doc = await _firestore
+          .collection('tenants')
+          .doc(_tenantId)
+          .collection('pricingProfiles')
+          .doc(profileId)
+          .get();
+
+      if (!doc.exists) {
+        developer.log(
+          'PDF pricing document does not exist: tenants/$_tenantId/pricingProfiles/$profileId',
+          name: 'AdminNewBooking',
+        );
+        return null;
+      }
+
+      return doc.data();
+    } catch (e, stackTrace) {
+      developer.log(
+        'Unable to read raw PDF pricing profile for vehicle ${car.id}',
+        name: 'AdminNewBooking',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      return null;
+    }
+  }
+
+  List<dynamic> _pdfRawPackageList(
+    Map<String, dynamic>? rawData,
+    String key,
+  ) {
+    if (rawData == null) return const <dynamic>[];
+
+    final value = rawData[key];
+
+    if (value is Iterable) {
+      return value.toList();
+    }
+
+    return const <dynamic>[];
+  }
+
+  String _pdfRawPackageName(
+    Map<String, dynamic> package,
+  ) {
+    final value =
+        package['name'] ??
+        package['packageName'] ??
+        package['title'] ??
+        package['label'];
+
+    final text = value?.toString().trim() ?? '';
+    return text.isEmpty ? 'Package' : text;
+  }
+
+  double _pdfRawDouble(
+    dynamic value,
+  ) {
+    if (value is num) {
+      return value.toDouble();
+    }
+
+    return double.tryParse(
+          value?.toString().replaceAll(',', '').trim() ?? '',
+        ) ??
+        0;
+  }
+
+  bool _pdfRawBool(
+    dynamic value, {
+    bool fallback = false,
+  }) {
+    if (value is bool) return value;
+
+    final text = value?.toString().trim().toLowerCase();
+
+    if (text == 'true' || text == '1' || text == 'yes') {
+      return true;
+    }
+
+    if (text == 'false' || text == '0' || text == 'no') {
+      return false;
+    }
+
+    return fallback;
+  }
+
+  String _pdfRawPackageIncludedKm(
+    Map<String, dynamic> package,
+  ) {
+    final unlimited = _pdfRawBool(
+      package['unlimitedKm'] ?? package['isUnlimitedKm'],
+    );
+
+    if (unlimited) return 'Unlimited';
+
+    final value =
+        package['includedKm'] ??
+        package['includedKM'] ??
+        package['kmIncluded'] ??
+        package['km'];
+
+    final km = _pdfRawDouble(value);
+
+    if (km <= 0) return '—';
+
+    return '${km == km.roundToDouble() ? km.toInt() : km} KM';
+  }
+
+  String _pdfRawExtraKm(
+    Map<String, dynamic> package,
+  ) {
+    final unlimited = _pdfRawBool(
+      package['unlimitedKm'] ?? package['isUnlimitedKm'],
+    );
+
+    if (unlimited) return '—';
+
+    final value =
+        package['extraKmRate'] ??
+        package['extraKMRate'] ??
+        package['perKmRate'] ??
+        package['extraKmCharge'];
+
+    final rate = _pdfRawDouble(value);
+
+    if (rate <= 0) return '—';
+
+    return '${_pdfMoney(rate)}/KM';
+  }
+
+  double _pdfRawHourlyRate(
+    Map<String, dynamic> package,
+  ) {
+    return _pdfRawDouble(
+      package['hourlyRate'] ??
+          package['hourlyPrice'] ??
+          package['pricePerHour'] ??
+          package['ratePerHour'],
+    );
+  }
+
+  double _pdfRawDailyRate(
+    Map<String, dynamic> package,
+  ) {
+    return _pdfRawDouble(
+      package['dailyRate'] ??
+          package['dailyPrice'] ??
+          package['pricePerDay'] ??
+          package['ratePerDay'],
+    );
+  }
+
+  bool _pdfRawPackageActive(
+    Map<String, dynamic> package,
+  ) {
+    return _pdfRawBool(
+      package['isActive'],
+      fallback: true,
+    );
+  }
+
   String _pdfMoney(double value) {
+    if (!value.isFinite) return 'Rs 0';
+
     if (value == value.roundToDouble()) {
       return 'Rs ${value.toInt()}';
     }
+
     return 'Rs ${value.toStringAsFixed(2)}';
   }
 
   String _pdfSafe(dynamic value) {
     if (value == null) return '—';
+
     final text = value.toString().trim();
     return text.isEmpty ? '—' : text;
+  }
+
+  String _pdfRentalDuration() {
+    final duration = _returnDateTime.difference(_pickupDateTime);
+
+    if (duration.isNegative || duration.inMinutes <= 0) {
+      return '—';
+    }
+
+    final totalMinutes = duration.inMinutes;
+    final days = totalMinutes ~/ (24 * 60);
+    final remainder = totalMinutes % (24 * 60);
+    final hours = remainder ~/ 60;
+    final minutes = remainder % 60;
+
+    final parts = <String>[];
+
+    if (days > 0) {
+      parts.add('$days ${days == 1 ? 'Day' : 'Days'}');
+    }
+
+    if (hours > 0) {
+      parts.add('$hours ${hours == 1 ? 'Hour' : 'Hours'}');
+    }
+
+    if (minutes > 0) {
+      parts.add('$minutes ${minutes == 1 ? 'Min' : 'Mins'}');
+    }
+
+    return parts.isEmpty ? 'Less than 1 hour' : parts.join(' ');
+  }
+
+  List<KmPricingPackage> _pdfActivePackages(
+    List<KmPricingPackage> packages,
+    RentalType type,
+  ) {
+    return packages.where((package) {
+      if (!package.isActive) return false;
+
+      if (type == RentalType.hourly) {
+        return package.supportsHourly || package.safeHourlyRate > 0;
+      }
+
+      return package.supportsDaily || package.safeDailyRate > 0;
+    }).toList();
+  }
+
+  pw.Widget _pdfPackageTableFromModels({
+    required String title,
+    required List<KmPricingPackage> packages,
+    required RentalType rentalType,
+  }) {
+    final activePackages =
+        _pdfActivePackages(packages, rentalType);
+
+    if (activePackages.isEmpty) {
+      return pw.Container(
+        width: double.infinity,
+        padding: const pw.EdgeInsets.all(12),
+        decoration: pw.BoxDecoration(
+          color: pdf.PdfColors.grey100,
+          borderRadius: pw.BorderRadius.circular(8),
+          border: pw.Border.all(
+            color: pdf.PdfColors.grey300,
+          ),
+        ),
+        child: pw.Text(
+          'No active $title packages found in this pricing profile.',
+          style: const pw.TextStyle(
+            fontSize: 8,
+            color: pdf.PdfColors.grey600,
+          ),
+        ),
+      );
+    }
+
+    final headerStyle = pw.TextStyle(
+      fontSize: 7.5,
+      fontWeight: pw.FontWeight.bold,
+      color: pdf.PdfColors.white,
+    );
+
+    final cellStyle = const pw.TextStyle(
+      fontSize: 7.5,
+      color: pdf.PdfColors.grey800,
+    );
+
+    final rows = <pw.TableRow>[
+      pw.TableRow(
+        decoration: const pw.BoxDecoration(
+          color: pdf.PdfColors.teal800,
+        ),
+        children: [
+          _pdfTableCell('Package', style: headerStyle),
+          _pdfTableCell('Included KM', style: headerStyle),
+          _pdfTableCell('Extra KM', style: headerStyle),
+          _pdfTableCell(
+            rentalType == RentalType.hourly
+                ? 'Hourly Price'
+                : 'Daily Price',
+            style: headerStyle,
+          ),
+        ],
+      ),
+    ];
+
+    for (final package in activePackages) {
+      final rate = rentalType == RentalType.hourly
+          ? package.safeHourlyRate
+          : package.safeDailyRate;
+
+      rows.add(
+        pw.TableRow(
+          children: [
+            _pdfTableCell(
+              package.name,
+              style: cellStyle.copyWith(
+                fontWeight: pw.FontWeight.bold,
+              ),
+            ),
+            _pdfTableCell(
+              package.unlimitedKm
+                  ? 'Unlimited'
+                  : '${package.safeIncludedKm} KM',
+              style: cellStyle,
+            ),
+            _pdfTableCell(
+              package.unlimitedKm
+                  ? '—'
+                  : '${_pdfMoney(package.safeExtraKmRate)}/KM',
+              style: cellStyle,
+            ),
+            _pdfTableCell(
+              _pdfMoney(rate),
+              style: cellStyle.copyWith(
+                fontWeight: pw.FontWeight.bold,
+                color: pdf.PdfColors.teal800,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return pw.Column(
+      crossAxisAlignment: pw.CrossAxisAlignment.start,
+      children: [
+        pw.Text(
+          title.toUpperCase(),
+          style: pw.TextStyle(
+            fontSize: 10,
+            fontWeight: pw.FontWeight.bold,
+            color: pdf.PdfColors.teal800,
+          ),
+        ),
+        pw.SizedBox(height: 6),
+        pw.Table(
+          border: pw.TableBorder.all(
+            color: pdf.PdfColors.grey300,
+            width: .55,
+          ),
+          columnWidths: const {
+            0: pw.FlexColumnWidth(1.55),
+            1: pw.FlexColumnWidth(1.15),
+            2: pw.FlexColumnWidth(1.15),
+            3: pw.FlexColumnWidth(1.25),
+          },
+          children: rows,
+        ),
+      ],
+    );
+  }
+
+  pw.Widget _pdfPackageTableFromRaw({
+    required String title,
+    required List<dynamic> rawPackages,
+    required RentalType rentalType,
+  }) {
+    final activePackages = rawPackages.whereType<Map>().where((raw) {
+      final package = Map<String, dynamic>.from(raw);
+
+      if (!_pdfRawPackageActive(package)) return false;
+
+      final unlimited = _pdfRawBool(
+        package['unlimitedKm'] ?? package['isUnlimitedKm'],
+      );
+
+      final rate = rentalType == RentalType.hourly
+          ? _pdfRawHourlyRate(package)
+          : _pdfRawDailyRate(package);
+
+      return unlimited || rate > 0;
+    }).map(Map<String, dynamic>.from).toList();
+
+    if (activePackages.isEmpty) {
+      return pw.Container(
+        width: double.infinity,
+        padding: const pw.EdgeInsets.all(12),
+        decoration: pw.BoxDecoration(
+          color: pdf.PdfColors.grey100,
+          borderRadius: pw.BorderRadius.circular(8),
+          border: pw.Border.all(
+            color: pdf.PdfColors.grey300,
+          ),
+        ),
+        child: pw.Text(
+          'No active $title packages found in the pricing document.',
+          style: const pw.TextStyle(
+            fontSize: 8,
+            color: pdf.PdfColors.grey600,
+          ),
+        ),
+      );
+    }
+
+    final headerStyle = pw.TextStyle(
+      fontSize: 7.5,
+      fontWeight: pw.FontWeight.bold,
+      color: pdf.PdfColors.white,
+    );
+
+    final cellStyle = const pw.TextStyle(
+      fontSize: 7.5,
+      color: pdf.PdfColors.grey800,
+    );
+
+    final rows = <pw.TableRow>[
+      pw.TableRow(
+        decoration: const pw.BoxDecoration(
+          color: pdf.PdfColors.teal800,
+        ),
+        children: [
+          _pdfTableCell('Package', style: headerStyle),
+          _pdfTableCell('Included KM', style: headerStyle),
+          _pdfTableCell('Extra KM', style: headerStyle),
+          _pdfTableCell(
+            rentalType == RentalType.hourly
+                ? 'Hourly Price'
+                : 'Daily Price',
+            style: headerStyle,
+          ),
+        ],
+      ),
+    ];
+
+    for (final package in activePackages) {
+      final rate = rentalType == RentalType.hourly
+          ? _pdfRawHourlyRate(package)
+          : _pdfRawDailyRate(package);
+
+      rows.add(
+        pw.TableRow(
+          children: [
+            _pdfTableCell(
+              _pdfRawPackageName(package),
+              style: cellStyle.copyWith(
+                fontWeight: pw.FontWeight.bold,
+              ),
+            ),
+            _pdfTableCell(
+              _pdfRawPackageIncludedKm(package),
+              style: cellStyle,
+            ),
+            _pdfTableCell(
+              _pdfRawExtraKm(package),
+              style: cellStyle,
+            ),
+            _pdfTableCell(
+              _pdfMoney(rate),
+              style: cellStyle.copyWith(
+                fontWeight: pw.FontWeight.bold,
+                color: pdf.PdfColors.teal800,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return pw.Column(
+      crossAxisAlignment: pw.CrossAxisAlignment.start,
+      children: [
+        pw.Text(
+          title.toUpperCase(),
+          style: pw.TextStyle(
+            fontSize: 10,
+            fontWeight: pw.FontWeight.bold,
+            color: pdf.PdfColors.teal800,
+          ),
+        ),
+        pw.SizedBox(height: 6),
+        pw.Table(
+          border: pw.TableBorder.all(
+            color: pdf.PdfColors.grey300,
+            width: .55,
+          ),
+          columnWidths: const {
+            0: pw.FlexColumnWidth(1.55),
+            1: pw.FlexColumnWidth(1.15),
+            2: pw.FlexColumnWidth(1.15),
+            3: pw.FlexColumnWidth(1.25),
+          },
+          children: rows,
+        ),
+      ],
+    );
+  }
+
+  pw.Widget _pdfTableCell(
+    String text, {
+    required pw.TextStyle style,
+  }) {
+    return pw.Padding(
+      padding: const pw.EdgeInsets.symmetric(
+        horizontal: 6,
+        vertical: 7,
+      ),
+      child: pw.Text(
+        _pdfSafe(text),
+        style: style,
+      ),
+    );
+  }
+
+  pw.Widget _pdfInfoChip(
+    String label,
+    String value,
+  ) {
+    return pw.Container(
+      padding: const pw.EdgeInsets.symmetric(
+        horizontal: 8,
+        vertical: 6,
+      ),
+      decoration: pw.BoxDecoration(
+        color: pdf.PdfColors.grey100,
+        borderRadius: pw.BorderRadius.circular(5),
+        border: pw.Border.all(
+          color: pdf.PdfColors.grey300,
+          width: .5,
+        ),
+      ),
+      child: pw.RichText(
+        text: pw.TextSpan(
+          children: [
+            pw.TextSpan(
+              text: '$label  ',
+              style: pw.TextStyle(
+                fontSize: 7,
+                fontWeight: pw.FontWeight.bold,
+                color: pdf.PdfColors.grey600,
+              ),
+            ),
+            pw.TextSpan(
+              text: _pdfSafe(value),
+              style: pw.TextStyle(
+                fontSize: 7,
+                fontWeight: pw.FontWeight.bold,
+                color: pdf.PdfColors.grey900,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _shareSelectedVehiclesPdf() async {
@@ -4010,9 +4595,9 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
     setState(() => _sharingVehiclePdf = true);
 
     try {
-      // Re-check the selected vehicles against the same live availability
-      // engine before generating the document. This prevents a stale list
-      // from being shared as currently available.
+      // ------------------------------------------------------------
+      // LIVE AVAILABILITY RECHECK
+      // ------------------------------------------------------------
       final snapshot = await _availabilityService.getAvailabilityForRange(
         rangeStart: _pickupDateTime,
         rangeEnd: _returnDateTime,
@@ -4020,6 +4605,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       );
 
       final freshSelected = <Car>[];
+
       for (final selectedCar in selected) {
         final fresh = snapshot.cars.cast<Car?>().firstWhere(
           (candidate) => candidate?.id == selectedCar.id,
@@ -4049,9 +4635,9 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
       }
 
       if (freshSelected.length != selected.length && mounted) {
-        final unavailableIds =
-            selected.map((car) => car.id).toSet()
-              ..removeAll(freshSelected.map((car) => car.id));
+        final unavailableIds = selected.map((car) => car.id).toSet()
+          ..removeAll(freshSelected.map((car) => car.id));
+
         setState(() => _selectedVehicleIds.removeAll(unavailableIds));
 
         _showError(
@@ -4062,16 +4648,25 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
 
       final document = pw.Document();
       final generatedAt = DateTime.now();
-
       final imageCache = <String, Uint8List>{};
 
-      for (final car in freshSelected) {
+      // ------------------------------------------------------------
+      // ONE PREMIUM PAGE PER AVAILABLE VEHICLE
+      // ------------------------------------------------------------
+      for (var vehicleIndex = 0;
+          vehicleIndex < freshSelected.length;
+          vehicleIndex++) {
+        final car = freshSelected[vehicleIndex];
+
         final imageUrls = await _loadVehicleImageUrls(car);
         final rawDetails = await _loadVehicleRawDetails(car);
+
         final images = <pw.ImageProvider>[];
 
         for (final url in imageUrls) {
-          final cached = imageCache[url] ?? await _downloadPdfImage(url);
+          final cached =
+              imageCache[url] ?? await _downloadPdfImage(url);
+
           if (cached != null) {
             imageCache[url] = cached;
             images.add(pw.MemoryImage(cached));
@@ -4079,7 +4674,11 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
         }
 
         final branchNames = _allBranches
-            .where((branch) => car.branchIds.contains(branch['id']?.toString()))
+            .where(
+              (branch) => car.branchIds.contains(
+                branch['id']?.toString(),
+              ),
+            )
             .map((branch) {
               final name = branch['name']?.toString() ?? '';
               final city = branch['city']?.toString() ?? '';
@@ -4088,132 +4687,482 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
             .where((value) => value.trim().isNotEmpty)
             .toList();
 
+        // ----------------------------------------------------------
+        // LOAD THIS VEHICLE'S PRICING PROFILE
+        // ----------------------------------------------------------
+        final pricingProfile =
+            await _loadPdfPricingProfile(car);
+
+        // Direct raw Firestore fallback is intentionally included.
+        // This makes the PDF useful even when an older pricing document
+        // contains package fields that the current PricingProfile parser
+        // does not expose.
+        Map<String, dynamic>? rawPricing;
+
+        if (pricingProfile == null ||
+            (pricingProfile.hourlyPackages.isEmpty &&
+                pricingProfile.dailyPackages.isEmpty)) {
+          rawPricing = await _loadPdfPricingRawData(car);
+        }
+
+        final hourlyPackages =
+            pricingProfile?.hourlyPackages ?? const <KmPricingPackage>[];
+        final dailyPackages =
+            pricingProfile?.dailyPackages ?? const <KmPricingPackage>[];
+
+        final hasModelPackages =
+            hourlyPackages.isNotEmpty || dailyPackages.isNotEmpty;
+
+        final rawHourlyPackages =
+            _pdfRawPackageList(rawPricing, 'hourlyPackages');
+        final rawDailyPackages =
+            _pdfRawPackageList(rawPricing, 'dailyPackages');
+
+        final pricingPackageSection = pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Text(
+              'PACKAGE OPTIONS',
+              style: pw.TextStyle(
+                fontSize: 11,
+                fontWeight: pw.FontWeight.bold,
+                color: pdf.PdfColors.teal800,
+              ),
+            ),
+            pw.SizedBox(height: 4),
+            pw.Text(
+              'Hourly and daily packages available for this vehicle.',
+              style: const pw.TextStyle(
+                fontSize: 7.5,
+                color: pdf.PdfColors.grey600,
+              ),
+            ),
+            pw.SizedBox(height: 9),
+            if (hasModelPackages) ...[
+              _pdfPackageTableFromModels(
+                title: 'Hourly Packages',
+                packages: hourlyPackages,
+                rentalType: RentalType.hourly,
+              ),
+              pw.SizedBox(height: 12),
+              _pdfPackageTableFromModels(
+                title: 'Daily Packages',
+                packages: dailyPackages,
+                rentalType: RentalType.daily,
+              ),
+            ] else if (rawHourlyPackages.isNotEmpty ||
+                rawDailyPackages.isNotEmpty) ...[
+              _pdfPackageTableFromRaw(
+                title: 'Hourly Packages',
+                rawPackages: rawHourlyPackages,
+                rentalType: RentalType.hourly,
+              ),
+              pw.SizedBox(height: 12),
+              _pdfPackageTableFromRaw(
+                title: 'Daily Packages',
+                rawPackages: rawDailyPackages,
+                rentalType: RentalType.daily,
+              ),
+            ] else ...[
+              pw.Container(
+                width: double.infinity,
+                padding: const pw.EdgeInsets.all(12),
+                decoration: pw.BoxDecoration(
+                  color: pdf.PdfColors.grey100,
+                  borderRadius: pw.BorderRadius.circular(8),
+                  border: pw.Border.all(
+                    color: pdf.PdfColors.grey300,
+                  ),
+                ),
+                child: pw.Text(
+                  'No package records were found in this pricing profile.',
+                  style: const pw.TextStyle(
+                    fontSize: 8,
+                    color: pdf.PdfColors.grey600,
+                  ),
+                ),
+              ),
+            ],
+          ],
+        );
+
         document.addPage(
           pw.MultiPage(
             pageFormat: pdf.PdfPageFormat.a4,
-            margin: pw.EdgeInsets.all(28),
+            margin: const pw.EdgeInsets.fromLTRB(
+              26,
+              24,
+              26,
+              28,
+            ),
             header: (context) => pw.Container(
-              margin: pw.EdgeInsets.only(bottom: 12),
-              padding: pw.EdgeInsets.only(bottom: 10),
-              decoration: pw.BoxDecoration(
+              margin: const pw.EdgeInsets.only(bottom: 14),
+              padding: const pw.EdgeInsets.only(bottom: 10),
+              decoration: const pw.BoxDecoration(
                 border: pw.Border(
                   bottom: pw.BorderSide(
                     color: pdf.PdfColors.grey300,
-                    width: .8,
+                    width: .7,
                   ),
                 ),
               ),
               child: pw.Row(
-                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                mainAxisAlignment:
+                    pw.MainAxisAlignment.spaceBetween,
                 children: [
+                  pw.Row(
+                    children: [
+                      pw.Container(
+                        width: 26,
+                        height: 26,
+                        decoration: pw.BoxDecoration(
+                          color: pdf.PdfColors.teal800,
+                          borderRadius:
+                              pw.BorderRadius.circular(7),
+                        ),
+                        child: pw.Center(
+                          child: pw.Text(
+                            'R',
+                            style: pw.TextStyle(
+                              color: pdf.PdfColors.white,
+                              fontSize: 15,
+                              fontWeight: pw.FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ),
+                      pw.SizedBox(width: 8),
+                      pw.Text(
+                        'RENTOCAR',
+                        style: pw.TextStyle(
+                          fontSize: 13,
+                          fontWeight: pw.FontWeight.bold,
+                          color: pdf.PdfColors.grey900,
+                        ),
+                      ),
+                    ],
+                  ),
                   pw.Text(
-                    'VEHICLE AVAILABILITY',
+                    'AVAILABLE CARS',
                     style: pw.TextStyle(
-                      fontSize: 14,
+                      fontSize: 8,
                       fontWeight: pw.FontWeight.bold,
                       color: pdf.PdfColors.teal800,
                     ),
                   ),
+                ],
+              ),
+            ),
+            footer: (context) => pw.Container(
+              margin: const pw.EdgeInsets.only(top: 10),
+              padding: const pw.EdgeInsets.only(top: 8),
+              decoration: const pw.BoxDecoration(
+                border: pw.Border(
+                  top: pw.BorderSide(
+                    color: pdf.PdfColors.grey300,
+                    width: .6,
+                  ),
+                ),
+              ),
+              child: pw.Row(
+                mainAxisAlignment:
+                    pw.MainAxisAlignment.spaceBetween,
+                children: [
                   pw.Text(
                     'Generated ${_formatDateTime(generatedAt)}',
-                    style: pw.TextStyle(
-                      fontSize: 8,
+                    style: const pw.TextStyle(
+                      fontSize: 7,
+                      color: pdf.PdfColors.grey600,
+                    ),
+                  ),
+                  pw.Text(
+                    'Page ${context.pageNumber} / ${context.pagesCount}',
+                    style: const pw.TextStyle(
+                      fontSize: 7,
                       color: pdf.PdfColors.grey600,
                     ),
                   ),
                 ],
               ),
             ),
-            footer: (context) => pw.Align(
-              alignment: pw.Alignment.centerRight,
-              child: pw.Text(
-                'Page ${context.pageNumber} / ${context.pagesCount}',
-                style: pw.TextStyle(
-                  fontSize: 8,
-                  color: pdf.PdfColors.grey600,
-                ),
-              ),
-            ),
             build: (context) => [
-              pw.Text(
-                car.name,
-                style: pw.TextStyle(
-                  fontSize: 24,
-                  fontWeight: pw.FontWeight.bold,
-                  color: pdf.PdfColors.grey900,
-                ),
-              ),
-              pw.SizedBox(height: 5),
-              pw.Text(
-                '${car.type} • ${car.transmission} • ${car.fuel}',
-                style: pw.TextStyle(
-                  fontSize: 10,
-                  color: pdf.PdfColors.grey600,
-                ),
-              ),
-              pw.SizedBox(height: 14),
-
-              if (images.isNotEmpty) ...[
-                pw.Text(
-                  'Vehicle Images (${images.length})',
-                  style: pw.TextStyle(
-                    fontSize: 13,
-                    fontWeight: pw.FontWeight.bold,
+              // ----------------------------------------------------
+              // AVAILABILITY HERO
+              // ----------------------------------------------------
+              pw.Container(
+                padding: const pw.EdgeInsets.all(13),
+                decoration: pw.BoxDecoration(
+                  color: pdf.PdfColors.teal50,
+                  borderRadius: pw.BorderRadius.circular(10),
+                  border: pw.Border.all(
+                    color: pdf.PdfColors.teal200,
                   ),
                 ),
+                child: pw.Row(
+                  children: [
+                    pw.Expanded(
+                      child: pw.Column(
+                        crossAxisAlignment:
+                            pw.CrossAxisAlignment.start,
+                        children: [
+                          pw.Text(
+                            'Available for your selected dates',
+                            style: pw.TextStyle(
+                              fontSize: 9,
+                              fontWeight: pw.FontWeight.bold,
+                              color: pdf.PdfColors.teal800,
+                            ),
+                          ),
+                          pw.SizedBox(height: 4),
+                          pw.Text(
+                            '${_formatDateTime(_pickupDateTime)} → ${_formatDateTime(_returnDateTime)}',
+                            style: pw.TextStyle(
+                              fontSize: 10,
+                              fontWeight: pw.FontWeight.bold,
+                              color: pdf.PdfColors.grey900,
+                            ),
+                          ),
+                          pw.SizedBox(height: 3),
+                          pw.Text(
+                            'Hourly + Daily options • ${_pdfRentalDuration()}',
+                            style: const pw.TextStyle(
+                              fontSize: 8,
+                              color: pdf.PdfColors.grey600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    pw.Container(
+                      padding: const pw.EdgeInsets.symmetric(
+                        horizontal: 9,
+                        vertical: 6,
+                      ),
+                      decoration: pw.BoxDecoration(
+                        color: pdf.PdfColors.green600,
+                        borderRadius: pw.BorderRadius.circular(20),
+                      ),
+                      child: pw.Text(
+                        'AVAILABLE',
+                        style: pw.TextStyle(
+                          color: pdf.PdfColors.white,
+                          fontSize: 7,
+                          fontWeight: pw.FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              pw.SizedBox(height: 14),
+
+              // ----------------------------------------------------
+              // VEHICLE TITLE
+              // ----------------------------------------------------
+              pw.Row(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  pw.Expanded(
+                    child: pw.Column(
+                      crossAxisAlignment:
+                          pw.CrossAxisAlignment.start,
+                      children: [
+                        pw.Text(
+                          _pdfSafe(car.name),
+                          style: pw.TextStyle(
+                            fontSize: 22,
+                            fontWeight: pw.FontWeight.bold,
+                            color: pdf.PdfColors.grey900,
+                          ),
+                        ),
+                        pw.SizedBox(height: 4),
+                        pw.Text(
+                          '${_pdfSafe(car.type)} • ${_pdfSafe(car.transmission)} • ${_pdfSafe(car.fuel)}',
+                          style: const pw.TextStyle(
+                            fontSize: 9,
+                            color: pdf.PdfColors.grey600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  pw.Container(
+                    padding: const pw.EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 5,
+                    ),
+                    decoration: pw.BoxDecoration(
+                      color: pdf.PdfColors.grey100,
+                      borderRadius: pw.BorderRadius.circular(5),
+                    ),
+                    child: pw.Text(
+                      'CAR ${vehicleIndex + 1}',
+                      style: pw.TextStyle(
+                        fontSize: 7,
+                        fontWeight: pw.FontWeight.bold,
+                        color: pdf.PdfColors.grey700,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+
+              pw.SizedBox(height: 12),
+
+              // ----------------------------------------------------
+              // MAIN IMAGE
+              // ----------------------------------------------------
+              if (images.isNotEmpty)
+                pw.Container(
+                  height: 205,
+                  width: double.infinity,
+                  decoration: pw.BoxDecoration(
+                    borderRadius: pw.BorderRadius.circular(10),
+                    border: pw.Border.all(
+                      color: pdf.PdfColors.grey300,
+                    ),
+                  ),
+                  padding: const pw.EdgeInsets.all(3),
+                  child: pw.Image(
+                    images.first,
+                    fit: pw.BoxFit.cover,
+                  ),
+                )
+              else
+                pw.Container(
+                  height: 180,
+                  width: double.infinity,
+                  decoration: pw.BoxDecoration(
+                    color: pdf.PdfColors.grey100,
+                    borderRadius: pw.BorderRadius.circular(10),
+                  ),
+                  child: pw.Center(
+                    child: pw.Text(
+                      'NO VEHICLE IMAGE',
+                      style: pw.TextStyle(
+                        fontSize: 10,
+                        fontWeight: pw.FontWeight.bold,
+                        color: pdf.PdfColors.grey500,
+                      ),
+                    ),
+                  ),
+                ),
+
+              if (images.length > 1) ...[
                 pw.SizedBox(height: 8),
                 pw.Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: images.map(
-                    (image) => pw.Container(
-                      width: 165,
-                      height: 118,
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: images.skip(1).take(5).map((image) {
+                    return pw.Container(
+                      width: 92,
+                      height: 65,
+                      padding: const pw.EdgeInsets.all(2),
                       decoration: pw.BoxDecoration(
                         border: pw.Border.all(
                           color: pdf.PdfColors.grey300,
                         ),
+                        borderRadius: pw.BorderRadius.circular(5),
                       ),
-                      padding: pw.EdgeInsets.all(3),
                       child: pw.Image(
                         image,
                         fit: pw.BoxFit.cover,
                       ),
-                    ),
-                  ).toList(),
+                    );
+                  }).toList(),
                 ),
-                pw.SizedBox(height: 16),
               ],
 
+              pw.SizedBox(height: 10),
+
+              // ----------------------------------------------------
+              // QUICK DETAILS
+              // ----------------------------------------------------
+              pw.Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  _pdfInfoChip('Seats', _pdfSafe(car.seats)),
+                  _pdfInfoChip(
+                    'Transmission',
+                    _pdfSafe(car.transmission),
+                  ),
+                  _pdfInfoChip('Fuel', _pdfSafe(car.fuel)),
+                  _pdfInfoChip('Type', _pdfSafe(car.type)),
+                  _pdfInfoChip(
+                    'Registration',
+                    _pdfSafe(car.registrationNumber),
+                  ),
+                ],
+              ),
+
+              pw.SizedBox(height: 15),
+
+              // ----------------------------------------------------
+              // PACKAGE TABLES
+              // ----------------------------------------------------
+              pricingPackageSection,
+
+              pw.SizedBox(height: 14),
+
+              // ----------------------------------------------------
+              // VEHICLE DETAILS
+              // ----------------------------------------------------
               _pdfVehicleSection(
                 'Vehicle details',
                 [
                   ['Vehicle name', _pdfSafe(car.name)],
                   ['Car ID', _pdfSafe(car.id)],
-                  ['Registration number', _pdfSafe(car.registrationNumber)],
+                  [
+                    'Registration number',
+                    _pdfSafe(car.registrationNumber),
+                  ],
                   ['Vehicle type', _pdfSafe(car.type)],
                   ['Transmission', _pdfSafe(car.transmission)],
                   ['Fuel', _pdfSafe(car.fuel)],
                   ['Seats', _pdfSafe(car.seats)],
-                  ['Pricing profile', _pdfSafe(car.pricingProfileId)],
-                  ['Tenant', _pdfSafe(car.tenantId)],
-                  ['Active', car.isActive ? 'Yes' : 'No'],
-                  ['Sort order', _pdfSafe(car.sortOrder)],
-                  ['Assigned branches', branchNames.isEmpty ? '—' : branchNames.join(' | ')],
+                  [
+                    'Pricing profile',
+                    _pdfSafe(car.pricingProfileId),
+                  ],
+                  [
+                    'Pricing profile loaded',
+                    pricingProfile != null ? 'Yes' : 'No',
+                  ],
+                  [
+                    'Assigned branches',
+                    branchNames.isEmpty
+                        ? '—'
+                        : branchNames.join(' | '),
+                  ],
                 ],
               ),
 
               pw.SizedBox(height: 12),
+
+              // ----------------------------------------------------
+              // RENTAL PERIOD
+              // ----------------------------------------------------
               _pdfVehicleSection(
                 'Requested rental period',
                 [
-                  ['Rental type', _rentalTypeLabel],
-                  ['Pickup', _formatDateTime(_pickupDateTime)],
-                  ['Return', _formatDateTime(_returnDateTime)],
-                  ['Availability', 'Available for the selected period'],
                   [
-                    'Included KM package',
-                    'Will be selected during booking',
+                    'Rental options',
+                    'Hourly + Daily packages',
+                  ],
+                  [
+                    'Pickup',
+                    _formatDateTime(_pickupDateTime),
+                  ],
+                  [
+                    'Return',
+                    _formatDateTime(_returnDateTime),
+                  ],
+                  ['Duration', _pdfRentalDuration()],
+                  [
+                    'Availability',
+                    'Available for the selected period',
                   ],
                 ],
               ),
@@ -4249,6 +5198,10 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
               ],
 
               pw.SizedBox(height: 12),
+
+              // ----------------------------------------------------
+              // READINESS
+              // ----------------------------------------------------
               _pdfVehicleSection(
                 'Booking readiness',
                 [
@@ -4258,27 +5211,26 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
                   ],
                   [
                     'Next step',
-                    'Select this vehicle to continue with branch, customer, KM package and pricing',
+                    'Select the vehicle to continue with branch, customer, package and pricing',
                   ],
                 ],
               ),
 
-              pw.SizedBox(height: 16),
+              pw.SizedBox(height: 14),
+
               pw.Container(
-                padding: pw.EdgeInsets.all(10),
+                padding: const pw.EdgeInsets.all(10),
                 decoration: pw.BoxDecoration(
                   color: pdf.PdfColors.grey100,
-                  borderRadius: pw.BorderRadius.all(
-                    pw.Radius.circular(6),
-                  ),
+                  borderRadius: pw.BorderRadius.circular(7),
                 ),
                 child: pw.Text(
-                  'This document is an availability/fleet presentation generated '
-                  'from the admin booking screen. Final booking availability '
-                  'is revalidated before a booking is created.',
-                  style: pw.TextStyle(
-                    fontSize: 8,
-                    color: pdf.PdfColors.grey700,
+                  'Availability was rechecked immediately before generating this document. '
+                  'Package prices shown are the current normal package rates from the vehicle pricing profile. '
+                  'Any date-specific special pricing is applied by the booking pricing engine during final booking calculation.',
+                  style: const pw.TextStyle(
+                    fontSize: 7.5,
+                    color: pdf.PdfColors.grey600,
                   ),
                 ),
               ),
@@ -4301,6 +5253,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
         error: e,
         stackTrace: stackTrace,
       );
+
       if (mounted) {
         _showError('Unable to create the vehicle PDF.');
       }
@@ -4321,7 +5274,7 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
         pw.Text(
           title,
           style: pw.TextStyle(
-            fontSize: 13,
+            fontSize: 10,
             fontWeight: pw.FontWeight.bold,
             color: pdf.PdfColors.teal800,
           ),
@@ -4330,37 +5283,43 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
         pw.Table(
           border: pw.TableBorder.all(
             color: pdf.PdfColors.grey300,
-            width: .6,
+            width: .55,
           ),
           columnWidths: const {
-            0: pw.FlexColumnWidth(1.05),
-            1: pw.FlexColumnWidth(2),
+            0: pw.FlexColumnWidth(1.25),
+            1: pw.FlexColumnWidth(2.3),
           },
-          children: rows
-              .map(
-                (row) => pw.TableRow(
-                  children: [
-                    pw.Padding(
-                      padding: pw.EdgeInsets.all(6),
-                      child: pw.Text(
-                        row[0],
-                        style: pw.TextStyle(
-                          fontSize: 8.5,
-                          fontWeight: pw.FontWeight.bold,
-                        ),
-                      ),
+          children: rows.map((row) {
+            final key = row.isNotEmpty ? row[0] : '—';
+            final value = row.length > 1 ? row[1] : '—';
+
+            return pw.TableRow(
+              children: [
+                pw.Container(
+                  color: pdf.PdfColors.grey100,
+                  padding: const pw.EdgeInsets.all(6),
+                  child: pw.Text(
+                    _pdfSafe(key),
+                    style: pw.TextStyle(
+                      fontSize: 7.5,
+                      fontWeight: pw.FontWeight.bold,
+                      color: pdf.PdfColors.grey700,
                     ),
-                    pw.Padding(
-                      padding: pw.EdgeInsets.all(6),
-                      child: pw.Text(
-                        row[1],
-                        style: pw.TextStyle(fontSize: 8.5),
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
-              )
-              .toList(),
+                pw.Padding(
+                  padding: const pw.EdgeInsets.all(6),
+                  child: pw.Text(
+                    _pdfSafe(value),
+                    style: const pw.TextStyle(
+                      fontSize: 7.5,
+                      color: pdf.PdfColors.grey800,
+                    ),
+                  ),
+                ),
+              ],
+            );
+          }).toList(),
         ),
       ],
     );

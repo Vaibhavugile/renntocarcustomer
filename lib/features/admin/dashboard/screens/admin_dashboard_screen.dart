@@ -10,6 +10,7 @@ import '../../customers/screens/admin_customers_screen.dart';
 import '../../availability/screens/admin_new_booking_screen.dart';
 import '../../booking/screens/admin_bookings_screen.dart';
 import '../../pricing/screens/admin_pricing_profiles_screen.dart';
+import '../../notifications/screens/admin_push_notification_screen.dart';
 
 class AdminDashboardScreen extends StatefulWidget {
   const AdminDashboardScreen({
@@ -1057,6 +1058,19 @@ class _AdminDashboardScreenState
 
         _QuickActionCard(
           icon:
+              Icons.notifications_active_outlined,
+          title:
+              'Push Notifications',
+          subtitle:
+              'Send custom notifications to your customers',
+          onTap:
+              _openPushNotifications,
+        ),
+
+        const SizedBox(height: 10),
+
+        _QuickActionCard(
+          icon:
               Icons.storefront_rounded,
           title: 'Branches',
           subtitle:
@@ -1104,6 +1118,19 @@ class _AdminDashboardScreenState
 
     await _loadDashboard(
       refresh: true,
+    );
+  }
+
+  // ============================================================
+  // PUSH NOTIFICATIONS
+  // ============================================================
+
+  Future<void> _openPushNotifications() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) =>
+            const AdminPushNotificationScreen(),
+      ),
     );
   }
 
@@ -1783,6 +1810,17 @@ class _AdminDashboardScreenState
                         _showComingSoon(
                       'Invoices',
                     ),
+                  ),
+
+                  _drawerItem(
+                    icon:
+                        Icons.notifications_active_outlined,
+                    title:
+                        'Push Notifications',
+                    onTap: () {
+                      Navigator.pop(context);
+                      _openPushNotifications();
+                    },
                   ),
 
                   _drawerSection(
