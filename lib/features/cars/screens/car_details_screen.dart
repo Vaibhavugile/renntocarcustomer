@@ -19,9 +19,17 @@ import '../models/car.dart';
 class CarDetailsScreen extends StatefulWidget {
   final Car car;
 
+  /// Optional trip selection coming from Home / Featured Cars.
+  final DateTime? pickupDateTime;
+  final DateTime? returnDateTime;
+  final String? rentalType;
+
   const CarDetailsScreen({
     super.key,
     required this.car,
+    this.pickupDateTime,
+    this.returnDateTime,
+    this.rentalType,
   });
 
   @override
@@ -81,6 +89,15 @@ class _CarDetailsScreenState extends State<CarDetailsScreen> {
   String get _tenantId => AppConfig.tenant.tenantId;
 
   Car get _car => widget.car;
+
+  DateTime? get _pickupDateTime => widget.pickupDateTime;
+  DateTime? get _returnDateTime => widget.returnDateTime;
+
+  bool get _hasSelectedTrip =>
+      _pickupDateTime != null && _returnDateTime != null;
+
+  String get _selectedRentalType =>
+      (widget.rentalType ?? '').trim().toLowerCase();
 
   // ===========================================================================
   // IMAGE LIST
@@ -183,8 +200,17 @@ class _CarDetailsScreenState extends State<CarDetailsScreen> {
         _pricingProfile = pricing;
         _isPricingLoading = false;
         _pricingError = null;
-        // Daily is the default when available; otherwise use hourly.
-        _isHourly = !hasDaily && hasHourly;
+
+        // Home/Explore can provide the customer's selected rental basis.
+        // If it is not provided, preserve the existing safe fallback: daily
+        // when available, otherwise hourly.
+        if (_selectedRentalType == 'hourly' && hasHourly) {
+          _isHourly = true;
+        } else if (_selectedRentalType == 'daily' && hasDaily) {
+          _isHourly = false;
+        } else {
+          _isHourly = !hasDaily && hasHourly;
+        }
 
         final defaultPackages = _isHourly
             ? pricing.hourlyPackages
@@ -683,6 +709,11 @@ class _CarDetailsScreenState extends State<CarDetailsScreen> {
         children: [
           _buildTitleAndPricing(),
 
+          if (_hasSelectedTrip) ...[
+            const SizedBox(height: 18),
+            _buildSelectedTripCard(),
+          ],
+
           const SizedBox(height: 22),
 
           _buildVehicleRunning(),
@@ -974,6 +1005,204 @@ class _CarDetailsScreenState extends State<CarDetailsScreen> {
         ],
       ),
     );
+  }
+
+  // ===========================================================================
+  // SELECTED TRIP
+  // ===========================================================================
+
+  Widget _buildSelectedTripCard() {
+    final pickup = _pickupDateTime;
+    final returned = _returnDateTime;
+
+    if (pickup == null || returned == null) {
+      return const SizedBox.shrink();
+    }
+
+    final type = _selectedRentalType == 'hourly'
+        ? 'Hourly'
+        : 'Daily';
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Color(0xFFE8F8F5),
+            Color(0xFFF7FCFB),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(
+          color: const Color(0xFFCDECE6),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: primary,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(
+                  type == 'Hourly'
+                      ? Icons.schedule_rounded
+                      : Icons.calendar_month_rounded,
+                  color: Colors.white,
+                  size: 19,
+                ),
+              ),
+              const SizedBox(width: 11),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'YOUR TRIP',
+                      style: TextStyle(
+                        color: primary,
+                        fontSize: 9,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: .9,
+                      ),
+                    ),
+                    SizedBox(height: 3),
+                    Text(
+                      'Selected dates from your search',
+                      style: TextStyle(
+                        color: body,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 9,
+                  vertical: 6,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  type,
+                  style: const TextStyle(
+                    color: primary,
+                    fontSize: 9,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 15),
+          Row(
+            children: [
+              Expanded(
+                child: _tripDateItem(
+                  icon: Icons.login_rounded,
+                  label: 'PICKUP',
+                  dateTime: pickup,
+                ),
+              ),
+              Container(
+                width: 1,
+                height: 48,
+                margin: const EdgeInsets.symmetric(horizontal: 10),
+                color: const Color(0xFFD3EAE6),
+              ),
+              Expanded(
+                child: _tripDateItem(
+                  icon: Icons.logout_rounded,
+                  label: 'RETURN',
+                  dateTime: returned,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _tripDateItem({
+    required IconData icon,
+    required String label,
+    required DateTime dateTime,
+  }) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(
+          icon,
+          color: primary,
+          size: 16,
+        ),
+        const SizedBox(width: 7),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: const TextStyle(
+                  color: muted,
+                  fontSize: 8,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: .6,
+                ),
+              ),
+              const SizedBox(height: 3),
+              Text(
+                _formatTripDate(dateTime),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: heading,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                _formatTripTime(dateTime),
+                style: const TextStyle(
+                  color: body,
+                  fontSize: 9,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  String _formatTripDate(DateTime value) {
+    const months = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    ];
+    return '${value.day} ${months[value.month - 1]} ${value.year}';
+  }
+
+  String _formatTripTime(DateTime value) {
+    final hour = value.hour % 12 == 0 ? 12 : value.hour % 12;
+    final minute = value.minute.toString().padLeft(2, '0');
+    final period = value.hour >= 12 ? 'PM' : 'AM';
+    return '$hour:$minute $period';
   }
 
   // ===========================================================================
@@ -2685,15 +2914,19 @@ class _CarDetailsScreenState extends State<CarDetailsScreen> {
     }
 
     Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => DateTimeScreen(
-          car: _car,
-          pricingProfile: pricing,
-          rentalType: _isHourly ? 'hourly' : 'daily',
-          selectedPackage: package,
-        ),
-      ),
-    );
+  MaterialPageRoute(
+    builder: (_) => DateTimeScreen(
+      car: _car,
+      pricingProfile: pricing,
+      rentalType: _isHourly ? 'hourly' : 'daily',
+      selectedPackage: package,
+
+      // Preserve the dates selected on Home.
+      initialPickupDateTime: _pickupDateTime,
+      initialReturnDateTime: _returnDateTime,
+    ),
+  ),
+);
   }
 
   KmPricingPackage? _selectedPackage(PricingProfile pricing) {

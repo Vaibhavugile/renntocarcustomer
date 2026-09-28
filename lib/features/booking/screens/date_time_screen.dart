@@ -14,12 +14,23 @@ class DateTimeScreen extends StatefulWidget {
   final String rentalType;
   final KmPricingPackage selectedPackage;
 
+  /// Optional dates supplied by Home/Car Details.
+  ///
+  /// When these are provided, DateTimeScreen opens with the exact
+  /// customer-selected pickup/return range instead of creating a new
+  /// default range. When omitted, the existing Explore/direct-entry
+  /// behaviour is preserved.
+  final DateTime? initialPickupDateTime;
+  final DateTime? initialReturnDateTime;
+
   const DateTimeScreen({
     super.key,
     required this.car,
     required this.pricingProfile,
     required this.rentalType,
     required this.selectedPackage,
+    this.initialPickupDateTime,
+    this.initialReturnDateTime,
   });
 
   @override
@@ -114,20 +125,59 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
         ) !=
         null;
 
-    _setDefaultDateTime();
+    _initializeDateTime();
     _loadAvailability();
   }
 
-  void _setDefaultDateTime() {
-    final now = DateTime.now();
+  /// Initializes the date/time state.
+  ///
+  /// Home -> Featured Cars -> Car Details can provide an already selected
+  /// rental range. We preserve that exact range here. Direct entry from
+  /// Explore still gets the previous next-full-hour + one-day defaults.
+  void _initializeDateTime() {
+    final initialPickup = widget.initialPickupDateTime;
+    final initialReturn = widget.initialReturnDateTime;
 
-    // Default pickup: next full hour.
-    final pickup = DateTime(
-      now.year,
-      now.month,
-      now.day,
-      now.hour + 1,
-    );
+    final hasValidInitialRange =
+        initialPickup != null &&
+        initialReturn != null &&
+        initialReturn.isAfter(initialPickup);
+
+    final DateTime pickup;
+    final DateTime returnDateTime;
+
+    if (hasValidInitialRange) {
+      // Keep the exact hour/minute selected by the customer.
+      pickup = DateTime(
+        initialPickup!.year,
+        initialPickup.month,
+        initialPickup.day,
+        initialPickup.hour,
+        initialPickup.minute,
+      );
+
+      returnDateTime = DateTime(
+        initialReturn!.year,
+        initialReturn.month,
+        initialReturn.day,
+        initialReturn.hour,
+        initialReturn.minute,
+      );
+    } else {
+      final now = DateTime.now();
+
+      // Preserve the existing direct-entry default: next full hour.
+      pickup = DateTime(
+        now.year,
+        now.month,
+        now.day,
+        now.hour + 1,
+      );
+
+      returnDateTime = pickup.add(
+        const Duration(days: 1),
+      );
+    }
 
     final pickupDate = DateTime(
       pickup.year,
@@ -135,32 +185,28 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
       pickup.day,
     );
 
-    final returnDateTime = pickup.add(
-      const Duration(days: 1),
+    _pickupDate = pickupDate;
+    _pickupTime = TimeOfDay(
+      hour: pickup.hour,
+      minute: pickup.minute,
     );
 
-    setState(() {
-      _pickupDate = pickupDate;
-      _pickupTime = TimeOfDay(
-        hour: pickup.hour,
-        minute: 0,
-      );
-      _returnDate = DateTime(
-        returnDateTime.year,
-        returnDateTime.month,
-        returnDateTime.day,
-      );
-      _returnTime = TimeOfDay(
-        hour: returnDateTime.hour,
-        minute: 0,
-      );
-      _datesConfirmed = false;
-      _calendarMonth = DateTime(
-        pickupDate.year,
-        pickupDate.month,
-        1,
-      );
-    });
+    _returnDate = DateTime(
+      returnDateTime.year,
+      returnDateTime.month,
+      returnDateTime.day,
+    );
+    _returnTime = TimeOfDay(
+      hour: returnDateTime.hour,
+      minute: returnDateTime.minute,
+    );
+
+    _datesConfirmed = false;
+    _calendarMonth = DateTime(
+      pickupDate.year,
+      pickupDate.month,
+      1,
+    );
   }
 
   // ============================================================
