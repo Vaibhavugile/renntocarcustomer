@@ -1,5 +1,8 @@
 import 'package:cloud_functions/cloud_functions.dart';
 
+import 'ai_booking_state_service.dart';
+import 'ai_conversation_service.dart';
+
 class AIChatService {
   AIChatService._();
 
@@ -13,6 +16,12 @@ class AIChatService {
     region: _region,
   );
 
+  final AIConversationService _conversationService =
+      AIConversationService.instance;
+
+  final AIBookingStateService _bookingStateService =
+      AIBookingStateService.instance;
+
   // ============================================================
   // SEND MESSAGE
   // ============================================================
@@ -21,8 +30,6 @@ class AIChatService {
     required String tenantId,
     required String message,
     String? conversationId,
-
-    // Optional context that we will use as the chatbot grows.
     String? customerId,
     String? language,
     Map<String, dynamic>? conversationState,
@@ -32,45 +39,81 @@ class AIChatService {
     final cleanMessage = message.trim();
 
     if (cleanTenantId.isEmpty) {
-      throw AIChatException(
+      throw const AIChatException(
         'Tenant information is missing.',
         code: 'invalid-tenant',
       );
     }
 
     if (cleanMessage.isEmpty) {
-      throw AIChatException(
+      throw const AIChatException(
         'Please enter a message.',
         code: 'empty-message',
       );
     }
 
     if (cleanMessage.length > 4000) {
-      throw AIChatException(
+      throw const AIChatException(
         'Your message is too long. Please keep it under 4000 characters.',
         code: 'message-too-long',
       );
     }
 
     try {
-      final callable = _functions.httpsCallable(
-        _functionName,
-        options: HttpsCallableOptions(
-          timeout: const Duration(seconds: 60),
-        ),
+      // ----------------------------------------------------------
+      // 1. GET / CREATE CONVERSATION
+      // ----------------------------------------------------------
+
+      final activeConversationId =
+          await _conversationService.getOrCreateConversation(
+        tenantId: cleanTenantId,
+        conversationId: conversationId,
       );
+
+      // ----------------------------------------------------------
+      // 2. LOAD EXISTING BOOKING STATE
+      // ----------------------------------------------------------
+
+      final storedState =
+          await _conversationService.getConversationState(
+        tenantId: cleanTenantId,
+        conversationId: activeConversationId,
+      );
+
+      // ----------------------------------------------------------
+      // 3. MERGE STATE PASSED BY UI
+      // ----------------------------------------------------------
+
+      Map<String, dynamic> activeState =
+          Map<String, dynamic>.from(storedState);
+
+      if (conversationState != null &&
+          conversationState.isNotEmpty) {
+        activeState.addAll(
+          _removeNullValues(conversationState),
+        );
+      }
+
+      // ----------------------------------------------------------
+      // 4. SAVE CUSTOMER MESSAGE
+      // ----------------------------------------------------------
+
+      await _conversationService.saveUserMessage(
+        tenantId: cleanTenantId,
+        conversationId: activeConversationId,
+        content: cleanMessage,
+      );
+
+      // ----------------------------------------------------------
+      // 5. PREPARE CLOUD FUNCTION REQUEST
+      // ----------------------------------------------------------
 
       final Map<String, dynamic> request = {
         'tenantId': cleanTenantId,
         'message': cleanMessage,
+        'conversationId': activeConversationId,
+        'conversationState': activeState,
       };
-
-      // Only send conversationId when we actually have one.
-      if (conversationId != null &&
-          conversationId.trim().isNotEmpty) {
-        request['conversationId'] =
-            conversationId.trim();
-      }
 
       if (customerId != null &&
           customerId.trim().isNotEmpty) {
@@ -84,20 +127,67 @@ class AIChatService {
             language.trim();
       }
 
-      if (conversationState != null) {
-        request['conversationState'] =
-            conversationState;
-      }
-
-      if (metadata != null) {
+      if (metadata != null &&
+          metadata.isNotEmpty) {
         request['metadata'] = metadata;
       }
 
-      final result = await callable.call(request);
+      // ----------------------------------------------------------
+      // 6. CALL AI CLOUD FUNCTION
+      // ----------------------------------------------------------
 
-      return AIChatResponse.fromCallableResult(
+      final callable = _functions.httpsCallable(
+        _functionName,
+        options: HttpsCallableOptions(
+          timeout: const Duration(seconds: 60),
+        ),
+      );
+
+      final result =
+          await callable.call(request);
+
+      // ----------------------------------------------------------
+      // 7. PARSE RESPONSE
+      // ----------------------------------------------------------
+
+      final response =
+          AIChatResponse.fromCallableResult(
         result,
       );
+
+      // ----------------------------------------------------------
+      // 8. SAVE AI MESSAGE
+      // ----------------------------------------------------------
+
+      final responseConversationId =
+          response.conversationId ??
+              activeConversationId;
+
+      if (response.message.trim().isNotEmpty) {
+        await _conversationService
+            .saveAssistantMessage(
+          tenantId: cleanTenantId,
+          conversationId:
+              responseConversationId,
+          content: response.message,
+        );
+      }
+
+      // ----------------------------------------------------------
+      // 9. SAVE UPDATED BOOKING STATE
+      // ----------------------------------------------------------
+
+      if (response.conversationState.isNotEmpty) {
+        await _conversationService
+            .updateConversationState(
+          tenantId: cleanTenantId,
+          conversationId:
+              responseConversationId,
+          state: response.conversationState,
+        );
+      }
+
+      return response;
     } on FirebaseFunctionsException catch (e) {
       throw AIChatException(
         _friendlyFirebaseError(e),
@@ -116,7 +206,7 @@ class AIChatService {
   }
 
   // ============================================================
-  // SIMPLE MESSAGE METHOD
+  // SIMPLE ASK
   // ============================================================
 
   Future<AIChatResponse> ask({
@@ -129,6 +219,249 @@ class AIChatService {
       message: message,
       conversationId: conversationId,
     );
+  }
+
+  // ============================================================
+  // CREATE CONVERSATION
+  // ============================================================
+
+  Future<String> createConversation({
+    required String tenantId,
+  }) {
+    return _conversationService.createConversation(
+      tenantId: tenantId,
+    );
+  }
+
+  // ============================================================
+  // GET / CREATE CONVERSATION
+  // ============================================================
+
+  Future<String> getOrCreateConversation({
+    required String tenantId,
+    String? conversationId,
+  }) {
+    return _conversationService
+        .getOrCreateConversation(
+      tenantId: tenantId,
+      conversationId: conversationId,
+    );
+  }
+
+  // ============================================================
+  // GET CONVERSATION
+  // ============================================================
+
+  Future<AIConversation?> getConversation({
+    required String tenantId,
+    required String conversationId,
+  }) {
+    return _conversationService.getConversation(
+      tenantId: tenantId,
+      conversationId: conversationId,
+    );
+  }
+
+  // ============================================================
+  // GET CONVERSATION STATE
+  // ============================================================
+
+  Future<Map<String, dynamic>>
+      getConversationState({
+    required String tenantId,
+    required String conversationId,
+  }) {
+    return _conversationService
+        .getConversationState(
+      tenantId: tenantId,
+      conversationId: conversationId,
+    );
+  }
+
+  // ============================================================
+  // UPDATE CONVERSATION STATE
+  // ============================================================
+
+  Future<void> updateConversationState({
+    required String tenantId,
+    required String conversationId,
+    required Map<String, dynamic> state,
+  }) {
+    return _conversationService
+        .updateConversationState(
+      tenantId: tenantId,
+      conversationId: conversationId,
+      state: state,
+    );
+  }
+
+  // ============================================================
+  // GET MESSAGES
+  // ============================================================
+
+  Future<List<AIMessage>> getMessages({
+    required String tenantId,
+    required String conversationId,
+    int limit = 100,
+  }) {
+    return _conversationService.getMessages(
+      tenantId: tenantId,
+      conversationId: conversationId,
+      limit: limit,
+    );
+  }
+
+  // ============================================================
+  // MESSAGE STREAM
+  // ============================================================
+
+  Stream<List<AIMessage>> messagesStream({
+    required String tenantId,
+    required String conversationId,
+    int limit = 100,
+  }) {
+    return _conversationService.messagesStream(
+      tenantId: tenantId,
+      conversationId: conversationId,
+      limit: limit,
+    );
+  }
+
+  // ============================================================
+  // DELETE CONVERSATION
+  // ============================================================
+
+  Future<void> deleteConversation({
+    required String tenantId,
+    required String conversationId,
+  }) {
+    return _conversationService.deleteConversation(
+      tenantId: tenantId,
+      conversationId: conversationId,
+    );
+  }
+
+  // ============================================================
+  // BOOKING STATE
+  // ============================================================
+
+  AIBookingState getBookingState(
+    Map<String, dynamic>? state,
+  ) {
+    return _bookingStateService.fromMap(
+      state,
+    );
+  }
+
+  // ============================================================
+  // EMPTY BOOKING STATE
+  // ============================================================
+
+  AIBookingState createEmptyBookingState() {
+    return _bookingStateService.createEmpty();
+  }
+
+  // ============================================================
+  // MERGE BOOKING STATE
+  // ============================================================
+
+  AIBookingState mergeBookingState({
+    required AIBookingState current,
+    required Map<String, dynamic> updates,
+  }) {
+    return _bookingStateService.merge(
+      current,
+      updates,
+    );
+  }
+
+  // ============================================================
+  // UPDATE ONE BOOKING FIELD
+  // ============================================================
+
+  AIBookingState updateBookingField({
+    required AIBookingState current,
+    required String field,
+    required dynamic value,
+  }) {
+    return _bookingStateService.updateField(
+      current: current,
+      field: field,
+      value: value,
+    );
+  }
+
+  // ============================================================
+  // CLEAR BOOKING FIELD
+  // ============================================================
+
+  AIBookingState clearBookingField({
+    required AIBookingState current,
+    required String field,
+  }) {
+    return _bookingStateService.clearField(
+      current: current,
+      field: field,
+    );
+  }
+
+  // ============================================================
+  // VALIDATE BOOKING
+  // ============================================================
+
+  AIBookingValidation validateBooking(
+    AIBookingState state,
+  ) {
+    return _bookingStateService.validate(
+      state,
+    );
+  }
+
+  // ============================================================
+  // VALIDATE FOR CAR SEARCH
+  // ============================================================
+
+  AIBookingValidation validateForCarSearch(
+    AIBookingState state,
+  ) {
+    return _bookingStateService
+        .validateForCarSearch(
+      state,
+    );
+  }
+
+  // ============================================================
+  // VALIDATE FOR CONFIRMATION
+  // ============================================================
+
+  AIBookingValidation validateForConfirmation(
+    AIBookingState state,
+  ) {
+    return _bookingStateService
+        .validateForConfirmation(
+      state,
+    );
+  }
+
+  // ============================================================
+  // BOOKING STATE → MAP
+  // ============================================================
+
+  Map<String, dynamic> bookingStateToMap(
+    AIBookingState state,
+  ) {
+    return state.toMap();
+  }
+
+  // ============================================================
+  // BOOKING STATE → FIRESTORE MAP
+  // ============================================================
+
+  Map<String, dynamic> bookingStateToFirestore(
+    AIBookingState state,
+  ) {
+    return _bookingStateService
+        .toFirestoreMap(state);
   }
 
   // ============================================================
@@ -173,6 +506,25 @@ class AIChatService {
             'Unable to contact the AI assistant.';
     }
   }
+
+  // ============================================================
+  // REMOVE NULL VALUES
+  // ============================================================
+
+  Map<String, dynamic> _removeNullValues(
+    Map<String, dynamic> source,
+  ) {
+    final result =
+        <String, dynamic>{};
+
+    for (final entry in source.entries) {
+      if (entry.value != null) {
+        result[entry.key] = entry.value;
+      }
+    }
+
+    return result;
+  }
 }
 
 // ============================================================
@@ -202,7 +554,7 @@ class AIChatResponse {
 
   final Map<String, dynamic> rawData;
 
-  AIChatResponse({
+  const AIChatResponse({
     required this.success,
     required this.message,
     this.conversationId,
@@ -224,13 +576,14 @@ class AIChatResponse {
     HttpsCallableResult result,
   ) {
     if (result.data is! Map) {
-      throw AIChatException(
+      throw const AIChatException(
         'Invalid response received from AI assistant.',
         code: 'invalid-response',
       );
     }
 
-    final data = Map<String, dynamic>.from(
+    final data =
+        Map<String, dynamic>.from(
       result.data as Map,
     );
 
@@ -268,43 +621,27 @@ class AIChatResponse {
 
     String message = '';
 
-    // Current backend format:
-    //
-    // message: {
-    //   content: "..."
-    // }
-    //
     if (messageData.isNotEmpty) {
       message =
-          messageData['content']?.toString() ??
-          messageData['text']?.toString() ??
-          '';
+          messageData['content']
+                  ?.toString() ??
+              messageData['text']
+                  ?.toString() ??
+              '';
     }
 
-    // Also support a future backend format:
-    //
-    // message: "Hello"
-    //
     if (message.isEmpty &&
         map['message'] is String) {
       message =
           map['message'].toString();
     }
 
-    // Also support:
-    //
-    // response: "Hello"
-    //
     if (message.isEmpty &&
         map['response'] != null) {
       message =
           map['response'].toString();
     }
 
-    // Also support:
-    //
-    // content: "Hello"
-    //
     if (message.isEmpty &&
         map['content'] != null) {
       message =
@@ -312,7 +649,8 @@ class AIChatResponse {
     }
 
     return AIChatResponse(
-      success: map['success'] == true,
+      success:
+          map['success'] == true,
 
       conversationId:
           _stringValue(
@@ -348,8 +686,7 @@ class AIChatResponse {
             map['version'],
       ),
 
-      metadata:
-          metadata,
+      metadata: metadata,
 
       conversationState:
           conversationState,
@@ -384,7 +721,7 @@ class AIChatResponse {
 
       conversationId:
           conversationId ??
-          this.conversationId,
+              this.conversationId,
 
       message:
           message ?? this.message,
@@ -393,7 +730,8 @@ class AIChatResponse {
           customerId ?? this.customerId,
 
       customerName:
-          customerName ?? this.customerName,
+          customerName ??
+              this.customerName,
 
       aiEnabled:
           aiEnabled ?? this.aiEnabled,
@@ -409,7 +747,7 @@ class AIChatResponse {
 
       conversationState:
           conversationState ??
-          this.conversationState,
+              this.conversationState,
 
       rawData:
           rawData ?? this.rawData,
@@ -417,15 +755,11 @@ class AIChatResponse {
   }
 
   // ============================================================
-  // HAS MESSAGE
+  // MESSAGE HELPERS
   // ============================================================
 
   bool get hasMessage =>
       message.trim().isNotEmpty;
-
-  // ============================================================
-  // DISPLAY MESSAGE
-  // ============================================================
 
   String get displayMessage {
     if (message.trim().isNotEmpty) {
@@ -454,17 +788,121 @@ class AIChatResponse {
   dynamic get pickupBranchId =>
       conversationState['pickupBranchId'];
 
+  dynamic get pickupBranchName =>
+      conversationState['pickupBranchName'];
+
   dynamic get returnBranchId =>
       conversationState['returnBranchId'];
+
+  dynamic get returnBranchName =>
+      conversationState['returnBranchName'];
+
+  dynamic get pickupLocation =>
+      conversationState['pickupLocation'];
+
+  dynamic get returnLocation =>
+      conversationState['returnLocation'];
+
+  dynamic get requestedCarType =>
+      conversationState['requestedCarType'];
+
+  dynamic get requestedTransmission =>
+      conversationState[
+          'requestedTransmission'];
+
+  dynamic get requestedFuel =>
+      conversationState['requestedFuel'];
+
+  dynamic get requestedSeats =>
+      conversationState['requestedSeats'];
 
   dynamic get selectedCarId =>
       conversationState['selectedCarId'];
 
-  dynamic get selectedPackageId =>
-      conversationState['selectedPackageId'];
+  dynamic get selectedCarName =>
+      conversationState['selectedCarName'];
 
-  dynamic get estimatedAmount =>
-      conversationState['estimatedAmount'];
+  dynamic get selectedCarImage =>
+      conversationState['selectedCarImage'];
+
+  dynamic get selectedCarBranchIds =>
+      conversationState[
+          'selectedCarBranchIds'];
+
+  dynamic get pricingProfileId =>
+      conversationState[
+          'pricingProfileId'];
+
+  dynamic get selectedPackageId =>
+      conversationState[
+          'selectedPackageId'];
+
+  dynamic get selectedPackageName =>
+      conversationState[
+          'selectedPackageName'];
+
+  dynamic get selectedPackageType =>
+      conversationState[
+          'selectedPackageType'];
+
+  dynamic get includedKm =>
+      conversationState['includedKm'];
+
+  dynamic get extraKmCharge =>
+      conversationState['extraKmCharge'];
+
+  dynamic get extraHourCharge =>
+      conversationState['extraHourCharge'];
+
+  dynamic get packagePrice =>
+      conversationState['packagePrice'];
+
+  dynamic get durationHours =>
+      conversationState['durationHours'];
+
+  dynamic get durationDays =>
+      conversationState['durationDays'];
+
+  dynamic get baseAmount =>
+      conversationState['baseAmount'];
+
+  dynamic get packageAmount =>
+      conversationState['packageAmount'];
+
+  dynamic get extraKmAmount =>
+      conversationState['extraKmAmount'];
+
+  dynamic get extraHourAmount =>
+      conversationState['extraHourAmount'];
+
+  dynamic get specialDateAdjustment =>
+      conversationState[
+          'specialDateAdjustment'];
+
+  dynamic get weekendAdjustment =>
+      conversationState[
+          'weekendAdjustment'];
+
+  dynamic get securityDeposit =>
+      conversationState['securityDeposit'];
+
+  dynamic get taxes =>
+      conversationState['taxes'];
+
+  dynamic get discount =>
+      conversationState['discount'];
+
+  dynamic get finalAmount =>
+      conversationState['finalAmount'];
+
+  dynamic get currency =>
+      conversationState['currency'];
+
+  dynamic get bookingId =>
+      conversationState['bookingId'];
+
+  dynamic get bookingStatus =>
+      conversationState['bookingStatus'];
 }
 
 // ============================================================
@@ -478,7 +916,7 @@ class AIChatException implements Exception {
 
   final dynamic details;
 
-  AIChatException(
+  const AIChatException(
     this.message, {
     this.code,
     this.details,

@@ -1,7 +1,7 @@
 import 'package:flutter/foundation.dart';
 
-import '../../../admin/availability/services/admin_availability_service.dart';
-import '../../../cars/models/car.dart';
+import '../../admin/availability/services/admin_availability_service.dart';
+import '../../cars/models/car.dart';
 
 /// AI-facing availability result.
 ///

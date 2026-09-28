@@ -8,33 +8,31 @@ if (!admin.apps.length) {
 const db = admin.firestore();
 
 /**
- * Rentocar AI Customer Chat
+ * Rentocar AI Customer Chat.
  *
- * STEP 2
+ * This function is the secure entry point for the customer AI assistant.
  *
- * Current capabilities:
- * - Firebase Auth verification
- * - Tenant verification
- * - Customer verification
+ * Current responsibilities:
+ * - Firebase Authentication
+ * - Tenant validation
+ * - Customer validation
  * - Conversation creation
  * - Conversation history
- * - Customer context
- * - Booking state persistence
- * - Basic booking information extraction
- * - Missing-information detection
- * - Safe response structure
+ * - Booking state
+ * - Basic intent detection
+ * - Booking information extraction
+ * - AI response persistence
  *
- * Next:
- * - Real AI provider
- * - Cars
- * - Availability
- * - Pricing
- * - Packages
+ * Future responsibilities:
+ * - AI provider
+ * - Car lookup
+ * - Availability lookup
+ * - Pricing lookup
+ * - Package lookup
  * - Booking creation
- * - FAQs
+ * - FAQ/support
  * - Voice
  */
-
 exports.aiCustomerChat = onCall(
     {
       region: "us-central1",
@@ -93,15 +91,18 @@ exports.aiCustomerChat = onCall(
             data.conversationId.trim() :
             null;
 
-        console.log("[AI_CHAT] 📦 REQUEST DATA", {
-          tenantId,
-          uid,
-          messageLength: message.length,
-          conversationId,
-        });
+        console.log(
+            "[AI_CHAT] 📦 REQUEST DATA",
+            {
+              tenantId,
+              uid,
+              messageLength: message.length,
+              conversationId,
+            },
+        );
 
         // ============================================================
-        // 3. VALIDATE TENANT ID
+        // 3. VALIDATE TENANT
         // ============================================================
 
         if (!tenantId) {
@@ -142,23 +143,22 @@ exports.aiCustomerChat = onCall(
         }
 
         // ============================================================
-        // 5. TENANT REFERENCE
+        // 5. TENANT VALIDATION
         // ============================================================
 
         const tenantRef = db
             .collection("tenants")
             .doc(tenantId);
 
-        // ============================================================
-        // 6. VERIFY TENANT
-        // ============================================================
-
         const tenantSnap =
           await tenantRef.get();
 
         console.log(
-            "[AI_CHAT] 🏢 Tenant exists:",
-            tenantSnap.exists,
+            "[AI_CHAT] 🏢 TENANT",
+            {
+              tenantId,
+              exists: tenantSnap.exists,
+            },
         );
 
         if (!tenantSnap.exists) {
@@ -168,11 +168,8 @@ exports.aiCustomerChat = onCall(
           );
         }
 
-        const tenantData =
-          tenantSnap.data() || {};
-
         // ============================================================
-        // 7. VERIFY CUSTOMER
+        // 6. CUSTOMER VALIDATION
         // ============================================================
 
         const customerRef = tenantRef
@@ -183,8 +180,11 @@ exports.aiCustomerChat = onCall(
           await customerRef.get();
 
         console.log(
-            "[AI_CHAT] 👤 Customer exists:",
-            customerSnap.exists,
+            "[AI_CHAT] 👤 CUSTOMER",
+            {
+              customerId: uid,
+              exists: customerSnap.exists,
+            },
         );
 
         if (!customerSnap.exists) {
@@ -206,11 +206,12 @@ exports.aiCustomerChat = onCall(
         );
 
         // ============================================================
-        // 8. CUSTOMER CONTEXT
+        // 7. CUSTOMER CONTEXT
         // ============================================================
 
         const customerContext = {
           customerId: uid,
+
           tenantId,
 
           name:
@@ -236,8 +237,29 @@ exports.aiCustomerChat = onCall(
             null,
         };
 
+        console.log(
+            "[AI_CHAT] 👤 CUSTOMER CONTEXT",
+            {
+              customerId:
+                customerContext.customerId,
+
+              name:
+                customerContext.name,
+
+              phone:
+                customerContext.phone ?
+                  "***" :
+                  null,
+
+              email:
+                customerContext.email ?
+                  "***" :
+                  null,
+            },
+        );
+
         // ============================================================
-        // 9. CONVERSATION ID
+        // 8. CONVERSATION ID
         // ============================================================
 
         const finalConversationId =
@@ -248,12 +270,18 @@ exports.aiCustomerChat = onCall(
               .id;
 
         console.log(
-            "[AI_CHAT] 💬 Conversation:",
-            finalConversationId,
+            "[AI_CHAT] 💬 CONVERSATION",
+            {
+              conversationId:
+                finalConversationId,
+
+              isNew:
+                !conversationId,
+            },
         );
 
         // ============================================================
-        // 10. CUSTOMER CONVERSATION REFERENCE
+        // 9. CONVERSATION REFERENCE
         // ============================================================
 
         const conversationRef = tenantRef
@@ -263,7 +291,7 @@ exports.aiCustomerChat = onCall(
             .doc(finalConversationId);
 
         // ============================================================
-        // 11. LOAD EXISTING CONVERSATION
+        // 10. LOAD EXISTING CONVERSATION
         // ============================================================
 
         const conversationSnap =
@@ -276,16 +304,16 @@ exports.aiCustomerChat = onCall(
             conversationSnap.data() || {};
 
           console.log(
-              "[AI_CHAT] 📖 Existing conversation loaded",
+              "[AI_CHAT] 📖 EXISTING CONVERSATION LOADED",
           );
         } else {
           console.log(
-              "[AI_CHAT] 🆕 New conversation",
+              "[AI_CHAT] 🆕 NEW CONVERSATION",
           );
         }
 
         // ============================================================
-        // 12. LOAD BOOKING STATE
+        // 11. EXISTING BOOKING STATE
         // ============================================================
 
         const existingBookingState =
@@ -297,35 +325,44 @@ exports.aiCustomerChat = onCall(
         );
 
         // ============================================================
-        // 13. STORE / UPDATE CONVERSATION
+        // 12. CREATE / UPDATE CONVERSATION
         // ============================================================
 
+        const conversationPayload = {
+          conversationId:
+            finalConversationId,
+
+          customerId:
+            uid,
+
+          tenantId,
+
+          customerContext,
+
+          updatedAt:
+            admin.firestore.FieldValue
+                .serverTimestamp(),
+        };
+
+        if (!conversationSnap.exists) {
+          conversationPayload.createdAt =
+            admin.firestore.FieldValue
+                .serverTimestamp();
+        }
+
         await conversationRef.set(
-            {
-              conversationId: finalConversationId,
-
-              customerId: uid,
-
-              tenantId,
-
-              customerContext,
-
-              updatedAt:
-                admin.firestore.FieldValue
-                    .serverTimestamp(),
-
-              createdAt:
-                existingConversation.createdAt ||
-                admin.firestore.FieldValue
-                    .serverTimestamp(),
-            },
+            conversationPayload,
             {
               merge: true,
             },
         );
 
+        console.log(
+            "[AI_CHAT] 💾 CONVERSATION SAVED",
+        );
+
         // ============================================================
-        // 14. STORE USER MESSAGE
+        // 13. STORE USER MESSAGE
         // ============================================================
 
         await conversationRef
@@ -333,7 +370,8 @@ exports.aiCustomerChat = onCall(
             .add({
               role: "user",
 
-              content: message,
+              content:
+                message,
 
               createdAt:
                 admin.firestore.FieldValue
@@ -341,81 +379,11 @@ exports.aiCustomerChat = onCall(
             });
 
         console.log(
-            "[AI_CHAT] 💾 User message stored",
+            "[AI_CHAT] 💾 USER MESSAGE STORED",
         );
 
         // ============================================================
-        // 15. BASIC BOOKING INFORMATION EXTRACTION
-        // ============================================================
-        //
-        // IMPORTANT:
-        //
-        // This is intentionally conservative.
-        //
-        // We are NOT pretending that normal JavaScript can reliably
-        // understand every natural-language date.
-        //
-        // The real AI provider will eventually produce structured
-        // booking data.
-        //
-        // For now we preserve existing state and detect common
-        // booking-related intent.
-
-        const lowerMessage =
-          message.toLowerCase();
-
-        const bookingIntent =
-          detectBookingIntent(
-              lowerMessage,
-          );
-
-        console.log(
-            "[AI_CHAT] 🎯 BOOKING INTENT",
-            bookingIntent,
-        );
-
-        // ============================================================
-        // 16. UPDATE BOOKING STATE
-        // ============================================================
-
-        const updatedBookingState = {
-          ...existingBookingState,
-
-          intent:
-            bookingIntent.intent,
-
-          lastUserMessage:
-            message,
-
-          updatedAt:
-            new Date().toISOString(),
-        };
-
-        // ============================================================
-        // 17. SAVE BOOKING STATE
-        // ============================================================
-
-        await conversationRef.set(
-            {
-              bookingState:
-                updatedBookingState,
-
-              updatedAt:
-                admin.firestore.FieldValue
-                    .serverTimestamp(),
-            },
-            {
-              merge: true,
-            },
-        );
-
-        console.log(
-            "[AI_CHAT] 💾 BOOKING STATE UPDATED",
-            updatedBookingState,
-        );
-
-        // ============================================================
-        // 18. LOAD RECENT CONVERSATION HISTORY
+        // 14. LOAD RECENT MESSAGE HISTORY
         // ============================================================
 
         const messagesSnap =
@@ -447,19 +415,166 @@ exports.aiCustomerChat = onCall(
               });
 
         console.log(
-            "[AI_CHAT] 📚 HISTORY COUNT:",
-            history.length,
+            "[AI_CHAT] 📚 MESSAGE HISTORY",
+            {
+              count:
+                history.length,
+            },
         );
 
         // ============================================================
-        // 19. GENERATE CURRENT RESPONSE
+        // 15. DETECT INTENT
+        // ============================================================
+
+        const bookingIntent =
+          detectBookingIntent(
+              message,
+          );
+
+        console.log(
+            "[AI_CHAT] 🎯 DETECTED INTENT",
+            bookingIntent,
+        );
+
+        // ============================================================
+        // 16. EXTRACT BOOKING INFORMATION
+        // ============================================================
+
+        const extractedBookingData =
+          extractBookingInformation(
+              message,
+              existingBookingState,
+          );
+
+        console.log(
+            "[AI_CHAT] 🔎 EXTRACTED BOOKING DATA",
+            extractedBookingData,
+        );
+
+        // ============================================================
+        // 17. UPDATE BOOKING STATE
+        // ============================================================
+
+        const updatedBookingState = {
+          ...existingBookingState,
+
+          intent:
+            bookingIntent.intent,
+
+          confidence:
+            bookingIntent.confidence,
+
+          pickupDate:
+            extractedBookingData.pickupDate !== null ?
+              extractedBookingData.pickupDate :
+              existingBookingState.pickupDate ||
+              null,
+
+          pickupTime:
+            extractedBookingData.pickupTime !== null ?
+              extractedBookingData.pickupTime :
+              existingBookingState.pickupTime ||
+              null,
+
+          returnDate:
+            extractedBookingData.returnDate !== null ?
+              extractedBookingData.returnDate :
+              existingBookingState.returnDate ||
+              null,
+
+          returnTime:
+            extractedBookingData.returnTime !== null ?
+              extractedBookingData.returnTime :
+              existingBookingState.returnTime ||
+              null,
+
+          branchId:
+            extractedBookingData.branchId !== null ?
+              extractedBookingData.branchId :
+              existingBookingState.branchId ||
+              null,
+
+          carId:
+            extractedBookingData.carId !== null ?
+              extractedBookingData.carId :
+              existingBookingState.carId ||
+              null,
+
+          carType:
+            extractedBookingData.carType !== null ?
+              extractedBookingData.carType :
+              existingBookingState.carType ||
+              null,
+
+          lastUserMessage:
+            message,
+
+          updatedAt:
+            new Date().toISOString(),
+        };
+
+        // ============================================================
+        // 18. SAVE BOOKING STATE
+        // ============================================================
+
+        await conversationRef.set(
+            {
+              bookingState:
+                updatedBookingState,
+
+              updatedAt:
+                admin.firestore.FieldValue
+                    .serverTimestamp(),
+            },
+            {
+              merge: true,
+            },
+        );
+
+        console.log(
+            "[AI_CHAT] 💾 BOOKING STATE UPDATED",
+            updatedBookingState,
+        );
+
+        // ============================================================
+        // 19. DETERMINE MISSING BOOKING INFORMATION
+        // ============================================================
+
+        const missingFields =
+          getMissingBookingFields(
+              updatedBookingState,
+          );
+
+        console.log(
+            "[AI_CHAT] 📝 MISSING BOOKING FIELDS",
+            missingFields,
+        );
+
+        // ============================================================
+        // 20. TEMPORARY AI RESPONSE
         // ============================================================
         //
-        // This is still the temporary local response.
+        // IMPORTANT:
         //
-        // In the next step this section will be replaced with the
-        // actual AI provider.
+        // This is still the local response layer.
         //
+        // The next stage will connect the actual AI provider.
+        //
+        // The state structure is already prepared for:
+        //
+        // pickupDate
+        // pickupTime
+        // returnDate
+        // returnTime
+        // branchId
+        // carId
+        // carType
+        // availability
+        // pricing
+        // package
+        // booking
+        //
+        // ============================================================
 
         const responseResult =
           buildTemporaryAIResponse({
@@ -467,6 +582,7 @@ exports.aiCustomerChat = onCall(
             bookingState:
               updatedBookingState,
             bookingIntent,
+            missingFields,
             message,
           });
 
@@ -474,7 +590,7 @@ exports.aiCustomerChat = onCall(
           responseResult.reply;
 
         // ============================================================
-        // 20. STORE ASSISTANT MESSAGE
+        // 21. STORE ASSISTANT MESSAGE
         // ============================================================
 
         await conversationRef
@@ -482,37 +598,54 @@ exports.aiCustomerChat = onCall(
             .add({
               role: "assistant",
 
-              content: reply,
+              content:
+                reply,
 
               createdAt:
                 admin.firestore.FieldValue
                     .serverTimestamp(),
 
               metadata: {
-                temporaryResponse: true,
-                bookingIntent:
+                temporaryResponse:
+                  true,
+
+                intent:
                   bookingIntent.intent,
+
+                missingFields,
               },
             });
 
         console.log(
-            "[AI_CHAT] 💬 AI MESSAGE STORED",
+            "[AI_CHAT] 💬 ASSISTANT MESSAGE STORED",
         );
 
         // ============================================================
-        // 21. EXECUTION TIME
+        // 22. EXECUTION TIME
         // ============================================================
 
         const executionTime =
           Date.now() - startedAt;
 
         console.log(
-            "[AI_CHAT] ✅ REQUEST COMPLETED",
+            "[AI_CHAT] 🏁 REQUEST COMPLETED",
             {
               tenantId,
-              customerId: uid,
+
+              customerId:
+                uid,
+
               conversationId:
                 finalConversationId,
+
+              intent:
+                bookingIntent.intent,
+
+              historyCount:
+                history.length,
+
+              missingFields,
+
               executionTimeMs:
                 executionTime,
             },
@@ -523,7 +656,7 @@ exports.aiCustomerChat = onCall(
         );
 
         // ============================================================
-        // 22. RESPONSE
+        // 23. RESPONSE
         // ============================================================
 
         return {
@@ -534,11 +667,14 @@ exports.aiCustomerChat = onCall(
 
           message: {
             role: "assistant",
-            content: reply,
+
+            content:
+              reply,
           },
 
           customer: {
-            id: uid,
+            id:
+              uid,
 
             name:
               customerContext.name,
@@ -547,8 +683,7 @@ exports.aiCustomerChat = onCall(
           bookingState:
             updatedBookingState,
 
-          historyLength:
-            history.length,
+          missingFields,
 
           metadata: {
             tenantId,
@@ -556,7 +691,8 @@ exports.aiCustomerChat = onCall(
             executionTimeMs:
               executionTime,
 
-            aiEnabled: false,
+            aiEnabled:
+              false,
 
             provider:
               "temporary",
@@ -599,18 +735,21 @@ exports.aiCustomerChat = onCall(
 );
 
 
-// ============================================================================
-// BOOKING INTENT DETECTION
-// ============================================================================
-
+/**
+ * Detects the customer's current AI intent.
+ *
+ * @param {string} message Customer message.
+ * @return {{intent: string, confidence: number}} Detected intent.
+ */
 function detectBookingIntent(message) {
+  const normalizedMessage =
+    message.toLowerCase();
+
   const bookingWords = [
     "book",
     "booking",
     "rent",
     "rental",
-    "car",
-    "vehicle",
     "reserve",
     "reservation",
     "hire",
@@ -628,63 +767,184 @@ function detectBookingIntent(message) {
     "pricing",
     "cost",
     "rate",
-    "rent",
     "package",
     "km",
     "kilometer",
+    "kilometers",
   ];
 
   const hasBookingWord =
-    bookingWords.some((word) =>
-      message.includes(word),
+    bookingWords.some(
+        (word) =>
+          normalizedMessage.includes(word),
     );
 
   const hasAvailabilityWord =
-    availabilityWords.some((word) =>
-      message.includes(word),
+    availabilityWords.some(
+        (word) =>
+          normalizedMessage.includes(word),
     );
 
   const hasPricingWord =
-    pricingWords.some((word) =>
-      message.includes(word),
+    pricingWords.some(
+        (word) =>
+          normalizedMessage.includes(word),
     );
 
   if (hasAvailabilityWord) {
     return {
       intent: "availability",
-      confidence: 0.8,
+      confidence: 0.85,
     };
   }
 
   if (hasPricingWord) {
     return {
       intent: "pricing",
-      confidence: 0.7,
+      confidence: 0.80,
     };
   }
 
   if (hasBookingWord) {
     return {
       intent: "booking",
-      confidence: 0.7,
+      confidence: 0.75,
     };
   }
 
   return {
     intent: "general",
-    confidence: 0.5,
+    confidence: 0.50,
   };
 }
 
 
-// ============================================================================
-// TEMPORARY RESPONSE
-// ============================================================================
+/**
+ * Extracts simple booking fields from the customer's message.
+ *
+ * This intentionally performs conservative extraction. Natural-language
+ * date interpretation will be handled by the real AI layer later.
+ *
+ * @param {string} message Customer message.
+ * @param {Object} existingBookingState Existing booking state.
+ * @return {Object} Extracted booking information.
+ */
+function extractBookingInformation(
+    message,
+    existingBookingState,
+) {
+  const normalizedMessage =
+    message.toLowerCase();
 
+  let carType =
+    existingBookingState.carType ||
+    null;
+
+  const carTypes = [
+    "suv",
+    "sedan",
+    "hatchback",
+    "muv",
+    "luxury",
+    "compact",
+    "premium",
+  ];
+
+  for (const type of carTypes) {
+    if (normalizedMessage.includes(type)) {
+      carType = type;
+      break;
+    }
+  }
+
+  return {
+    pickupDate:
+      null,
+
+    pickupTime:
+      null,
+
+    returnDate:
+      null,
+
+    returnTime:
+      null,
+
+    branchId:
+      null,
+
+    carId:
+      null,
+
+    carType,
+  };
+}
+
+
+/**
+ * Determines which booking fields are still missing.
+ *
+ * @param {Object} bookingState Current booking state.
+ * @return {string[]} Missing booking field names.
+ */
+function getMissingBookingFields(
+    bookingState,
+) {
+  const missingFields = [];
+
+  if (!bookingState.pickupDate) {
+    missingFields.push(
+        "pickupDate",
+    );
+  }
+
+  if (!bookingState.pickupTime) {
+    missingFields.push(
+        "pickupTime",
+    );
+  }
+
+  if (!bookingState.returnDate) {
+    missingFields.push(
+        "returnDate",
+    );
+  }
+
+  if (!bookingState.returnTime) {
+    missingFields.push(
+        "returnTime",
+    );
+  }
+
+  if (!bookingState.branchId) {
+    missingFields.push(
+        "branchId",
+    );
+  }
+
+  return missingFields;
+}
+
+
+/**
+ * Builds the temporary AI response.
+ *
+ * This response layer will later be replaced by the real AI provider
+ * and connected to the car, availability, pricing and booking tools.
+ *
+ * @param {Object} params Response parameters.
+ * @param {Object} params.customerContext Customer context.
+ * @param {Object} params.bookingState Current booking state.
+ * @param {Object} params.bookingIntent Detected intent.
+ * @param {string[]} params.missingFields Missing booking fields.
+ * @param {string} params.message Customer message.
+ * @return {{reply: string}} Assistant response.
+ */
 function buildTemporaryAIResponse({
   customerContext,
   bookingState,
   bookingIntent,
+  missingFields,
   message,
 }) {
   const firstName =
@@ -693,19 +953,20 @@ function buildTemporaryAIResponse({
     "";
 
   // ============================================================
-  // AVAILABILITY
+  // GENERAL
   // ============================================================
 
   if (
     bookingIntent.intent ===
-    "availability"
+    "general"
   ) {
     return {
       reply:
-        `Sure${firstName ? ` ${firstName}` : ""}! 🚗 ` +
-        "I can check the available cars for you. " +
-        "Please tell me your pickup date and time, " +
-        "return date and time, and your preferred branch.",
+        `Hi${firstName ? ` ${firstName}` : ""}! 👋 ` +
+        "I'm your Rentocar AI assistant. 🚗 " +
+        "I can help you find cars, check availability, " +
+        "understand pricing and packages, and arrange your booking. " +
+        "What would you like to do?",
     };
   }
 
@@ -720,9 +981,26 @@ function buildTemporaryAIResponse({
     return {
       reply:
         `Absolutely${firstName ? ` ${firstName}` : ""}! 💰 ` +
-        "I can check the available cars, packages and pricing. " +
-        "Tell me your pickup date, pickup time, return date " +
-        "and return time.",
+        "I can check the available cars and pricing for you. " +
+        "First, tell me your pickup date and time, " +
+        "return date and time, and preferred branch.",
+    };
+  }
+
+  // ============================================================
+  // AVAILABILITY
+  // ============================================================
+
+  if (
+    bookingIntent.intent ===
+    "availability"
+  ) {
+    return {
+      reply:
+        `Sure${firstName ? ` ${firstName}` : ""}! 🚗 ` +
+        "I can check availability for you. " +
+        "Please provide your pickup date and time, " +
+        "return date and time, and preferred branch.",
     };
   }
 
@@ -734,26 +1012,77 @@ function buildTemporaryAIResponse({
     bookingIntent.intent ===
     "booking"
   ) {
+    if (
+      missingFields.includes(
+          "pickupDate",
+      )
+    ) {
+      return {
+        reply:
+          `Sure${firstName ? ` ${firstName}` : ""}! 🚘 ` +
+          "Let's arrange your rental. " +
+          "What date would you like to pick up the car?",
+      };
+    }
+
+    if (
+      missingFields.includes(
+          "pickupTime",
+      )
+    ) {
+      return {
+        reply:
+          "Great! 👍 What time would you like to pick up the car?",
+      };
+    }
+
+    if (
+      missingFields.includes(
+          "returnDate",
+      )
+    ) {
+      return {
+        reply:
+          "Perfect. 📅 What date would you like to return the car?",
+      };
+    }
+
+    if (
+      missingFields.includes(
+          "returnTime",
+      )
+    ) {
+      return {
+        reply:
+          "And what time would you like to return the car?",
+      };
+    }
+
+    if (
+      missingFields.includes(
+          "branchId",
+      )
+    ) {
+      return {
+        reply:
+          "Which pickup branch would you like to use?",
+      };
+    }
+
     return {
       reply:
-        `Sure${firstName ? ` ${firstName}` : ""}! 🚘 ` +
-        "Let's arrange your rental. " +
-        "I'll need your pickup date and time, return date " +
-        "and time, and preferably the branch or type of car " +
-        "you want.",
+        "Perfect! I have the basic booking details. " +
+        "I'll now check the available cars and pricing.",
     };
   }
 
   // ============================================================
-  // GENERAL
+  // FALLBACK
   // ============================================================
 
   return {
     reply:
-      `Hi${firstName ? ` ${firstName}` : ""}! 👋 ` +
-      "I'm your Rentocar AI assistant. " +
-      "I can help you find cars, check availability, " +
-      "understand pricing and packages, and help with bookings. " +
-      "What would you like to do?",
+      "I can help you with your car rental. 🚗 " +
+      "Tell me what you'd like to book or check.",
   };
 }
