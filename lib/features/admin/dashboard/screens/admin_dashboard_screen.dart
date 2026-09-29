@@ -9,6 +9,8 @@ import '../../availability/screens/admin_availability_screen.dart';
 import '../../customers/screens/admin_customers_screen.dart';
 import '../../availability/screens/admin_new_booking_screen.dart';
 import '../../booking/screens/admin_bookings_screen.dart';
+import '../../booking/screens/pickup_pending_screen.dart';
+import '../../booking/screens/return_pending_screen.dart';
 import '../../pricing/screens/admin_pricing_profiles_screen.dart';
 import '../../notifications/screens/admin_push_notification_screen.dart';
 
@@ -984,6 +986,36 @@ class _AdminDashboardScreenState
               'View, confirm and manage all rentals',
           onTap:
               _openBookings,
+        ),
+
+        const SizedBox(height: 10),
+
+        _QuickActionCard(
+          icon:
+              Icons.local_shipping_outlined,
+          title: 'Pickup',
+          subtitle:
+              'Process confirmed vehicle handovers',
+          onTap: () {
+            _push(
+              const PickupPendingScreen(),
+            );
+          },
+        ),
+
+        const SizedBox(height: 10),
+
+        _QuickActionCard(
+          icon:
+              Icons.assignment_return_outlined,
+          title: 'Return',
+          subtitle:
+              'Inspect and complete vehicle returns',
+          onTap: () {
+            _push(
+              const ReturnPendingScreen(),
+            );
+          },
         ),
 
         const SizedBox(height: 10),

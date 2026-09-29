@@ -201,7 +201,12 @@ class _DateTimeScreenState extends State<DateTimeScreen> {
       minute: returnDateTime.minute,
     );
 
-    _datesConfirmed = false;
+    // If Home / Explore / Car Details supplied a complete and valid
+    // pickup + return range, the date/time selection is already confirmed.
+    // This only controls the Continue state; minimum hours/days,
+    // ordering, past-time, and availability checks still run in _continue().
+    _datesConfirmed = hasValidInitialRange;
+
     _calendarMonth = DateTime(
       pickupDate.year,
       pickupDate.month,

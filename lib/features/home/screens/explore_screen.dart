@@ -5,7 +5,6 @@ import '../../../core/config/app_config.dart';
 import '../../admin/availability/services/admin_availability_service.dart';
 import '../../cars/models/car.dart';
 import '../../cars/services/car_service.dart';
-import '../widgets/car_card.dart';
 import '../../cars/screens/car_details_screen.dart';
 
 /// Customer-facing Explore screen.
@@ -716,42 +715,45 @@ class _ExploreScreenState extends State<ExploreScreen> {
     final now = DateTime.now();
     final slots = <TimeOfDay>[];
 
-    // Explore is fleet-level, so it does not expose a specific car's
-    // availability. It offers the same compact slot-style input used by the
-    // booking flow, while the final fleet availability is checked afterwards.
-    for (int hour = 0; hour < 24; hour++) {
-      for (int minute = 0; minute < 60; minute += 30) {
-        final candidate = DateTime(
-          date.year,
-          date.month,
-          date.day,
-          hour,
-          minute,
-        );
+    final int intervalMinutes =
+        _rentalType == 'hourly' ? 30 : 60;
 
-        if (pickup && _sameDate(date, now) &&
-            candidate.isBefore(now.add(const Duration(minutes: 30)))) {
+    for (
+      int totalMinutes = 0;
+      totalMinutes < 24 * 60;
+      totalMinutes += intervalMinutes
+    ) {
+      final candidate = DateTime(
+        date.year,
+        date.month,
+        date.day,
+        totalMinutes ~/ 60,
+        totalMinutes % 60,
+      );
+
+      if (pickup && _sameDate(date, now)) {
+        if (candidate.isBefore(now.add(const Duration(minutes: 30)))) {
           continue;
         }
-
-        if (!pickup && _sameDate(date, _pickupDate)) {
-          final pickupDateTime = DateTime(
-            _pickupDate.year,
-            _pickupDate.month,
-            _pickupDate.day,
-            _pickupTime.hour,
-            _pickupTime.minute,
-          );
-          if (!candidate.isAfter(pickupDateTime)) continue;
-        }
-
-        slots.add(TimeOfDay(hour: hour, minute: minute));
       }
+
+      if (!pickup) {
+        final pickupDateTime = _pickupDateTime;
+
+        if (!candidate.isAfter(pickupDateTime)) {
+          continue;
+        }
+      }
+
+      slots.add(
+        TimeOfDay(
+          hour: candidate.hour,
+          minute: candidate.minute,
+        ),
+      );
     }
 
-    return slots.isEmpty
-        ? <TimeOfDay>[const TimeOfDay(hour: 10, minute: 0)]
-        : slots;
+    return slots;
   }
 
   bool _sameDate(DateTime a, DateTime b) =>
@@ -773,11 +775,32 @@ class _ExploreScreenState extends State<ExploreScreen> {
     );
   }
 
+  DateTime get _pickupDateTime => DateTime(
+        _pickupDate.year,
+        _pickupDate.month,
+        _pickupDate.day,
+        _pickupTime.hour,
+        _pickupTime.minute,
+      );
+
+  DateTime get _returnDateTime => DateTime(
+        _returnDate.year,
+        _returnDate.month,
+        _returnDate.day,
+        _returnTime.hour,
+        _returnTime.minute,
+      );
+
   void _openCarDetails(Car car) {
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) => CarDetailsScreen(car: car),
+        builder: (_) => CarDetailsScreen(
+          car: car,
+          pickupDateTime: _pickupDateTime,
+          returnDateTime: _returnDateTime,
+          rentalType: _rentalType,
+        ),
       ),
     );
   }
@@ -929,25 +952,15 @@ class _ExploreScreenState extends State<ExploreScreen> {
                 )
               else
                 SliverPadding(
-                  padding: const EdgeInsets.fromLTRB(
-                    16,
-                    0,
-                    16,
-                    32,
-                  ),
-                  sliver: SliverGrid(
-                    gridDelegate:
-                        const SliverGridDelegateWithMaxCrossAxisExtent(
-                      maxCrossAxisExtent: 420,
-                      mainAxisSpacing: 14,
-                      crossAxisSpacing: 14,
-                      childAspectRatio: 0.72,
-                    ),
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 32),
+                  sliver: SliverList(
                     delegate: SliverChildBuilderDelegate(
                       (context, index) {
                         final car = _visibleCars[index];
-
-                        return _buildExploreCarCard(car);
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 14),
+                          child: _buildExploreCarCard(car),
+                        );
                       },
                       childCount: _visibleCars.length,
                     ),
@@ -1039,13 +1052,27 @@ class _ExploreScreenState extends State<ExploreScreen> {
           Row(
             children: [
               const Expanded(
-                child: Text(
-                  'Check availability',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w900,
-                    color: heading,
-                  ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Check availability',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w900,
+                        color: heading,
+                      ),
+                    ),
+                    SizedBox(height: 3),
+                    Text(
+                      'Choose your dates and see only bookable cars.',
+                      style: TextStyle(
+                        fontSize: 9.5,
+                        fontWeight: FontWeight.w600,
+                        color: body,
+                      ),
+                    ),
+                  ],
                 ),
               ),
               if (_availabilityChecked)
@@ -1098,7 +1125,41 @@ class _ExploreScreenState extends State<ExploreScreen> {
               ),
             ],
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(
+              horizontal: 11,
+              vertical: 9,
+            ),
+            decoration: BoxDecoration(
+              color: softAccent,
+              borderRadius: BorderRadius.circular(13),
+            ),
+            child: Row(
+              children: [
+                const Icon(
+                  Icons.route_rounded,
+                  size: 15,
+                  color: primary,
+                ),
+                const SizedBox(width: 7),
+                Expanded(
+                  child: Text(
+                    '${_formatDate(_pickupDate)} ${_formatTime(_pickupTime)}  →  ${_formatDate(_returnDate)} ${_formatTime(_returnTime)}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 9.5,
+                      fontWeight: FontWeight.w800,
+                      color: heading,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
           SizedBox(
             width: double.infinity,
             child: ElevatedButton.icon(
@@ -1187,6 +1248,15 @@ class _ExploreScreenState extends State<ExploreScreen> {
             _rentalType = value;
             _availabilityChecked = false;
             _availableCarIds = <String>{};
+
+            // Keep a sensible range when switching modes.
+            if (_rentalType == 'daily') {
+              if (!_returnDate.isAfter(_pickupDate)) {
+                _returnDate = _pickupDate.add(
+                  const Duration(days: 1),
+                );
+              }
+            }
           });
           _applyFilters();
         },
@@ -1573,51 +1643,359 @@ class _ExploreScreenState extends State<ExploreScreen> {
   }
 
   Widget _buildExploreCarCard(Car car) {
-    return Stack(
-      children: [
-        Positioned.fill(
-          child: CarCard(
-            car: car,
-            onTap: () => _openCarDetails(car),
+    final imageUrl = car.image.trim().isNotEmpty
+        ? car.image.trim()
+        : (car.images.isNotEmpty ? car.images.first.trim() : '');
+    final displayName = car.name.trim();
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () => _openCarDetails(car),
+        borderRadius: BorderRadius.circular(22),
+        child: Container(
+          decoration: BoxDecoration(
+            color: card,
+            borderRadius: BorderRadius.circular(22),
+            border: Border.all(color: border),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x0617201F),
+                blurRadius: 18,
+                offset: Offset(0, 7),
+              ),
+            ],
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                height: 150,
+                width: double.infinity,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    if (imageUrl.isNotEmpty)
+                      Image.network(
+                        imageUrl,
+                        fit: BoxFit.cover,
+                        filterQuality: FilterQuality.medium,
+                        errorBuilder: (_, __, ___) => _carImagePlaceholder(),
+                        loadingBuilder: (context, child, progress) {
+                          if (progress == null) return child;
+                          return _carImagePlaceholder(loading: true);
+                        },
+                      )
+                    else
+                      _carImagePlaceholder(),
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      height: 62,
+                      child: IgnorePointer(
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                              colors: [
+                                Colors.transparent,
+                                Colors.black.withValues(alpha: .42),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    Positioned(
+                      top: 10,
+                      left: 10,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 9,
+                          vertical: 6,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: .94),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(
+                              Icons.directions_car_rounded,
+                              size: 12,
+                              color: heading,
+                            ),
+                            const SizedBox(width: 5),
+                            Text(
+                              car.type.trim().isEmpty ? 'CAR' : car.type,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 8.5,
+                                fontWeight: FontWeight.w900,
+                                color: heading,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    Positioned(
+                      top: 10,
+                      right: 10,
+                      child: Container(
+                        width: 34,
+                        height: 34,
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: .94),
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(
+                          Icons.favorite_border_rounded,
+                          size: 18,
+                          color: heading,
+                        ),
+                      ),
+                    ),
+                    if (_availabilityChecked)
+                      Positioned(
+                        left: 10,
+                        bottom: 10,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 5,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withValues(alpha: .95),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.check_circle_rounded,
+                                size: 12,
+                                color: primary,
+                              ),
+                              SizedBox(width: 4),
+                              Text(
+                                'AVAILABLE',
+                                style: TextStyle(
+                                  fontSize: 7.5,
+                                  fontWeight: FontWeight.w900,
+                                  color: primary,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(13, 12, 13, 13),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                displayName.isEmpty ? 'Premium Car' : displayName,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w900,
+                                  color: heading,
+                                ),
+                              ),
+                              if (car.registrationNumber.trim().isNotEmpty) ...[
+                                const SizedBox(height: 3),
+                                Text(
+                                  car.registrationNumber,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontSize: 8.5,
+                                    fontWeight: FontWeight.w700,
+                                    color: muted,
+                                    letterSpacing: .25,
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Text(
+                              '₹${_formatNumber(car.pricePerDay)}',
+                              style: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w900,
+                                color: primary,
+                              ),
+                            ),
+                            Text(
+                              _rentalType == 'hourly' ? '/ hour' : '/ day',
+                              style: const TextStyle(
+                                fontSize: 8,
+                                fontWeight: FontWeight.w700,
+                                color: muted,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    Container(
+                      height: 52,
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      decoration: BoxDecoration(
+                        color: background,
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: border),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: _compactSpec(
+                              Icons.settings_rounded,
+                              car.transmission,
+                              'Transmission',
+                            ),
+                          ),
+                          _compactDivider(),
+                          Expanded(
+                            child: _compactSpec(
+                              Icons.local_gas_station_rounded,
+                              car.fuel,
+                              'Fuel',
+                            ),
+                          ),
+                          _compactDivider(),
+                          Expanded(
+                            child: _compactSpec(
+                              Icons.event_seat_rounded,
+                              '${car.seats}',
+                              'Seats',
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 42,
+                      child: ElevatedButton.icon(
+                        onPressed: () => _openCarDetails(car),
+                        icon: const Icon(Icons.arrow_forward_rounded, size: 16),
+                        label: const Text('View car details'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: primary,
+                          foregroundColor: Colors.white,
+                          elevation: 0,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(13),
+                          ),
+                          textStyle: const TextStyle(
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
         ),
-        if (_availabilityChecked)
-          Positioned(
-            top: 10,
-            right: 10,
-            child: Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: 9,
-                vertical: 6,
+      ),
+    );
+  }
+
+  Widget _carImagePlaceholder({bool loading = false}) {
+    return Container(
+      color: const Color(0xFFF0F4F2),
+      alignment: Alignment.center,
+      child: loading
+          ? const SizedBox(
+              width: 22,
+              height: 22,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: primary,
               ),
-              decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: .95),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: const Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.check_circle_rounded,
-                    size: 13,
-                    color: primary,
-                  ),
-                  SizedBox(width: 4),
-                  Text(
-                    'AVAILABLE',
-                    style: TextStyle(
-                      fontSize: 8,
-                      fontWeight: FontWeight.w900,
-                      color: primary,
-                      letterSpacing: .3,
-                    ),
-                  ),
-                ],
-              ),
+            )
+          : const Icon(
+              Icons.directions_car_rounded,
+              size: 46,
+              color: Color(0xFFB4BFBC),
             ),
+    );
+  }
+
+  Widget _compactSpec(IconData icon, String value, String label) {
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Icon(icon, size: 15, color: primary),
+        const SizedBox(height: 2),
+        Text(
+          value.trim().isEmpty ? '—' : value,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          textAlign: TextAlign.center,
+          style: const TextStyle(
+            fontSize: 8.5,
+            fontWeight: FontWeight.w900,
+            color: heading,
           ),
+        ),
+        Text(
+          label,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            fontSize: 6.5,
+            fontWeight: FontWeight.w700,
+            color: muted,
+          ),
+        ),
       ],
     );
+  }
+
+  Widget _compactDivider() {
+    return Container(
+      width: 1,
+      height: 30,
+      color: border,
+    );
+  }
+
+  String _formatNumber(num value) {
+    final rounded = value.round();
+    return rounded.toString().replaceAllMapped(
+          RegExp(r'\B(?=(\d{3})+(?!\d))'),
+          (match) => ',',
+        );
   }
 
   Widget _buildErrorState() {

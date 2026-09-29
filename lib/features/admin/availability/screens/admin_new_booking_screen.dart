@@ -176,24 +176,13 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
         _returnTime.minute,
       );
 
-  // FIRST availability search happens before rental type is selected.
-  // At that point we treat the requested dates as whole calendar days so the
-  // admin can discover every vehicle that can serve the requested period.
-  DateTime get _initialAvailabilityStart => DateTime(
-        _pickupDate.year,
-        _pickupDate.month,
-        _pickupDate.day,
-      );
+  // FIRST availability search happens before rental type is selected, but it
+  // must still use the exact date + time selected by the admin. Availability
+  // answers only whether the vehicle is free during the requested interval.
+  // Minimum billable hours/days are enforced later by the selected package.
+  DateTime get _initialAvailabilityStart => _pickupDateTime;
 
-  DateTime get _initialAvailabilityEnd => DateTime(
-        _returnDate.year,
-        _returnDate.month,
-        _returnDate.day,
-        23,
-        59,
-        59,
-        999,
-      );
+  DateTime get _initialAvailabilityEnd => _returnDateTime;
 
   String get _rentalTypeLabel {
     switch (_rentalType) {
