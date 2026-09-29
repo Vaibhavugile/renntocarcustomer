@@ -4,7 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../models/pricing_profile.dart';
 import '../../cars/models/car.dart';
-
+import '../models/km_pricing_package.dart';
 
 
 /// Firestore CRUD/service layer for the simplified vehicle pricing model.
@@ -799,7 +799,8 @@ class PricingProfileService {
 
 
 
-    _validateProfile(profile, tenant);
+    final normalizedProfile = _normalizePackageReferences(profile);
+    _validateProfile(normalizedProfile, tenant);
 
 
 
@@ -878,90 +879,54 @@ class PricingProfileService {
   /// Updates from an admin-form map while allowing only the new pricing fields.
 
   Future<void> updatePricingProfileMap({
-
     required String tenantId,
-
     required String pricingProfileId,
-
     required Map<String, dynamic> values,
-
   }) async {
-
     final tenant = _tenantId(tenantId);
-
     final profileId = _profileId(pricingProfileId);
 
-
-
     try {
-
       final doc = _profiles(tenant).doc(profileId);
-
       final existing = await doc.get();
 
-
-
       if (!existing.exists || existing.data() == null) {
-
         throw Exception('Pricing profile not found.');
-
       }
 
       _verifyTenant(existing.data(), tenant);
 
-
-
       final sanitized = _sanitizeMap(values);
-
       sanitized['tenantId'] = tenant;
-
       sanitized['id'] = profileId;
 
-
-
-      // A map update must pass the exact same model validation as a normal
-
-      // PricingProfile update. This prevents malformed package/deposit/special
-
-      // rate data from bypassing the typed validation path.
-
       final parsedProfile = PricingProfile.fromMap(profileId, sanitized);
+      final normalizedProfile = _normalizePackageReferences(parsedProfile);
 
-      _validateProfile(parsedProfile, tenant);
-
-
-
-      final old = existing.data()!;
-
-      sanitized['createdAt'] = old['createdAt'] ?? FieldValue.serverTimestamp();
-
-      sanitized['updatedAt'] = FieldValue.serverTimestamp();
-
-
-
-      await doc.set(sanitized, SetOptions(merge: false));
-
-    } on FirebaseException catch (e) {
-
-      throw Exception(
-
-        'Unable to update pricing profile: ${e.message ?? e.code}',
-
+      _validateProfile(
+        normalizedProfile,
+        tenant,
+        allowEmptyId: false,
       );
 
+      final normalizedMap = _prepareWriteMap(
+        normalizedProfile,
+        tenantId: tenant,
+        documentId: profileId,
+      );
+
+      final old = existing.data()!;
+      normalizedMap['createdAt'] =
+          old['createdAt'] ?? FieldValue.serverTimestamp();
+      normalizedMap['updatedAt'] = FieldValue.serverTimestamp();
+
+      await doc.set(normalizedMap, SetOptions(merge: false));
+    } on FirebaseException catch (e) {
+      throw Exception(
+        'Unable to update pricing profile: ${e.message ?? e.code}',
+      );
     }
-
   }
-
-
-
-  // ===========================================================================
-
-  // DUPLICATE
-
-  // ===========================================================================
-
-
 
   Future<String> duplicatePricingProfile({
 
@@ -1389,47 +1354,158 @@ return profile.specialRateForRange(
 
 
 
-  PricingProfile _parse(
 
-    DocumentSnapshot<Map<String, dynamic>> doc,
+  PricingProfile _normalizePackageReferences(PricingProfile profile) {
+    final hourly = _normalizePackageList(profile.hourlyPackages);
+    final daily = _normalizePackageList(profile.dailyPackages);
+    final packages = <KmPricingPackage>[...hourly, ...daily];
 
-    String tenantId,
-
-  ) {
-
-    final raw = Map<String, dynamic>.from(doc.data()!);
-
-    raw['id'] = doc.id;
-
-
-
-    // Old documents may not have tenantId. The Firestore path is already
-
-    // tenant-scoped, so inject the current tenant only for parsing. A stored
-
-    // non-empty tenantId is still checked and cannot cross tenant boundaries.
-
-    final storedTenant = raw['tenantId']?.toString().trim() ?? '';
-
-    if (storedTenant.isEmpty) {
-
-      raw['tenantId'] = tenantId;
-
-    }
-
-
-
-    final profile = PricingProfile.fromMap(doc.id, raw);
-
-    _verifyProfileTenant(profile, tenantId, doc.id);
-
-    _validateProfile(profile, tenantId, allowEmptyId: false);
-
-    return profile;
-
+    return profile.copyWith(
+      hourlyPackages: hourly,
+      dailyPackages: daily,
+      minimumHoursByPackageId: _normalizeIntRules(
+        profile.minimumHoursByPackageId, packages, 1,
+      ),
+      minimumDaysByPackageId: _normalizeIntRules(
+        profile.minimumDaysByPackageId, packages, 1,
+      ),
+      extraHourRateByPackageId: _normalizeDoubleRules(
+        profile.extraHourRateByPackageId, packages,
+      ),
+    );
   }
 
+  List<KmPricingPackage> _normalizePackageList(
+    List<KmPricingPackage> packages,
+  ) {
+    final result = <KmPricingPackage>[];
+    final used = <String>{};
 
+    for (var i = 0; i < packages.length; i++) {
+      final package = packages[i];
+      var id = package.id.trim();
+
+      if (id.isEmpty || id == 'km_package' || id == 'package_$i') {
+        id = 'legacy_package_$i';
+      }
+
+      if (used.contains(id)) {
+        var suffix = 2;
+        var candidate = '${id}_$suffix';
+        while (used.contains(candidate)) {
+          suffix++;
+          candidate = '${id}_$suffix';
+        }
+        id = candidate;
+      }
+
+      used.add(id);
+      result.add(package.copyWith(id: id));
+    }
+
+    return result;
+  }
+
+  Map<String, int> _normalizeIntRules(
+    Map<String, int> source,
+    List<KmPricingPackage> packages,
+    int fallback,
+  ) {
+    final result = <String, int>{};
+
+    for (final entry in source.entries) {
+      final key = entry.key.trim();
+      if (key.isEmpty) continue;
+
+      final id = _resolvePackageReference(key, packages);
+      if (id == null || result.containsKey(id)) continue;
+
+      result[id] = entry.value < 1 ? fallback : entry.value;
+    }
+
+    return result;
+  }
+
+  Map<String, double> _normalizeDoubleRules(
+    Map<String, double> source,
+    List<KmPricingPackage> packages,
+  ) {
+    final result = <String, double>{};
+
+    for (final entry in source.entries) {
+      final key = entry.key.trim();
+      if (key.isEmpty) continue;
+
+      final id = _resolvePackageReference(key, packages);
+      if (id == null || result.containsKey(id)) continue;
+
+      final value = entry.value;
+      result[id] = value.isFinite && value >= 0 ? value : 0;
+    }
+
+    return result;
+  }
+
+  String? _resolvePackageReference(
+    String reference,
+    List<KmPricingPackage> packages,
+  ) {
+    for (final package in packages) {
+      if (package.id.trim() == reference) return package.id.trim();
+    }
+
+    final lower = reference.toLowerCase();
+    final exact = packages
+        .where((p) => p.name.trim().toLowerCase() == lower)
+        .toList();
+    if (exact.length == 1) return exact.first.id.trim();
+
+    final ref = _normalizePackageKey(reference);
+    final stripped = ref
+        .replaceFirst(RegExp(r'^seater_'), '')
+        .replaceFirst(RegExp(r'^package_'), '');
+
+    final matches = packages.where((package) {
+      final name = _normalizePackageKey(package.name);
+      return name == ref ||
+          name == stripped ||
+          name.contains(stripped) ||
+          stripped.contains(name);
+    }).toList();
+
+    return matches.length == 1 ? matches.first.id.trim() : null;
+  }
+
+  String _normalizePackageKey(String value) {
+    return value
+        .trim()
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
+        .replaceAll(RegExp(r'_+'), '_')
+        .replaceAll(RegExp(r'^_|_$'), '');
+  }
+
+  PricingProfile _parse(
+    DocumentSnapshot<Map<String, dynamic>> doc,
+    String tenantId,
+  ) {
+    final raw = Map<String, dynamic>.from(doc.data()!);
+    raw['id'] = doc.id;
+
+    final storedTenant = raw['tenantId']?.toString().trim() ?? '';
+    if (storedTenant.isEmpty) {
+      raw['tenantId'] = tenantId;
+    }
+
+    final parsedProfile = PricingProfile.fromMap(doc.id, raw);
+    _verifyProfileTenant(parsedProfile, tenantId, doc.id);
+
+    // Normalize legacy package references before strict validation.
+    final profile = _normalizePackageReferences(parsedProfile);
+
+    _validateProfile(profile, tenantId, allowEmptyId: false);
+    return profile;
+  }
 
   void _verifyProfileTenant(
 
@@ -1816,11 +1892,33 @@ return profile.specialRateForRange(
 
 
 
-    return _sanitizeMap(raw);
+    final sanitized = _sanitizeMap(raw);
+    sanitized['hourlyPackages'] =
+        _ensurePackageIdsInRawList(sanitized['hourlyPackages']);
+    sanitized['dailyPackages'] =
+        _ensurePackageIdsInRawList(sanitized['dailyPackages']);
+    return sanitized;
 
   }
 
 
+
+
+  List<Map<String, dynamic>> _ensurePackageIdsInRawList(dynamic value) {
+    if (value is! List) return <Map<String, dynamic>>[];
+
+    return value.asMap().entries.map((entry) {
+      final index = entry.key;
+      final raw = entry.value;
+      final map = raw is Map
+          ? Map<String, dynamic>.from(raw)
+          : <String, dynamic>{};
+
+      final id = map['id']?.toString().trim() ?? '';
+      map['id'] = id.isEmpty ? 'legacy_package_$index' : id;
+      return map;
+    }).toList();
+  }
 
   Map<String, dynamic> _sanitizeMap(Map<String, dynamic> values) {
 

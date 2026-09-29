@@ -6,6 +6,7 @@ import '../../../../models/branch.dart';
 import '../../../branches/services/branch_service.dart';
 import 'admin_add_branch_screen.dart';
 import 'admin_edit_branch_screen.dart';
+import '../../dashboard/screens/admin_dashboard_screen.dart';
 class AdminBranchesScreen extends StatefulWidget {
   const AdminBranchesScreen({
     super.key,
@@ -18,6 +19,19 @@ class AdminBranchesScreen extends StatefulWidget {
 
 class _AdminBranchesScreenState
     extends State<AdminBranchesScreen> {
+
+  void _goBackToDashboard() {
+    if (!mounted) return;
+
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(
+        builder: (_) => const AdminDashboardScreen(),
+      ),
+      (route) => false,
+    );
+  }
+
+
   // ============================================================
   // PREMIUM PALETTE
   // ============================================================
@@ -451,7 +465,13 @@ Future<void> _editBranch(
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        _goBackToDashboard();
+      },
+      child: Scaffold(
       backgroundColor: background,
 
       appBar: AppBar(
@@ -553,7 +573,8 @@ Future<void> _editBranch(
           ),
         ),
       ),
-    );
+    )
+    );;
   }
 
   // ============================================================

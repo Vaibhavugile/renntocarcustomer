@@ -9,6 +9,7 @@ import 'package:intl/intl.dart';
 import '../../../../core/config/app_config.dart';
 import '../../../booking/models/booking.dart';
 import '../../../booking/services/booking_service.dart';
+import '../../dashboard/screens/admin_dashboard_screen.dart';
 
 /// Premium operational Return Pending screen.
 ///
@@ -18,13 +19,35 @@ import '../../../booking/services/booking_service.dart';
 /// Return is never completed automatically. The inspection is revalidated and
 /// persisted through BookingService.recordReturnInspectionForAdmin().
 class ReturnPendingScreen extends StatefulWidget {
-  const ReturnPendingScreen({super.key});
+  const ReturnPendingScreen({
+    super.key,
+    this.booking,
+  });
+
+  final Booking? booking;
 
   @override
   State<ReturnPendingScreen> createState() => _ReturnPendingScreenState();
 }
 
 class _ReturnPendingScreenState extends State<ReturnPendingScreen> {
+  void _goBack() {
+    if (!mounted) return;
+
+    if (widget.booking != null) {
+      Navigator.of(context).pop();
+      return;
+    }
+
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(
+        builder: (_) => const AdminDashboardScreen(),
+      ),
+      (route) => false,
+    );
+  }
+
+
   static const background = Color(0xFFF6F8F7);
   static const card = Colors.white;
   static const primary = Color(0xFF0F766E);
@@ -234,12 +257,23 @@ class _ReturnPendingScreenState extends State<ReturnPendingScreen> {
   @override
   Widget build(BuildContext context) {
     final list = _filtered;
-    return Scaffold(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        _goBack();
+      },
+      child: Scaffold(
       backgroundColor: background,
       appBar: AppBar(
         backgroundColor: card,
         surfaceTintColor: Colors.transparent,
         elevation: 0,
+        leading: IconButton(
+          tooltip: 'Back',
+          icon: const Icon(Icons.arrow_back_ios_new_rounded),
+          onPressed: _goBack,
+        ),
         title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text('Return Pending', style: GoogleFonts.manrope(fontSize: 19, fontWeight: FontWeight.w900, color: heading)), Text('${_bookings.length} vehicles awaiting physical return', style: GoogleFonts.manrope(fontSize: 9.5, color: muted, fontWeight: FontWeight.w700))]),
         actions: [if (_working) const Padding(padding: EdgeInsets.all(18), child: SizedBox(width: 17, height: 17, child: CircularProgressIndicator(strokeWidth: 2))) else IconButton(onPressed: () => _load(refresh: true), icon: const Icon(Icons.refresh_rounded)), const SizedBox(width: 8)],
       ),
@@ -252,7 +286,8 @@ class _ReturnPendingScreenState extends State<ReturnPendingScreen> {
           if (list.isEmpty) const SliverFillRemaining(hasScrollBody: false, child: _EmptyReturnState()) else SliverPadding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 30), sliver: SliverList.builder(itemCount: list.length, itemBuilder: (_, i) => Padding(padding: const EdgeInsets.only(bottom: 12), child: _bookingCard(list[i])))),
         ]),
       ),
-    );
+    )
+    );;
   }
 
   Widget _dashboard() => Padding(padding: const EdgeInsets.fromLTRB(16, 16, 16, 12), child: LayoutBuilder(builder: (_, c) {

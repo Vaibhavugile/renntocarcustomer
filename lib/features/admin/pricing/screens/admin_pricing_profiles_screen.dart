@@ -5,6 +5,7 @@ import '../../../../core/config/app_config.dart';
 import '../../../pricing/models/pricing_profile.dart';
 import '../../../pricing/services/pricing_profile_service.dart';
 import 'admin_add_pricing_profile_screen.dart';
+import '../../dashboard/screens/admin_dashboard_screen.dart';
 import 'admin_edit_pricing_profile_screen.dart';
 import 'admin_pricing_calendar_screen.dart';
 
@@ -27,6 +28,17 @@ class AdminPricingProfilesScreen extends StatefulWidget {
 
 class _AdminPricingProfilesScreenState
     extends State<AdminPricingProfilesScreen> {
+  void _goBackToDashboard() {
+    if (!mounted) return;
+
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(
+        builder: (_) => const AdminDashboardScreen(),
+      ),
+      (route) => false,
+    );
+  }
+
   static const Color background = Color(0xFFF8FAF9);
   static const Color card = Color(0xFFFFFFFF);
   static const Color primary = Color(0xFF0F766E);
@@ -444,13 +456,24 @@ class _AdminPricingProfilesScreenState
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        _goBackToDashboard();
+      },
+      child: Scaffold(
       backgroundColor: background,
       appBar: AppBar(
         backgroundColor: background,
         surfaceTintColor: Colors.transparent,
         elevation: 0,
         titleSpacing: 20,
+        leading: IconButton(
+          tooltip: 'Back to Dashboard',
+          icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 19),
+          onPressed: _goBackToDashboard,
+        ),
         title: const Text(
           'Pricing Profiles',
           style: TextStyle(
@@ -526,7 +549,8 @@ class _AdminPricingProfilesScreenState
                     ),
                   ),
       ),
-    );
+    )
+    );;
   }
 
   Widget _intro() {

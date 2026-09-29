@@ -6,6 +6,7 @@ import '../../../cars/models/car.dart';
 import '../../../cars/services/car_service.dart';
 import 'admin_add_car_screen.dart';
 import 'admin_edit_car_screen.dart';
+import '../../dashboard/screens/admin_dashboard_screen.dart';
 
 class AdminCarsScreen extends StatefulWidget {
   const AdminCarsScreen({
@@ -2179,7 +2180,19 @@ class _AdminCarsScreenState
   Widget build(
     BuildContext context,
   ) {
-    return Scaffold(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(
+            builder: (_) => const AdminDashboardScreen(),
+          ),
+          (route) => false,
+        );
+      },
+      child: Scaffold(
       backgroundColor:
           background,
 
@@ -2200,8 +2213,13 @@ class _AdminCarsScreenState
           ),
           color: heading,
           onPressed: () {
-            Navigator.pop(
-              context,
+            // Do NOT pop Cars.
+            // Explicitly navigate to the Admin Dashboard.
+            Navigator.of(context).pushAndRemoveUntil(
+              MaterialPageRoute(
+                builder: (_) => const AdminDashboardScreen(),
+              ),
+              (route) => false,
             );
           },
         ),
@@ -2338,6 +2356,7 @@ class _AdminCarsScreenState
           ],
         ),
       ),
-    );
+    )
+    );;
   }
 }

@@ -11,6 +11,8 @@ import '../../../booking/models/booking.dart';
 import '../../../booking/services/booking_service.dart';
 import '../../../customer/models/customer.dart';
 import '../../../customer/services/customer_service.dart';
+import 'admin_booking_details_screen.dart';
+import '../../dashboard/screens/admin_dashboard_screen.dart';
 
 /// Premium operational Pickup Pending screen.
 ///
@@ -20,13 +22,38 @@ import '../../../customer/services/customer_service.dart';
 /// This screen deliberately does NOT automate the physical handover.
 /// The final handover is revalidated and recorded through BookingService.
 class PickupPendingScreen extends StatefulWidget {
-  const PickupPendingScreen({super.key});
+  const PickupPendingScreen({
+    super.key,
+    this.booking,
+  });
+
+  /// The booking whose operational handover is being completed.
+  ///
+  /// When opened from Booking Details, passing this booking lets this screen
+  /// return to that exact Booking Details screen after Back/swipe.
+  final Booking? booking;
 
   @override
   State<PickupPendingScreen> createState() => _PickupPendingScreenState();
 }
 
 class _PickupPendingScreenState extends State<PickupPendingScreen> {
+  void _goBack() {
+    if (!mounted) return;
+
+    if (widget.booking != null) {
+      Navigator.of(context).pop();
+      return;
+    }
+
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(
+        builder: (_) => const AdminDashboardScreen(),
+      ),
+      (route) => false,
+    );
+  }
+
   static const background = Color(0xFFF6F8F7);
   static const card = Colors.white;
   static const primary = Color(0xFF0F766E);
@@ -338,12 +365,23 @@ class _PickupPendingScreenState extends State<PickupPendingScreen> {
   @override
   Widget build(BuildContext context) {
     final list = _filtered;
-    return Scaffold(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        _goBack();
+      },
+      child: Scaffold(
       backgroundColor: background,
       appBar: AppBar(
         backgroundColor: card,
         surfaceTintColor: Colors.transparent,
         elevation: 0,
+        leading: IconButton(
+          tooltip: 'Back',
+          icon: const Icon(Icons.arrow_back_ios_new_rounded),
+          onPressed: _goBack,
+        ),
         title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text('Pickup Pending', style: GoogleFonts.manrope(fontSize: 19, fontWeight: FontWeight.w900, color: heading)),
           Text('${_bookings.length} awaiting handover • ${_lastVerifiedAt == null ? 'Not verified' : 'Verified ' + DateFormat('hh:mm a').format(_lastVerifiedAt!)}', style: GoogleFonts.manrope(fontSize: 9.5, color: muted, fontWeight: FontWeight.w700)),
@@ -377,7 +415,8 @@ class _PickupPendingScreenState extends State<PickupPendingScreen> {
                 ],
               ),
       ),
-    );
+    )
+    );;
   }
 
   Widget _dashboard() => Padding(

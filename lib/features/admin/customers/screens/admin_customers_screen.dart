@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../../core/config/app_config.dart';
+import '../../dashboard/screens/admin_dashboard_screen.dart';
 import '../../../customer/models/customer.dart';
 import '../../../customer/services/customer_service.dart';
 import 'admin_add_customer_screen.dart';
@@ -334,8 +335,20 @@ class _AdminCustomersScreenState
           'pending',
     ).length;
 
-    return Scaffold(
-      backgroundColor: bg,
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(
+            builder: (_) => const AdminDashboardScreen(),
+          ),
+          (route) => false,
+        );
+      },
+      child: Scaffold(
+        backgroundColor: bg,
 
       // ========================================================
       // APP BAR
@@ -343,6 +356,22 @@ class _AdminCustomersScreenState
 
       appBar: AppBar(
         backgroundColor: bg,
+        leading: IconButton(
+          tooltip: 'Back to Dashboard',
+          icon: const Icon(
+            Icons.arrow_back_ios_new_rounded,
+            color: heading,
+            size: 19,
+          ),
+          onPressed: () {
+            Navigator.of(context).pushAndRemoveUntil(
+              MaterialPageRoute(
+                builder: (_) => const AdminDashboardScreen(),
+              ),
+              (route) => false,
+            );
+          },
+        ),
         surfaceTintColor: bg,
         elevation: 0,
         titleSpacing: 20,
@@ -461,6 +490,7 @@ class _AdminCustomersScreenState
                 pending: pending,
               ),
             ),
+    ),
     );
   }
 

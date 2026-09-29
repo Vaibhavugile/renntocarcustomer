@@ -23,6 +23,7 @@ import '../../../pricing/engine/pricing_engine.dart';
 import '../../../booking/models/booking.dart';
 import '../services/admin_availability_service.dart';
 import '../../../booking/services/booking_service.dart';
+import '../../booking/screens/admin_booking_details_screen.dart';
 import '../../customers/screens/admin_add_customer_screen.dart';
 
 enum AdminRentalType {
@@ -2384,7 +2385,17 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
         ),
       );
 
-      if (mounted) Navigator.pop(context, created);
+      if (!mounted) return;
+
+      // Booking creation succeeded. Open the real Booking 360° screen
+      // for the exact booking returned by BookingService.
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(
+          builder: (_) => AdminBookingDetailsScreen(
+            booking: created,
+          ),
+        ),
+      );
     } catch (e) {
       if (!mounted) return;
       setState(() => _creatingBooking = false);
@@ -2416,9 +2427,12 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
 
   void _back() {
     if (_step <= 1) {
-      Navigator.pop(context);
+      // AdminNewBookingScreen was opened from AdminDashboardScreen.
+      // Popping this route returns directly to the dashboard.
+      Navigator.of(context).pop();
       return;
     }
+
     setState(() {
       _step -= 1;
     });

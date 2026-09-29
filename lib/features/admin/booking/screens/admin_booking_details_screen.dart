@@ -503,7 +503,9 @@ class _AdminBookingDetailsScreenState
 
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => const PickupPendingScreen(),
+        builder: (_) =>  PickupPendingScreen(
+  booking: _booking,
+),
       ),
     );
 
@@ -561,7 +563,9 @@ class _AdminBookingDetailsScreenState
 
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => const ReturnPendingScreen(),
+        builder: (_) =>  ReturnPendingScreen(
+  booking: _booking,
+),
       ),
     );
 
