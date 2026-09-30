@@ -356,8 +356,8 @@ function validateRequestedPaymentAmount(
     outstandingAmount + epsilon
   ) {
     throw new Error(
-        `Payment amount cannot exceed the
-         outstanding balance of ${outstandingAmount.toFixed(2)}.`,
+        `Payment amount cannot exceed the 
+        outstanding balance of ${outstandingAmount.toFixed(2)}.`,
     );
   }
 
@@ -387,7 +387,7 @@ function rupeesToPaise(amount) {
 }
 
 // ------------------------------------------------------------
-// CREATE ORDER
+// CREATE ORDER FOR EXISTING BOOKING
 // ------------------------------------------------------------
 
 /**
@@ -515,17 +515,6 @@ async function createRazorpayOrder({
   // ----------------------------------------------------------
   // Determine payment amount
   // ----------------------------------------------------------
-  //
-  // If requestedAmount is null/undefined/empty:
-  //
-  //     PAY REMAINING
-  //
-  // Otherwise:
-  //
-  //     PAY OTHER AMOUNT
-  //
-  // The server validates the amount.
-  // ----------------------------------------------------------
 
   let paymentAmount;
 
@@ -632,15 +621,12 @@ async function createRazorpayOrder({
       bookingData.customerId ||
       null,
 
-    // Actual amount customer is paying.
     amount:
       paymentAmount,
 
     amountPaise:
       amountPaise,
 
-    // Balance at the exact moment
-    // the order was created.
     outstandingAtOrder:
       outstandingAmount,
 
@@ -690,7 +676,6 @@ async function createRazorpayOrder({
       order.id,
 
     // PUBLIC Razorpay Key ID only.
-    //
     // Secret is NEVER returned.
     keyId:
       config.keyId,
@@ -717,6 +702,330 @@ async function createRazorpayOrder({
 
     paymentAttemptId:
       paymentAttemptRef.id,
+  };
+}
+
+// ------------------------------------------------------------
+// CREATE NEW CUSTOMER CHECKOUT ORDER
+// ------------------------------------------------------------
+
+/**
+ * Creates a Razorpay order for a NEW customer booking.
+ *
+ * IMPORTANT:
+ *
+ * - The real booking does NOT exist yet.
+ * - This function creates only a temporary checkout attempt.
+ * - The final bookings/{bookingId} document is created only
+ *   after successful payment verification.
+ *
+ * Input:
+ *
+ * {
+ *   tenantId: "tenant_001",
+ *   booking: {
+ *     tenantId: "tenant_001",
+ *     customerId: "CUSTOMER_UID",
+ *     totalAmount: 5000,
+ *     ...
+ *   },
+ *   requestedAmount: 5000
+ * }
+ *
+ * The server determines the default amount from booking.totalAmount.
+ *
+ * If requestedAmount is supplied, it cannot exceed totalAmount.
+ *
+ * IMPORTANT:
+ * For maximum production protection, the totalAmount should
+ * eventually be recalculated on the backend from authoritative
+ * vehicle/pricing/date/package data.
+ */
+async function createRazorpayCheckoutOrder({
+  tenantId,
+  booking,
+  requestedAmount = null,
+}) {
+  const normalizedTenantId =
+    normalizeTenantId(tenantId);
+
+  if (
+    !booking ||
+    typeof booking !== "object"
+  ) {
+    throw new Error(
+        "Booking data is required for checkout.",
+    );
+  }
+
+  const bookingTenantId =
+    String(
+        booking.tenantId || "",
+    ).trim();
+
+  if (
+    bookingTenantId &&
+    bookingTenantId !== normalizedTenantId
+  ) {
+    throw new Error(
+        "Booking does not belong to this tenant.",
+    );
+  }
+
+  const customerId =
+    String(
+        booking.customerId ||
+      booking.userId ||
+      "",
+    ).trim();
+
+  if (!customerId) {
+    throw new Error(
+        "Customer ID is required for checkout.",
+    );
+  }
+
+  const config =
+    await getTenantRazorpayConfig(
+        normalizedTenantId,
+    );
+
+  // ----------------------------------------------------------
+  // Determine checkout amount
+  // ----------------------------------------------------------
+
+  const totalAmount =
+    Number(
+        booking.totalAmount || 0,
+    );
+
+  if (
+    !Number.isFinite(totalAmount) ||
+    totalAmount <= 0
+  ) {
+    throw new Error(
+        "Invalid booking total amount.",
+    );
+  }
+
+  let paymentAmount;
+
+  const hasRequestedAmount =
+    requestedAmount !== null &&
+    requestedAmount !== undefined &&
+    String(requestedAmount).trim() !== "";
+
+  if (hasRequestedAmount) {
+    paymentAmount =
+      validateRequestedPaymentAmount(
+          requestedAmount,
+          totalAmount,
+      );
+  } else {
+    paymentAmount =
+      Number(
+          totalAmount.toFixed(2),
+      );
+  }
+
+  const amountPaise =
+    rupeesToPaise(
+        paymentAmount,
+    );
+
+  // ----------------------------------------------------------
+  // Create Razorpay client
+  // ----------------------------------------------------------
+
+  const {
+    razorpay,
+  } = await getTenantRazorpayClient(
+      normalizedTenantId,
+  );
+
+  // ----------------------------------------------------------
+  // Create temporary checkout attempt
+  // ----------------------------------------------------------
+  //
+  // IMPORTANT:
+  //
+  // This is NOT a booking.
+  //
+  // It is only used to correlate:
+  //
+  // checkout attempt
+  //      ↓
+  // Razorpay order
+  //      ↓
+  // Razorpay payment
+  //
+  // If customer backs out, there is no bookings document.
+  // ----------------------------------------------------------
+
+  const checkoutAttemptRef =
+    db
+        .collection("tenants")
+        .doc(normalizedTenantId)
+        .collection("checkoutAttempts")
+        .doc();
+
+  const checkoutAttemptId =
+    checkoutAttemptRef.id;
+
+  const receipt =
+    `rentocar_${normalizedTenantId}_checkout_${checkoutAttemptId}`
+        .replace(
+            /[^a-zA-Z0-9_-]/g,
+            "_",
+        )
+        .substring(0, 40);
+
+  // ----------------------------------------------------------
+  // Create Razorpay order
+  // ----------------------------------------------------------
+
+  const order =
+    await razorpay.orders.create({
+      amount: amountPaise,
+      currency: config.currency,
+      receipt,
+
+      notes: {
+        tenantId:
+          normalizedTenantId,
+
+        checkoutAttemptId:
+          checkoutAttemptId,
+
+        customerId:
+          customerId,
+
+        paymentType:
+          hasRequestedAmount ?
+            "partial" :
+            "full",
+
+        requestedAmount:
+          String(paymentAmount),
+
+        bookingTotalAmount:
+          String(totalAmount),
+
+        flow:
+          "new_customer_booking",
+      },
+    });
+
+  if (
+    !order ||
+    !order.id
+  ) {
+    throw new Error(
+        "Razorpay did not return an order ID.",
+    );
+  }
+
+  // ----------------------------------------------------------
+  // Save ONLY temporary checkout attempt
+  // ----------------------------------------------------------
+
+  await checkoutAttemptRef.set({
+    tenantId:
+      normalizedTenantId,
+
+    checkoutAttemptId:
+      checkoutAttemptId,
+
+    customerId:
+      customerId,
+
+    amount:
+      paymentAmount,
+
+    amountPaise:
+      amountPaise,
+
+    bookingTotalAmount:
+      totalAmount,
+
+    currency:
+      config.currency,
+
+    gateway:
+      "razorpay",
+
+    gatewayMode:
+      config.mode,
+
+    paymentType:
+      hasRequestedAmount ?
+        "partial" :
+        "full",
+
+    razorpayOrderId:
+      order.id,
+
+    status:
+      "created",
+
+    /**
+     * Store the temporary booking payload
+     * only for checkout correlation.
+     *
+     * This is NOT the bookings collection.
+     */
+    bookingData:
+      booking,
+
+    createdAt:
+      admin.firestore.FieldValue
+          .serverTimestamp(),
+
+    updatedAt:
+      admin.firestore.FieldValue
+          .serverTimestamp(),
+  });
+
+  // ----------------------------------------------------------
+  // Return public values to Flutter
+  // ----------------------------------------------------------
+
+  return {
+    success: true,
+
+    tenantId:
+      normalizedTenantId,
+
+    checkoutAttemptId:
+      checkoutAttemptId,
+
+    orderId:
+      order.id,
+
+    // PUBLIC Razorpay Key ID.
+    keyId:
+      config.keyId,
+
+    // Razorpay amount in paise.
+    amount:
+      amountPaise,
+
+    // Convenient rupee amount.
+    amountRupees:
+      paymentAmount,
+
+    currency:
+      config.currency,
+
+    paymentType:
+      hasRequestedAmount ?
+        "partial" :
+        "full",
+
+    // Explicitly tell Flutter that no booking
+    // has been created yet.
+    bookingCreated:
+      false,
   };
 }
 
@@ -812,14 +1121,20 @@ module.exports = {
   getTenantRazorpaySecret,
   getTenantRazorpayClient,
 
+  // Existing payment flow for bookings
+  // that already exist.
   createRazorpayOrder,
 
+  // New customer payment-first flow.
+  createRazorpayCheckoutOrder,
+
+  // Razorpay signature verification.
   verifyRazorpaySignature,
 
+  // Booking helpers.
   getTenantBooking,
   getOutstandingAmount,
 
-  // Exported in case index.js
-  // needs direct server-side validation.
+  // Exported for server-side validation.
   validateRequestedPaymentAmount,
 };

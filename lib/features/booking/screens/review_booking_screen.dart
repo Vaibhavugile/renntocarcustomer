@@ -68,9 +68,6 @@ class _ReviewBookingScreenState
   final CustomerService _customerService =
       CustomerService();
 
-  final BookingService _bookingService =
-      BookingService();
-
   final _formKey =
       GlobalKey<FormState>();
 
@@ -718,16 +715,16 @@ class _ReviewBookingScreenState
       /*
        * IMPORTANT:
        *
-       * BookingService performs the final availability check
-       * immediately before saving.
+       * DO NOT create the Firestore booking here.
+       *
+       * This screen only prepares the complete Booking object
+       * from the customer's selections. The actual booking
+       * must be persisted only after payment has been
+       * successfully verified.
+       *
+       * This prevents an abandoned/cancelled payment attempt
+       * from leaving a real booking in Firestore.
        */
-      final savedBooking =
-          await _bookingService
-              .createBooking(
-        tenantId: _tenantId,
-        booking: booking,
-      );
-
       if (!mounted) return;
 
       setState(() {
@@ -735,18 +732,23 @@ class _ReviewBookingScreenState
       });
 
       /*
-       * Payment comes immediately after booking creation.
+       * Pass the in-memory Booking object to PaymentScreen.
        *
-       * For now payment is a simple Firebase-only/manual
-       * completion step. Later this screen can be replaced
-       * by Razorpay or another payment gateway without
-       * changing the booking creation flow.
+       * `booking.bookingId` is intentionally empty here because
+       * no Firestore booking has been created yet.
+       *
+       * PaymentScreen must create the real booking only after
+       * successful payment verification.
        */
-      Navigator.pushReplacement(
+      // Keep ReviewBookingScreen in the navigation stack.
+      // If the customer cancels/back-navigates from payment, they
+      // should return here with the prepared booking still intact.
+      // The real Firestore booking is still NOT created.
+      await Navigator.push(
         context,
         MaterialPageRoute(
           builder: (_) => PaymentScreen(
-            booking: savedBooking,
+            booking: booking,
           ),
         ),
       );
@@ -754,7 +756,7 @@ class _ReviewBookingScreenState
       if (!mounted) return;
 
       String message =
-          'Unable to create your booking. Please try again.';
+          'Unable to continue to payment. Please try again.';
 
       final error =
           e.toString().toLowerCase();

@@ -13,7 +13,7 @@ import '../../booking/screens/pickup_pending_screen.dart';
 import '../../booking/screens/return_pending_screen.dart';
 import '../../pricing/screens/admin_pricing_profiles_screen.dart';
 import '../../notifications/screens/admin_push_notification_screen.dart';
-
+import '../../reports/screens/payments_report_screen.dart';
 class AdminDashboardScreen extends StatefulWidget {
   const AdminDashboardScreen({
     super.key,
@@ -872,10 +872,8 @@ class _AdminDashboardScreenState
                 icon:
                     Icons.payments_rounded,
                 onTap: () {
-                  _showComingSoon(
-                    'Payments Report',
-                  );
-                },
+  _push(const PaymentsReportScreen());
+},
               ),
             ),
 

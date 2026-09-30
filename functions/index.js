@@ -94,9 +94,9 @@ const {
 
 const {
   createRazorpayOrder,
+  createRazorpayCheckoutOrder,
   verifyRazorpaySignature,
 } = require("./razorpay");
-
 // ============================================================
 // FIREBASE ADMIN INITIALIZATION
 // ============================================================
@@ -3022,6 +3022,250 @@ exports.createRazorpayOrder = onCall(
         // ------------------------------------------------------
         // Unknown backend error
         // ------------------------------------------------------
+
+        throw new HttpsError(
+            "internal",
+            message,
+        );
+      }
+    },
+);
+// ============================================================
+// RAZORPAY CREATE CHECKOUT ORDER
+// ============================================================
+//
+// NEW CUSTOMER BOOKING FLOW
+//
+// Review Booking
+//      ↓
+// Payment Screen
+//      ↓
+// createRazorpayCheckoutOrder()
+//      ↓
+// Razorpay Order
+//      ↓
+// Customer pays
+//      ↓
+// Payment verified
+//      ↓
+// Real booking is created
+//
+// IMPORTANT:
+//
+// This function DOES NOT create:
+//
+// tenants/{tenantId}/bookings/{bookingId}
+//
+// It creates only a temporary:
+//
+// tenants/{tenantId}/checkoutAttempts/{checkoutAttemptId}
+//
+// The real booking is created only after successful payment.
+// ============================================================
+
+exports.createRazorpayCheckoutOrder = onCall(
+    async (request) => {
+      try {
+        // ------------------------------------------------------
+        // Authentication
+        // ------------------------------------------------------
+
+        if (!request.auth) {
+          throw new HttpsError(
+              "unauthenticated",
+              "You must be logged in to make a payment.",
+          );
+        }
+
+        // ------------------------------------------------------
+        // Request data
+        // ------------------------------------------------------
+
+        const data =
+          request.data || {};
+
+        const tenantId =
+          String(
+              data.tenantId || "",
+          ).trim();
+
+        const booking =
+          data.booking;
+
+        const requestedAmount =
+          data.requestedAmount !== undefined &&
+          data.requestedAmount !== null ?
+            Number(data.requestedAmount) :
+            null;
+
+        // ------------------------------------------------------
+        // Validate tenant
+        // ------------------------------------------------------
+
+        if (!tenantId) {
+          throw new HttpsError(
+              "invalid-argument",
+              "tenantId is required.",
+          );
+        }
+
+        // ------------------------------------------------------
+        // Validate booking payload
+        // ------------------------------------------------------
+
+        if (
+          !booking ||
+          typeof booking !== "object" ||
+          Array.isArray(booking)
+        ) {
+          throw new HttpsError(
+              "invalid-argument",
+              "Booking data is required.",
+          );
+        }
+
+        // ------------------------------------------------------
+        // Customer ownership
+        // ------------------------------------------------------
+        //
+        // Review screen sends the authenticated customer's UID.
+        //
+        // Backend does NOT allow one customer to create a
+        // checkout using another customer's booking payload.
+        // ------------------------------------------------------
+
+        const authenticatedUserId =
+          String(
+              request.auth.uid || "",
+          ).trim();
+
+        const bookingCustomerId =
+          String(
+              booking.customerId ||
+              booking.userId ||
+              "",
+          ).trim();
+
+        if (!bookingCustomerId) {
+          throw new HttpsError(
+              "invalid-argument",
+              "booking.customerId is required.",
+          );
+        }
+
+        if (
+          bookingCustomerId !==
+          authenticatedUserId
+        ) {
+          throw new HttpsError(
+              "permission-denied",
+              "You are not authorized to create this checkout.",
+          );
+        }
+
+        // ------------------------------------------------------
+        // Tenant ownership
+        // ------------------------------------------------------
+
+        const bookingTenantId =
+          String(
+              booking.tenantId || "",
+          ).trim();
+
+        if (
+          bookingTenantId &&
+          bookingTenantId !== tenantId
+        ) {
+          throw new HttpsError(
+              "permission-denied",
+              "Booking does not belong to this tenant.",
+          );
+        }
+
+        // ------------------------------------------------------
+        // Validate requested amount
+        // ------------------------------------------------------
+
+        if (
+          requestedAmount !== null &&
+          (
+            !Number.isFinite(
+                requestedAmount,
+            ) ||
+            requestedAmount <= 0
+          )
+        ) {
+          throw new HttpsError(
+              "invalid-argument",
+              "requestedAmount must be greater than zero.",
+          );
+        }
+
+        // ------------------------------------------------------
+        // Create Razorpay checkout order
+        // ------------------------------------------------------
+
+        const result =
+          await createRazorpayCheckoutOrder({
+            tenantId:
+              tenantId,
+
+            booking:
+              booking,
+
+            requestedAmount:
+              requestedAmount,
+          });
+
+        // ------------------------------------------------------
+        // Return result to Flutter
+        // ------------------------------------------------------
+
+        return result;
+      } catch (error) {
+        console.error(
+            "createRazorpayCheckoutOrder failed:",
+            error,
+        );
+
+        // Preserve Firebase HttpsError.
+        if (
+          error instanceof HttpsError
+        ) {
+          throw error;
+        }
+
+        // ------------------------------------------------------
+        // Convert common validation errors
+        // ------------------------------------------------------
+
+        const message =
+          error &&
+          error.message ?
+            error.message :
+            "Unable to create Razorpay checkout order.";
+
+        if (
+          message.includes("required") ||
+          message.includes("Invalid") ||
+          message.includes("invalid")
+        ) {
+          throw new HttpsError(
+              "invalid-argument",
+              message,
+          );
+        }
+
+        if (
+          message.includes("authorized") ||
+          message.includes("permission") ||
+          message.includes("does not belong")
+        ) {
+          throw new HttpsError(
+              "permission-denied",
+              message,
+          );
+        }
 
         throw new HttpsError(
             "internal",

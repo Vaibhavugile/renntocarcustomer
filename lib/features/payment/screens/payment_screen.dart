@@ -121,6 +121,12 @@ class _PaymentScreenState extends State<PaymentScreen> {
   Booking get _activeBooking =>
       _latestBooking ?? widget.booking;
 
+  // A customer-side booking is only a temporary in-memory object until
+  // Razorpay payment is successfully verified. Existing bookings have a
+  // Firestore bookingId and continue to use the existing payment flow.
+  bool get _isNewBooking =>
+      widget.booking.bookingId.trim().isEmpty;
+
   // ============================================================
   // OUTSTANDING
   // ============================================================
@@ -142,6 +148,13 @@ class _PaymentScreenState extends State<PaymentScreen> {
 
   Future<void> _refreshBooking() async {
     if (_isRefreshing || _isProcessing) {
+      return;
+    }
+
+    if (_isNewBooking) {
+      _showMessage(
+        'This booking is not created yet. It will be created after successful payment.',
+      );
       return;
     }
 
@@ -225,8 +238,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
   Future<void> _completePayment({
     double? requestedAmount,
   }) async {
-    if (_isProcessing ||
-        _isRefreshing) {
+    if (_isProcessing || _isRefreshing) {
       return;
     }
 
@@ -236,146 +248,170 @@ class _PaymentScreenState extends State<PaymentScreen> {
 
     setState(() {
       _isProcessing = true;
-      _requestedPaymentAmount =
-          requestedAmount;
+      _requestedPaymentAmount = requestedAmount;
     });
 
     try {
       // --------------------------------------------------------
-      // ALWAYS FETCH THE LATEST BOOKING
+      // IMPORTANT PAYMENT-FIRST RULE
+      // --------------------------------------------------------
+      //
+      // NEW CUSTOMER BOOKING:
+      //
+      //   widget.booking is only an in-memory booking snapshot.
+      //   DO NOT read/create tenants/{tenantId}/bookings here.
+      //
+      // EXISTING BOOKING:
+      //
+      //   Read the latest Firestore booking and use the existing
+      //   createRazorpayOrder flow.
       // --------------------------------------------------------
 
-      final bookingRef =
-          FirebaseFirestore
-              .instance
-              .collection('tenants')
-              .doc(_tenantId)
-              .collection('bookings')
-              .doc(
-                widget.booking.bookingId,
-              );
+      late Booking paymentBooking;
 
-      final snapshot =
-          await bookingRef.get();
+      if (_isNewBooking) {
+        paymentBooking = widget.booking;
 
-      if (!snapshot.exists ||
-          snapshot.data() == null) {
-        throw Exception(
-          'Booking not found.',
-        );
-      }
-
-      final data =
-          snapshot.data()!;
-
-      if ((data['tenantId']
-                  ?.toString() ??
-              '') !=
-          _tenantId) {
-        throw Exception(
-          'Invalid tenant booking.',
-        );
-      }
-
-      final latestBooking =
-          Booking.fromMap(
-        snapshot.id,
-        data,
-      );
-
-      if (mounted) {
-        setState(() {
-          _latestBooking =
-              latestBooking;
-        });
-      }
-
-      // --------------------------------------------------------
-      // BLOCK TERMINAL BOOKINGS
-      // --------------------------------------------------------
-
-      if (latestBooking.status ==
-              BookingStatus.cancelled ||
-          latestBooking.status ==
-              BookingStatus.rejected ||
-          latestBooking.status ==
-              BookingStatus.completed ||
-          latestBooking.status ==
-              BookingStatus.noShow) {
-        throw Exception(
-          'This booking is no longer available for payment.',
-        );
-      }
-
-      // --------------------------------------------------------
-      // ALREADY PAID
-      // --------------------------------------------------------
-
-      if (latestBooking.paymentStatus ==
-              PaymentStatus.paid ||
-          latestBooking.balanceAmount <=
-              0.009) {
-        if (!mounted) {
-          return;
+        if (paymentBooking.tenantId != _tenantId) {
+          throw Exception(
+            'Invalid booking tenant.',
+          );
         }
 
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (_) =>
-                PaymentSuccessScreen(
-              booking:
-                  latestBooking,
-              paymentId:
-                  latestBooking.paymentId,
-            ),
-          ),
+        if (paymentBooking.customerId.trim().isEmpty) {
+          throw Exception(
+            'Customer information is missing.',
+          );
+        }
+
+        if (paymentBooking.totalAmount <= 0) {
+          throw Exception(
+            'Invalid booking amount.',
+          );
+        }
+      } else {
+        final bookingRef =
+            FirebaseFirestore.instance
+                .collection('tenants')
+                .doc(_tenantId)
+                .collection('bookings')
+                .doc(widget.booking.bookingId);
+
+        final snapshot = await bookingRef.get();
+
+        if (!snapshot.exists || snapshot.data() == null) {
+          throw Exception(
+            'Booking not found.',
+          );
+        }
+
+        final data = snapshot.data()!;
+
+        if ((data['tenantId']?.toString() ?? '') != _tenantId) {
+          throw Exception(
+            'Invalid tenant booking.',
+          );
+        }
+
+        paymentBooking = Booking.fromMap(
+          snapshot.id,
+          data,
         );
 
-        return;
+        if (mounted) {
+          setState(() {
+            _latestBooking = paymentBooking;
+          });
+        }
+
+        // ------------------------------------------------------
+        // BLOCK TERMINAL BOOKINGS
+        // ------------------------------------------------------
+
+        if (paymentBooking.status == BookingStatus.cancelled ||
+            paymentBooking.status == BookingStatus.rejected ||
+            paymentBooking.status == BookingStatus.completed ||
+            paymentBooking.status == BookingStatus.noShow) {
+          throw Exception(
+            'This booking is no longer available for payment.',
+          );
+        }
+
+        // ------------------------------------------------------
+        // ALREADY PAID
+        // ------------------------------------------------------
+
+        if (paymentBooking.paymentStatus == PaymentStatus.paid ||
+            paymentBooking.balanceAmount <= 0.009) {
+          if (!mounted) {
+            return;
+          }
+
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (_) => PaymentSuccessScreen(
+                booking: paymentBooking,
+                paymentId: paymentBooking.paymentId,
+              ),
+            ),
+          );
+
+          return;
+        }
       }
 
       // --------------------------------------------------------
-      // CALL BACKEND
+      // CREATE RAZORPAY ORDER
+      // --------------------------------------------------------
       //
-      // IMPORTANT:
-      // We do NOT send amount.
+      // NEW BOOKING:
+      //   createRazorpayCheckoutOrder
       //
-      // Backend calculates amount directly from Firestore.
+      // EXISTING BOOKING:
+      //   createRazorpayOrder
       // --------------------------------------------------------
 
-      final callable =
-          _functions.httpsCallable(
-        'createRazorpayOrder',
+      final callable = _functions.httpsCallable(
+        _isNewBooking
+            ? 'createRazorpayCheckoutOrder'
+            : 'createRazorpayOrder',
       );
 
-      final callData =
-          <String, dynamic>{
-        'tenantId':
-            _tenantId,
-        'bookingId':
-            latestBooking.bookingId,
+      final callData = <String, dynamic>{
+        'tenantId': _tenantId,
       };
 
-      // Omit the field for Pay Remaining.
-      // Send it only for Pay Other Amount.
-      if (requestedAmount != null) {
-        callData['requestedAmount'] =
-            requestedAmount;
+      if (_isNewBooking) {
+        // IMPORTANT: Firebase Callable Functions only accept
+        // JSON-safe values. Booking.toMap() contains Firestore
+        // Timestamp values, so do NOT send the complete Booking map.
+        //
+        // The checkout endpoint only needs these primitive values.
+        // The real booking is still created only after successful
+        // Razorpay signature verification.
+        callData['booking'] = <String, dynamic>{
+          'tenantId': paymentBooking.tenantId,
+          'customerId': paymentBooking.customerId,
+          'totalAmount': paymentBooking.totalAmount,
+        };
+      } else {
+        callData['bookingId'] = paymentBooking.bookingId;
       }
 
-      final result =
-          await callable.call(
-        callData,
-      );
+      // Omit the field for Pay Remaining / full checkout.
+      // Send it only when the customer selected another amount.
+      if (requestedAmount != null) {
+        callData['requestedAmount'] = requestedAmount;
+      }
 
-      final response =
-          Map<String, dynamic>.from(
+      final result = await callable.call(callData);
+
+      final response = Map<String, dynamic>.from(
         result.data as Map,
       );
 
-      if (response['success'] !=
-          true) {
+      if (response['success'] != true) {
         throw Exception(
           'Unable to create Razorpay order.',
         );
@@ -385,36 +421,28 @@ class _PaymentScreenState extends State<PaymentScreen> {
       // RESPONSE
       // --------------------------------------------------------
 
-      final keyId =
-          response['keyId']
-              ?.toString()
-              .trim();
+      final keyId = response['keyId']?.toString().trim();
 
-      final orderId =
-          response['orderId']
-              ?.toString()
-              .trim();
+      final orderId = response['orderId']?.toString().trim();
 
-      final currency =
-          response['currency']
-              ?.toString()
-              .trim()
-              .toUpperCase();
+      final currency = response['currency']
+          ?.toString()
+          .trim()
+          .toUpperCase();
 
+      // Existing flow returns paymentAttemptId.
+      // New checkout flow returns checkoutAttemptId.
       final paymentAttemptId =
-          response[
-                'paymentAttemptId'
-              ]
+          (response['paymentAttemptId'] ??
+                  response['checkoutAttemptId'])
               ?.toString()
               .trim();
 
-      final amountPaise =
-          _toInt(
+      final amountPaise = _toInt(
         response['amount'],
       );
 
-      final amountRupees =
-          _toDouble(
+      final amountRupees = _toDouble(
         response['amountRupees'],
       );
 
@@ -422,15 +450,13 @@ class _PaymentScreenState extends State<PaymentScreen> {
       // VALIDATE BACKEND RESPONSE
       // --------------------------------------------------------
 
-      if (keyId == null ||
-          keyId.isEmpty) {
+      if (keyId == null || keyId.isEmpty) {
         throw Exception(
           'Razorpay Key ID was not returned by the server.',
         );
       }
 
-      if (orderId == null ||
-          orderId.isEmpty) {
+      if (orderId == null || orderId.isEmpty) {
         throw Exception(
           'Razorpay order ID was not returned by the server.',
         );
@@ -442,8 +468,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
         );
       }
 
-      if (currency == null ||
-          currency.isEmpty) {
+      if (currency == null || currency.isEmpty) {
         throw Exception(
           'Payment currency was not returned by the server.',
         );
@@ -453,98 +478,63 @@ class _PaymentScreenState extends State<PaymentScreen> {
       // STORE ACTIVE PAYMENT DETAILS
       // --------------------------------------------------------
 
-      _activeOrderId =
-          orderId;
-
-      _activePaymentAttemptId =
-          paymentAttemptId;
-
-      _activePaymentAmount =
-          amountRupees > 0
-              ? amountRupees
-              : amountPaise /
-                  100.0;
+      _activeOrderId = orderId;
+      _activePaymentAttemptId = paymentAttemptId;
+      _activePaymentAmount = amountRupees > 0
+          ? amountRupees
+          : amountPaise / 100.0;
 
       // --------------------------------------------------------
       // OPEN RAZORPAY
       // --------------------------------------------------------
 
-      final user =
-          await _getCurrentUserDetails(
-        latestBooking,
+      final user = await _getCurrentUserDetails(
+        paymentBooking,
       );
 
-      final options =
-          <String, dynamic>{
-        'key':
-            keyId,
-
-        'amount':
-            amountPaise,
-
-        'currency':
-            currency,
-
-        'name':
-            user['name'] ??
-                'Rentocar',
-
-        'description':
-            'Car rental booking ${latestBooking.bookingId}',
-
-        'order_id':
-            orderId,
-
-        'timeout':
-            300,
-
+      final options = <String, dynamic>{
+        'key': keyId,
+        'amount': amountPaise,
+        'currency': currency,
+        'name': user['name'] ?? 'Rentocar',
+        'description': _isNewBooking
+            ? 'Car rental booking payment'
+            : 'Car rental booking ${paymentBooking.bookingId}',
+        'order_id': orderId,
+        'timeout': 300,
         'prefill': {
-          'name':
-              user['name'] ??
-                  '',
-          'contact':
-              user['contact'] ??
-                  '',
-          'email':
-              user['email'] ??
-                  '',
+          'name': user['name'] ?? '',
+          'contact': user['contact'] ?? '',
+          'email': user['email'] ?? '',
         },
-
         'notes': {
-          'tenantId':
-              _tenantId,
-          'bookingId':
-              latestBooking.bookingId,
+          'tenantId': _tenantId,
+          if (!_isNewBooking)
+            'bookingId': paymentBooking.bookingId,
+          if (_isNewBooking)
+            'flow': 'new_customer_booking',
         },
-
         'theme': {
-          'color':
-              '#0F766E',
+          'color': '#0F766E',
         },
       };
 
-      _razorpayOpened =
-          true;
+      _razorpayOpened = true;
 
-      _razorpay.open(
-        options,
-      );
+      _razorpay.open(options);
     } on FirebaseFunctionsException catch (e) {
-      _razorpayOpened =
-          false;
+      _razorpayOpened = false;
 
       if (!mounted) {
         return;
       }
 
       _showMessage(
-        e.message ??
-            'Unable to start payment.',
+        e.message ?? 'Unable to start payment.',
         error: true,
       );
     } catch (e) {
-      _razorpayOpened =
-          false;
+      _razorpayOpened = false;
 
       if (!mounted) {
         return;
@@ -555,11 +545,9 @@ class _PaymentScreenState extends State<PaymentScreen> {
         error: true,
       );
     } finally {
-      if (mounted &&
-          !_razorpayOpened) {
+      if (mounted && !_razorpayOpened) {
         setState(() {
-          _isProcessing =
-              false;
+          _isProcessing = false;
         });
       }
     }
@@ -590,58 +578,41 @@ class _PaymentScreenState extends State<PaymentScreen> {
   Future<void> _handlePaymentSuccess(
     PaymentSuccessResponse response,
   ) async {
-    _razorpayOpened =
-        false;
+    _razorpayOpened = false;
 
-    final paymentId =
-        response.paymentId
-            ?.trim();
-
-    final orderId =
-        response.orderId
-            ?.trim();
-
-    final signature =
-        response.signature
-            ?.trim();
+    final paymentId = response.paymentId?.trim();
+    final orderId = response.orderId?.trim();
+    final signature = response.signature?.trim();
 
     // ----------------------------------------------------------
     // Validate Razorpay response
     // ----------------------------------------------------------
 
-    if (paymentId == null ||
-        paymentId.isEmpty) {
+    if (paymentId == null || paymentId.isEmpty) {
       await _paymentVerificationFailed(
         'Razorpay did not return a payment ID.',
       );
-
       return;
     }
 
-    if (orderId == null ||
-        orderId.isEmpty) {
+    if (orderId == null || orderId.isEmpty) {
       await _paymentVerificationFailed(
         'Razorpay did not return an order ID.',
       );
-
       return;
     }
 
-    if (signature == null ||
-        signature.isEmpty) {
+    if (signature == null || signature.isEmpty) {
       await _paymentVerificationFailed(
         'Razorpay did not return a payment signature.',
       );
-
       return;
     }
 
-    if (_activeOrderId != null &&
-        _activeOrderId != orderId) {
+    if (_activeOrderId != null && _activeOrderId != orderId) {
       await _paymentVerificationFailed(
         'Payment order mismatch. Please try again.',
       );
-
       return;
     }
 
@@ -650,43 +621,33 @@ class _PaymentScreenState extends State<PaymentScreen> {
     }
 
     setState(() {
-      _isProcessing =
-          true;
+      _isProcessing = true;
     });
 
     try {
       // --------------------------------------------------------
-      // BACKEND SIGNATURE VERIFICATION
+      // 1. BACKEND SIGNATURE VERIFICATION
+      // --------------------------------------------------------
+      //
+      // NO booking is created before this succeeds.
       // --------------------------------------------------------
 
-      final callable =
-          _functions.httpsCallable(
+      final callable = _functions.httpsCallable(
         'verifyRazorpaySignature',
       );
 
-      final result =
-          await callable.call({
-        'tenantId':
-            _tenantId,
-
-        'orderId':
-            orderId,
-
-        'paymentId':
-            paymentId,
-
-        'signature':
-            signature,
+      final result = await callable.call({
+        'tenantId': _tenantId,
+        'orderId': orderId,
+        'paymentId': paymentId,
+        'signature': signature,
       });
 
-      final data =
-          Map<String, dynamic>.from(
+      final data = Map<String, dynamic>.from(
         result.data as Map,
       );
 
-      final verified =
-          data['verified'] ==
-              true;
+      final verified = data['verified'] == true;
 
       if (!verified) {
         throw Exception(
@@ -695,156 +656,142 @@ class _PaymentScreenState extends State<PaymentScreen> {
       }
 
       // --------------------------------------------------------
-      // FETCH LATEST BOOKING AGAIN
+      // 2. NEW BOOKING: CREATE THE REAL BOOKING NOW
+      // --------------------------------------------------------
+      //
+      // This is the first point at which the Firestore booking is
+      // created for the customer booking flow.
+      //
+      // BookingService creates an AUTO-GENERATED Firestore document
+      // ID and writes that ID into bookingId. This matches the
+      // requirement that the customer never types a booking ID.
       // --------------------------------------------------------
 
-      final bookingRef =
-          FirebaseFirestore
-              .instance
-              .collection('tenants')
-              .doc(_tenantId)
-              .collection('bookings')
-              .doc(
-                widget.booking.bookingId,
-              );
+      late Booking latestBooking;
+      late DocumentReference<Map<String, dynamic>> bookingRef;
 
-      final bookingSnapshot =
-          await bookingRef.get();
-
-      if (!bookingSnapshot.exists ||
-          bookingSnapshot.data() ==
-              null) {
-        throw Exception(
-          'Booking could not be found after payment verification.',
+      if (_isNewBooking) {
+        final createdBooking =
+            await _bookingService.createBooking(
+          tenantId: _tenantId,
+          booking: widget.booking,
         );
+
+        latestBooking = createdBooking;
+
+        bookingRef = FirebaseFirestore.instance
+            .collection('tenants')
+            .doc(_tenantId)
+            .collection('bookings')
+            .doc(createdBooking.bookingId);
+
+        if (createdBooking.tenantId != _tenantId) {
+          throw Exception(
+            'Invalid tenant booking created after payment.',
+          );
+        }
+      } else {
+        // ------------------------------------------------------
+        // 2B. EXISTING BOOKING: LOAD LATEST BOOKING
+        // ------------------------------------------------------
+
+        bookingRef = FirebaseFirestore.instance
+            .collection('tenants')
+            .doc(_tenantId)
+            .collection('bookings')
+            .doc(widget.booking.bookingId);
+
+        final bookingSnapshot = await bookingRef.get();
+
+        if (!bookingSnapshot.exists ||
+            bookingSnapshot.data() == null) {
+          throw Exception(
+            'Booking could not be found after payment verification.',
+          );
+        }
+
+        latestBooking = Booking.fromMap(
+          bookingSnapshot.id,
+          bookingSnapshot.data()!,
+        );
+
+        if (latestBooking.tenantId != _tenantId) {
+          throw Exception(
+            'Invalid tenant booking.',
+          );
+        }
+
+        if (latestBooking.status == BookingStatus.cancelled ||
+            latestBooking.status == BookingStatus.rejected ||
+            latestBooking.status == BookingStatus.completed ||
+            latestBooking.status == BookingStatus.noShow) {
+          throw Exception(
+            'This booking is no longer available for payment.',
+          );
+        }
       }
 
-      final latestBooking =
-          Booking.fromMap(
-        bookingSnapshot.id,
-        bookingSnapshot.data()!,
-      );
-
-      if (latestBooking.tenantId !=
-          _tenantId) {
-        throw Exception(
-          'Invalid tenant booking.',
-        );
-      }
-
       // --------------------------------------------------------
-      // GET CURRENT OUTSTANDING AMOUNT
+      // 3. CALCULATE THE AMOUNT TO RECORD
       // --------------------------------------------------------
 
-      final currentBalance =
-          latestBooking.balanceAmount;
+      final currentBalance = latestBooking.balanceAmount;
 
-      if (currentBalance <=
-          0.009) {
+      if (currentBalance <= 0.009) {
         throw Exception(
           'This booking has already been fully paid.',
         );
       }
 
       final paymentAmount =
-          _activePaymentAmount ??
-              currentBalance;
+          _activePaymentAmount ?? currentBalance;
 
-      // --------------------------------------------------------
-      // SAFETY CHECK
-      //
-      // Never record more than the current outstanding balance.
-      // --------------------------------------------------------
+      // Never record more than the current balance.
+      final amountToRecord = paymentAmount > currentBalance
+          ? currentBalance
+          : paymentAmount;
 
-      final amountToRecord =
-          paymentAmount >
-                  currentBalance
-              ? currentBalance
-              : paymentAmount;
-
-      if (amountToRecord <=
-          0) {
+      if (amountToRecord <= 0) {
         throw Exception(
           'Invalid payment amount.',
         );
       }
 
       // --------------------------------------------------------
-      // RECORD VERIFIED RAZORPAY PAYMENT
+      // 4. RECORD VERIFIED RAZORPAY PAYMENT
+      // --------------------------------------------------------
       //
-      // BookingService already supports:
-      //
-      // PaymentMethodType.razorpay
-      // razorpayOrderId
-      // razorpayPaymentId
-      // razorpaySignature
-      // gateway
-      // gatewayStatus
-      // gatewayMethod
-      //
-      // It also prevents duplicate Razorpay payment IDs.
+      // BookingService also protects against duplicate Razorpay
+      // payment IDs.
       // --------------------------------------------------------
 
       final transaction =
-          await _bookingService
-              .addVerifiedCustomerPayment(
-        tenantId:
-            _tenantId,
-
-        bookingId:
-            latestBooking.bookingId,
-
-        amount:
-            amountToRecord,
-
-        method:
-            PaymentMethodType.razorpay,
-
-        transactionReference:
-            paymentId,
-
-        gateway:
-            'razorpay',
-
-        razorpayOrderId:
-            orderId,
-
-        razorpayPaymentId:
-            paymentId,
-
-        razorpaySignature:
-            signature,
-
-        gatewayTransactionId:
-            paymentId,
-
-        gatewayStatus:
-            'captured',
-
-        gatewayMethod:
-            'razorpay',
-
-        note:
-            'Verified Razorpay customer payment.',
-
-        paymentDate:
-            DateTime.now(),
-
-        currency:
-            'INR',
+          await _bookingService.addVerifiedCustomerPayment(
+        tenantId: _tenantId,
+        bookingId: latestBooking.bookingId,
+        amount: amountToRecord,
+        method: PaymentMethodType.razorpay,
+        transactionReference: paymentId,
+        gateway: 'razorpay',
+        razorpayOrderId: orderId,
+        razorpayPaymentId: paymentId,
+        razorpaySignature: signature,
+        gatewayTransactionId: paymentId,
+        gatewayStatus: 'captured',
+        gatewayMethod: 'razorpay',
+        note: 'Verified Razorpay customer payment.',
+        paymentDate: DateTime.now(),
+        currency: 'INR',
       );
 
       // --------------------------------------------------------
-      // REFRESH BOOKING
+      // 5. REFRESH FINAL BOOKING
       // --------------------------------------------------------
 
-      final refreshed =
-          await bookingRef.get();
+      final refreshed = await bookingRef.get();
 
       final savedBooking =
-          refreshed.exists &&
-                  refreshed.data() !=
-                      null
+          refreshed.exists && refreshed.data() != null
               ? Booking.fromMap(
                   refreshed.id,
                   refreshed.data()!,
@@ -852,31 +799,24 @@ class _PaymentScreenState extends State<PaymentScreen> {
               : latestBooking;
 
       // --------------------------------------------------------
-      // CONFIRM ONLY AFTER PAYMENT LEDGER IS SUCCESSFULLY SAVED
+      // 6. CONFIRM AFTER PAYMENT LEDGER IS SAVED
       // --------------------------------------------------------
 
-      if (savedBooking.balanceAmount <=
-          0.009) {
+      if (savedBooking.balanceAmount <= 0.009) {
         await bookingRef.update({
-          'status':
-              BookingStatus.confirmed.name,
-          'updatedAt':
-              FieldValue
-                  .serverTimestamp(),
+          'status': BookingStatus.confirmed.name,
+          'updatedAt': FieldValue.serverTimestamp(),
         });
       }
 
       // --------------------------------------------------------
-      // FETCH FINAL BOOKING
+      // 7. FETCH FINAL BOOKING
       // --------------------------------------------------------
 
-      final finalSnapshot =
-          await bookingRef.get();
+      final finalSnapshot = await bookingRef.get();
 
       final finalBooking =
-          finalSnapshot.exists &&
-                  finalSnapshot.data() !=
-                      null
+          finalSnapshot.exists && finalSnapshot.data() != null
               ? Booking.fromMap(
                   finalSnapshot.id,
                   finalSnapshot.data()!,
@@ -888,47 +828,31 @@ class _PaymentScreenState extends State<PaymentScreen> {
       }
 
       setState(() {
-        _latestBooking =
-            finalBooking;
-
-        _lastCheckedText =
-            _formatTime(
-          DateTime.now(),
-        );
-
-        _activeOrderId =
-            null;
-
-        _activePaymentAttemptId =
-            null;
-
-        _activePaymentAmount =
-            null;
+        _latestBooking = finalBooking;
+        _lastCheckedText = _formatTime(DateTime.now());
+        _activeOrderId = null;
+        _activePaymentAttemptId = null;
+        _activePaymentAmount = null;
+        _requestedPaymentAmount = null;
       });
 
       // --------------------------------------------------------
-      // SUCCESS SCREEN
+      // 8. SUCCESS SCREEN
       // --------------------------------------------------------
 
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(
-          builder: (_) =>
-              PaymentSuccessScreen(
-            booking:
-                finalBooking,
-
+          builder: (_) => PaymentSuccessScreen(
+            booking: finalBooking,
             paymentId:
-                transaction
-                    .razorpayPaymentId ??
-                paymentId,
+                transaction.razorpayPaymentId ?? paymentId,
           ),
         ),
       );
     } on FirebaseFunctionsException catch (e) {
       await _paymentVerificationFailed(
-        e.message ??
-            'Payment verification failed.',
+        e.message ?? 'Payment verification failed.',
       );
     } catch (e) {
       await _paymentVerificationFailed(
@@ -937,8 +861,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
     } finally {
       if (mounted) {
         setState(() {
-          _isProcessing =
-              false;
+          _isProcessing = false;
         });
       }
     }
