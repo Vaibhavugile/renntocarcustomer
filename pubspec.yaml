@@ -123,6 +123,10 @@ flutter:
 # RENTOCAR APP ICON
 # ============================================================
 
+# ============================================================
+# RENTOCAR APP ICON
+# ============================================================
+
 flutter_launcher_icons:
   android: true
   ios: true
@@ -141,11 +145,12 @@ flutter_launcher_icons:
   # IOS
   # ============================================================
 
-  remove_alpha_ios: false
+  # Apple requires the large App Store icon to have
+  # no transparency / alpha channel.
+  remove_alpha_ios: true
 
   # ============================================================
   # ANDROID MIN SDK
   # ============================================================
 
   min_sdk_android: 21
-  
