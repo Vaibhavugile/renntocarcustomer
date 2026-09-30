@@ -26,7 +26,11 @@ const {
 const {
   aiCustomerChat,
 } = require("./ai_customer_chat");
-
+const {
+  sendCustomerBookingTimeReminders,
+} = require(
+    "./customerBookingReminderNotifications",
+);
 // ============================================================
 // ADMIN BOOKING NOTIFICATION FUNCTION
 // ============================================================
@@ -3299,7 +3303,8 @@ exports.createRazorpayCheckoutOrder = onCall(
 // Secret NEVER goes to Flutter.
 //
 // ============================================================
-
+exports.sendCustomerBookingTimeReminders =
+  sendCustomerBookingTimeReminders;
 exports.verifyRazorpaySignature = onCall(
     async (request) => {
       try {
@@ -3480,3 +3485,4 @@ exports.verifyRazorpaySignature = onCall(
       }
     },
 );
+

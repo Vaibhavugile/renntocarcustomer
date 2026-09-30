@@ -27,6 +27,29 @@ const OTP_EXPIRY_SECONDS_DEFAULT = 300;
 const RESEND_COOLDOWN_SECONDS = 60;
 const OTP_MAX_ATTEMPTS = 5;
 
+// ==========================================================
+// TEST ACCOUNT
+// ==========================================================
+// App Store / TestFlight testing account.
+//
+// Phone:
+// +919999999999
+//
+// OTP:
+// 123456
+//
+// This account does NOT send an OTP through MSG91.
+// Verification continues through the normal Firebase
+// user lookup and custom-token authentication flow.
+//
+// IMPORTANT:
+// Remove/disable this test account before production if
+// you do not want a permanent test login.
+// ==========================================================
+
+const TEST_PHONE_LOCAL = "9999999999";
+const TEST_OTP = "123456";
+
 /**
  * Normalize an Indian phone number.
  *
@@ -240,14 +263,14 @@ async function sendWhatsAppOtp({
 
           headers: {
             "Content-Type":
-            "application/json",
+              "application/json",
 
             "authkey":
-            msg91.authKey,
+              msg91.authKey,
           },
 
           body:
-          JSON.stringify(payload),
+            JSON.stringify(payload),
         },
     );
 
@@ -271,10 +294,10 @@ async function sendWhatsAppOtp({
         "MSG91 WhatsApp request failed",
         {
           status:
-          response.status,
+            response.status,
 
           response:
-          responseData,
+            responseData,
         },
     );
 
@@ -289,7 +312,7 @@ async function sendWhatsAppOtp({
       "MSG91 WhatsApp OTP request accepted",
       {
         status:
-        response.status,
+          response.status,
       },
   );
 
@@ -302,17 +325,17 @@ async function sendWhatsAppOtp({
 exports.sendMsg91Otp = onCall(
     {
       region:
-      "asia-south1",
+        "asia-south1",
     },
 
     async (request) => {
       const data =
-      request.data || {};
+        request.data || {};
 
       const tenantId =
-      typeof data.tenantId === "string" ?
-        data.tenantId.trim() :
-        "";
+        typeof data.tenantId === "string" ?
+          data.tenantId.trim() :
+          "";
 
       if (!tenantId) {
         throw new HttpsError(
@@ -322,17 +345,64 @@ exports.sendMsg91Otp = onCall(
       }
 
       const phone =
-      normalizeIndianPhone(
-          data.phoneNumber,
-      );
+        normalizeIndianPhone(
+            data.phoneNumber,
+        );
+
+      const isTestAccount =
+        phone.local === TEST_PHONE_LOCAL;
+
+      // ========================================================
+      // TEST ACCOUNT
+      // ========================================================
+      // Do not send anything through MSG91.
+      //
+      // The verification function will accept TEST_OTP.
+      // ========================================================
+
+      if (isTestAccount) {
+        logger.info(
+            "Test OTP account requested",
+            {
+              tenantId,
+
+              phoneNumber:
+                phone.e164,
+            },
+        );
+
+        return {
+          success:
+            true,
+
+          phoneNumber:
+            phone.e164,
+
+          expiresInSeconds:
+            OTP_EXPIRY_SECONDS_DEFAULT,
+
+          resendAfterSeconds:
+            0,
+
+          msg91Accepted:
+            false,
+
+          isTestAccount:
+            true,
+        };
+      }
+
+      // ========================================================
+      // NORMAL USER FLOW
+      // ========================================================
 
       const tenantRef =
-      db
-          .collection("tenants")
-          .doc(tenantId);
+        db
+            .collection("tenants")
+            .doc(tenantId);
 
       const tenantSnap =
-      await tenantRef.get();
+        await tenantRef.get();
 
       if (!tenantSnap.exists) {
         throw new HttpsError(
@@ -342,10 +412,10 @@ exports.sendMsg91Otp = onCall(
       }
 
       const tenantData =
-      tenantSnap.data() || {};
+        tenantSnap.data() || {};
 
       const msg91 =
-      tenantData.msg91 || {};
+        tenantData.msg91 || {};
 
       if (msg91.enabled !== true) {
         throw new HttpsError(
@@ -356,7 +426,7 @@ exports.sendMsg91Otp = onCall(
 
       if (
         msg91.channel !==
-      "whatsapp"
+        "whatsapp"
       ) {
         throw new HttpsError(
             "failed-precondition",
@@ -376,7 +446,7 @@ exports.sendMsg91Otp = onCall(
       ) {
         if (
           typeof msg91[field] !== "string" ||
-        !msg91[field].trim()
+          !msg91[field].trim()
         ) {
           logger.error(
               "Missing MSG91 configuration field",
@@ -394,115 +464,115 @@ exports.sendMsg91Otp = onCall(
       }
 
       const otpRef =
-      tenantRef
-          .collection(
-              "otpVerifications",
-          )
-          .doc(
-              phone.local,
-          );
+        tenantRef
+            .collection(
+                "otpVerifications",
+            )
+            .doc(
+                phone.local,
+            );
 
       const existingOtpSnap =
-      await otpRef.get();
+        await otpRef.get();
 
       const now =
-      Date.now();
+        Date.now();
 
       if (
         existingOtpSnap.exists
       ) {
         const existingData =
-        existingOtpSnap.data() || {};
+          existingOtpSnap.data() || {};
 
         let lastSentAt = 0;
 
         if (
           existingData.lastSentAt &&
-        typeof existingData.lastSentAt
-            .toMillis === "function"
+          typeof existingData.lastSentAt
+              .toMillis === "function"
         ) {
           lastSentAt =
-          existingData.lastSentAt
-              .toMillis();
+            existingData.lastSentAt
+                .toMillis();
         }
 
         const secondsSinceLastSend =
-        (now - lastSentAt) /
-        1000;
+          (now - lastSentAt) /
+          1000;
 
         if (
           secondsSinceLastSend <
-        RESEND_COOLDOWN_SECONDS
+          RESEND_COOLDOWN_SECONDS
         ) {
           const remainingSeconds =
-          Math.ceil(
-              RESEND_COOLDOWN_SECONDS -
-            secondsSinceLastSend,
-          );
+            Math.ceil(
+                RESEND_COOLDOWN_SECONDS -
+              secondsSinceLastSend,
+            );
 
           throw new HttpsError(
               "resource-exhausted",
               "Please wait " +
-          `${remainingSeconds} seconds ` +
-          "before requesting another OTP.",
+            `${remainingSeconds} seconds ` +
+            "before requesting another OTP.",
           );
         }
       }
 
       const otp =
-      generateOtp();
+        generateOtp();
 
       const otpHash =
-      hashOtp(otp);
+        hashOtp(otp);
 
       const expirySeconds =
-      Number(
-          msg91.otpExpirySeconds,
-      ) ||
-      OTP_EXPIRY_SECONDS_DEFAULT;
+        Number(
+            msg91.otpExpirySeconds,
+        ) ||
+        OTP_EXPIRY_SECONDS_DEFAULT;
 
       const expiresAt =
-      Timestamp.fromMillis(
-          now +
-        expirySeconds * 1000,
-      );
+        Timestamp.fromMillis(
+            now +
+          expirySeconds * 1000,
+        );
 
       await otpRef.set(
           {
             phoneNumber:
-          phone.e164,
+              phone.e164,
 
             otpHash:
-          otpHash,
+              otpHash,
 
             expiresAt:
-          expiresAt,
+              expiresAt,
 
             attempts:
-          0,
+              0,
 
             createdAt:
-          Timestamp.now(),
+              Timestamp.now(),
 
             lastSentAt:
-          Timestamp.now(),
+              Timestamp.now(),
           },
           {
             merge:
-          false,
+              false,
           },
       );
 
       try {
         await sendWhatsAppOtp({
           msg91:
-          msg91,
+            msg91,
 
           phoneNumber:
-          phone.international,
+            phone.international,
 
           otp:
-          otp,
+            otp,
         });
 
         logger.info(
@@ -511,28 +581,31 @@ exports.sendMsg91Otp = onCall(
               tenantId,
 
               phoneNumber:
-            phone.e164,
+                phone.e164,
 
               expiresInSeconds:
-            expirySeconds,
+                expirySeconds,
             },
         );
 
         return {
           success:
-          true,
+            true,
 
           phoneNumber:
-          phone.e164,
+            phone.e164,
 
           expiresInSeconds:
-          expirySeconds,
+            expirySeconds,
 
           resendAfterSeconds:
-          RESEND_COOLDOWN_SECONDS,
+            RESEND_COOLDOWN_SECONDS,
 
           msg91Accepted:
-          true,
+            true,
+
+          isTestAccount:
+            false,
         };
       } catch (error) {
         try {
@@ -558,7 +631,7 @@ exports.sendMsg91Otp = onCall(
         throw new HttpsError(
             "internal",
             "Unable to send WhatsApp OTP. " +
-        "Please try again.",
+          "Please try again.",
         );
       }
     },
@@ -570,17 +643,17 @@ exports.sendMsg91Otp = onCall(
 exports.verifyMsg91Otp = onCall(
     {
       region:
-      "asia-south1",
+        "asia-south1",
     },
 
     async (request) => {
       const data =
-      request.data || {};
+        request.data || {};
 
       const tenantId =
-      typeof data.tenantId === "string" ?
-        data.tenantId.trim() :
-        "";
+        typeof data.tenantId === "string" ?
+          data.tenantId.trim() :
+          "";
 
       if (!tenantId) {
         throw new HttpsError(
@@ -590,14 +663,17 @@ exports.verifyMsg91Otp = onCall(
       }
 
       const phone =
-      normalizeIndianPhone(
-          data.phoneNumber,
-      );
+        normalizeIndianPhone(
+            data.phoneNumber,
+        );
 
       const otp =
-      typeof data.otp === "string" ?
-        data.otp.trim() :
-        "";
+        typeof data.otp === "string" ?
+          data.otp.trim() :
+          "";
+
+      const isTestAccount =
+        phone.local === TEST_PHONE_LOCAL;
 
       if (!/^\d{6}$/.test(otp)) {
         throw new HttpsError(
@@ -607,12 +683,12 @@ exports.verifyMsg91Otp = onCall(
       }
 
       const tenantRef =
-      db
-          .collection("tenants")
-          .doc(tenantId);
+        db
+            .collection("tenants")
+            .doc(tenantId);
 
       const tenantSnap =
-      await tenantRef.get();
+        await tenantRef.get();
 
       if (!tenantSnap.exists) {
         throw new HttpsError(
@@ -622,203 +698,254 @@ exports.verifyMsg91Otp = onCall(
       }
 
       const tenantData =
-      tenantSnap.data() || {};
+        tenantSnap.data() || {};
 
       const msg91 =
-      tenantData.msg91 || {};
+        tenantData.msg91 || {};
 
-      if (msg91.enabled !== true) {
-        throw new HttpsError(
-            "failed-precondition",
-            "WhatsApp OTP is not enabled for this tenant.",
-        );
-      }
+      // ========================================================
+      // TEST ACCOUNT VERIFICATION
+      // ========================================================
+      //
+      // The test account does not need:
+      // - MSG91
+      // - Firestore OTP document
+      // - OTP expiry check
+      // - attempt counter
+      // - hashed OTP
+      //
+      // It still continues to Firebase authentication below.
+      // ========================================================
 
-      const otpRef =
-      tenantRef
-          .collection(
-              "otpVerifications",
-          )
-          .doc(
-              phone.local,
+      if (isTestAccount) {
+        if (otp !== TEST_OTP) {
+          logger.warn(
+              "Invalid test account OTP",
+              {
+                tenantId,
+
+                phoneNumber:
+                  phone.e164,
+              },
           );
 
-      const otpSnap =
-      await otpRef.get();
+          throw new HttpsError(
+              "invalid-argument",
+              "Invalid test OTP.",
+          );
+        }
 
-      if (!otpSnap.exists) {
-        throw new HttpsError(
-            "not-found",
-            "OTP not found. Please request a new OTP.",
+        logger.info(
+            "Test account OTP verified",
+            {
+              tenantId,
+
+              phoneNumber:
+                phone.e164,
+            },
         );
-      }
+      } else {
+        // ======================================================
+        // NORMAL OTP VERIFICATION
+        // ======================================================
 
-      const otpData =
-      otpSnap.data() || {};
+        if (msg91.enabled !== true) {
+          throw new HttpsError(
+              "failed-precondition",
+              "WhatsApp OTP is not enabled for this tenant.",
+          );
+        }
 
-      // ----------------------------------------------------------
-      // EXPIRY CHECK
-      // ----------------------------------------------------------
+        const otpRef =
+          tenantRef
+              .collection(
+                  "otpVerifications",
+              )
+              .doc(
+                  phone.local,
+              );
 
-      const expiresAt =
-      otpData.expiresAt;
+        const otpSnap =
+          await otpRef.get();
 
-      if (
-        !expiresAt ||
-      typeof expiresAt.toMillis !==
-        "function"
-      ) {
-        await otpRef.delete();
+        if (!otpSnap.exists) {
+          throw new HttpsError(
+              "not-found",
+              "OTP not found. Please request a new OTP.",
+          );
+        }
 
-        throw new HttpsError(
-            "failed-precondition",
-            "OTP has expired. Please request a new OTP.",
-        );
-      }
+        const otpData =
+          otpSnap.data() || {};
 
-      if (
-        expiresAt.toMillis() <=
-      Date.now()
-      ) {
-        await otpRef.delete();
+        // ------------------------------------------------------
+        // EXPIRY CHECK
+        // ------------------------------------------------------
 
-        throw new HttpsError(
-            "deadline-exceeded",
-            "OTP has expired. Please request a new OTP.",
-        );
-      }
-
-      // ----------------------------------------------------------
-      // ATTEMPT LIMIT
-      // ----------------------------------------------------------
-
-      const attempts =
-      Number(
-          otpData.attempts,
-      ) || 0;
-
-      if (
-        attempts >=
-      OTP_MAX_ATTEMPTS
-      ) {
-        await otpRef.delete();
-
-        throw new HttpsError(
-            "resource-exhausted",
-            "Too many incorrect attempts. " +
-        "Please request a new OTP.",
-        );
-      }
-
-      // ----------------------------------------------------------
-      // HASH OTP
-      // ----------------------------------------------------------
-
-      const submittedHash =
-      hashOtp(otp);
-
-      const storedHash =
-      typeof otpData.otpHash === "string" ?
-        otpData.otpHash :
-        "";
-
-      const isValid =
-      hashesMatch(
-          submittedHash,
-          storedHash,
-      );
-
-      // ----------------------------------------------------------
-      // INVALID OTP
-      // ----------------------------------------------------------
-
-      if (!isValid) {
-        const nextAttempts =
-        attempts + 1;
+        const expiresAt =
+          otpData.expiresAt;
 
         if (
-          nextAttempts >=
-        OTP_MAX_ATTEMPTS
+          !expiresAt ||
+          typeof expiresAt.toMillis !==
+            "function"
+        ) {
+          await otpRef.delete();
+
+          throw new HttpsError(
+              "failed-precondition",
+              "OTP has expired. Please request a new OTP.",
+          );
+        }
+
+        if (
+          expiresAt.toMillis() <=
+          Date.now()
+        ) {
+          await otpRef.delete();
+
+          throw new HttpsError(
+              "deadline-exceeded",
+              "OTP has expired. Please request a new OTP.",
+          );
+        }
+
+        // ------------------------------------------------------
+        // ATTEMPT LIMIT
+        // ------------------------------------------------------
+
+        const attempts =
+          Number(
+              otpData.attempts,
+          ) || 0;
+
+        if (
+          attempts >=
+          OTP_MAX_ATTEMPTS
         ) {
           await otpRef.delete();
 
           throw new HttpsError(
               "resource-exhausted",
               "Too many incorrect attempts. " +
-          "Please request a new OTP.",
+            "Please request a new OTP.",
           );
         }
 
-        await otpRef.update({
-          attempts:
-          nextAttempts,
-        });
+        // ------------------------------------------------------
+        // HASH OTP
+        // ------------------------------------------------------
 
-        const remainingAttempts =
-        OTP_MAX_ATTEMPTS -
-        nextAttempts;
+        const submittedHash =
+          hashOtp(otp);
 
-        throw new HttpsError(
-            "invalid-argument",
-            "Invalid OTP. " +
-        `${remainingAttempts} attempt` +
-        `${remainingAttempts === 1 ? "" : "s"} remaining.`,
-        );
+        const storedHash =
+          typeof otpData.otpHash === "string" ?
+            otpData.otpHash :
+            "";
+
+        const isValid =
+          hashesMatch(
+              submittedHash,
+              storedHash,
+          );
+
+        // ------------------------------------------------------
+        // INVALID OTP
+        // ------------------------------------------------------
+
+        if (!isValid) {
+          const nextAttempts =
+            attempts + 1;
+
+          if (
+            nextAttempts >=
+            OTP_MAX_ATTEMPTS
+          ) {
+            await otpRef.delete();
+
+            throw new HttpsError(
+                "resource-exhausted",
+                "Too many incorrect attempts. " +
+              "Please request a new OTP.",
+            );
+          }
+
+          await otpRef.update({
+            attempts:
+              nextAttempts,
+          });
+
+          const remainingAttempts =
+            OTP_MAX_ATTEMPTS -
+            nextAttempts;
+
+          throw new HttpsError(
+              "invalid-argument",
+              "Invalid OTP. " +
+            `${remainingAttempts} attempt` +
+            `${remainingAttempts === 1 ? "" : "s"} remaining.`,
+          );
+        }
+
+        // ------------------------------------------------------
+        // OTP IS VALID
+        // ------------------------------------------------------
+
+        await otpRef.delete();
       }
 
-      // ----------------------------------------------------------
-      // OTP IS VALID
-      // ----------------------------------------------------------
-
-      await otpRef.delete();
-
-      // ----------------------------------------------------------
+      // ========================================================
       // FIND EXISTING FIREBASE USER
-      // ----------------------------------------------------------
+      // ========================================================
       //
-      // IMPORTANT:
       // We deliberately use getUserByPhoneNumber().
       //
       // This preserves existing Firebase UIDs for current
       // admin/customer accounts instead of creating a new UID
       // every time the authentication provider changes.
       //
-      // ----------------------------------------------------------
+      // This applies to both:
+      // - normal verified users
+      // - test account
+      // ========================================================
 
       let firebaseUser;
 
       try {
         firebaseUser =
-        await auth.getUserByPhoneNumber(
-            phone.e164,
-        );
+          await auth.getUserByPhoneNumber(
+              phone.e164,
+          );
 
         logger.info(
             "Existing Firebase user found for verified phone",
             {
               tenantId,
+
               uid:
-            firebaseUser.uid,
+                firebaseUser.uid,
             },
         );
       } catch (error) {
         if (
           error &&
-        error.code ===
-          "auth/user-not-found"
+          error.code ===
+            "auth/user-not-found"
         ) {
           firebaseUser =
-          await auth.createUser({
-            phoneNumber:
-              phone.e164,
-          });
+            await auth.createUser({
+              phoneNumber:
+                phone.e164,
+            });
 
           logger.info(
               "Created Firebase user for verified phone",
               {
                 tenantId,
+
                 uid:
-              firebaseUser.uid,
+                  firebaseUser.uid,
               },
           );
         } else {
@@ -830,31 +957,31 @@ exports.verifyMsg91Otp = onCall(
           throw new HttpsError(
               "internal",
               "Unable to create your authenticated account. " +
-          "Please try again.",
+            "Please try again.",
           );
         }
       }
 
-      // ----------------------------------------------------------
+      // ========================================================
       // CREATE CUSTOM TOKEN
-      // ----------------------------------------------------------
+      // ========================================================
       //
-      // tenantId is included as a custom claim so the authenticated
-      // session knows which tenant initiated this login.
-      //
-      // ----------------------------------------------------------
+      // tenantId is included as a custom claim so the
+      // authenticated session knows which tenant initiated
+      // this login.
+      // ========================================================
 
       const customToken =
-      await auth.createCustomToken(
-          firebaseUser.uid,
-          {
-            tenantId:
-            tenantId,
+        await auth.createCustomToken(
+            firebaseUser.uid,
+            {
+              tenantId:
+                tenantId,
 
-            authProvider:
-            "msg91_whatsapp",
-          },
-      );
+              authProvider:
+                "msg91_whatsapp",
+            },
+        );
 
       logger.info(
           "MSG91 OTP verification successful",
@@ -862,25 +989,31 @@ exports.verifyMsg91Otp = onCall(
             tenantId,
 
             uid:
-          firebaseUser.uid,
+              firebaseUser.uid,
 
             phoneNumber:
-          phone.e164,
+              phone.e164,
+
+            isTestAccount:
+              isTestAccount,
           },
       );
 
       return {
         success:
-        true,
+          true,
 
         uid:
-        firebaseUser.uid,
+          firebaseUser.uid,
 
         phoneNumber:
-        phone.e164,
+          phone.e164,
 
         customToken:
-        customToken,
+          customToken,
+
+        isTestAccount:
+          isTestAccount,
       };
     },
 );

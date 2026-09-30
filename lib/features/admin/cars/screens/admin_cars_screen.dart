@@ -7,7 +7,7 @@ import '../../../cars/services/car_service.dart';
 import 'admin_add_car_screen.dart';
 import 'admin_edit_car_screen.dart';
 import '../../dashboard/screens/admin_dashboard_screen.dart';
-
+import '../../booking/screens/admin_car_bookings_screen.dart';
 class AdminCarsScreen extends StatefulWidget {
   const AdminCarsScreen({
     super.key,
@@ -1627,102 +1627,156 @@ class _AdminCarsScreenState
             ),
 
             Row(
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment:
-                        CrossAxisAlignment
-                            .start,
-                    children: [
-                      Text(
-                        'Daily rental',
-                        style:
-                            GoogleFonts
-                                .manrope(
-                          fontSize: 10,
-                          fontWeight:
-                              FontWeight
-                                  .w600,
-                          color: muted,
-                        ),
-                      ),
-                      const SizedBox(
-                        height: 2,
-                      ),
-                      Text(
-                        _formatPrice(
-                          car.pricePerDay,
-                        ),
-                        style:
-                            GoogleFonts
-                                .manrope(
-                          fontSize: 16,
-                          fontWeight:
-                              FontWeight
-                                  .w800,
-                          color: heading,
-                        ),
-                      ),
-                      Text(
-                        '/ day',
-                        style:
-                            GoogleFonts
-                                .manrope(
-                          fontSize: 9,
-                          fontWeight: FontWeight.w600,
-                          color: muted,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-
-                OutlinedButton.icon(
-                  onPressed: () {
-                    _editCar(car);
-                  },
-                  style:
-                      OutlinedButton
-                          .styleFrom(
-                    foregroundColor:
-                        primary,
-                    side:
-                        const BorderSide(
-                      color: border,
-                    ),
-                    shape:
-                        RoundedRectangleBorder(
-                      borderRadius:
-                          BorderRadius
-                              .circular(
-                        12,
-                      ),
-                    ),
-                    padding:
-                        const EdgeInsets
-                            .symmetric(
-                      horizontal: 12,
-                      vertical: 9,
-                    ),
-                  ),
-                  icon: const Icon(
-                    Icons.edit_outlined,
-                    size: 15,
-                  ),
-                  label: Text(
-                    'Edit',
-                    style:
-                        GoogleFonts
-                            .manrope(
-                      fontSize: 11,
-                      fontWeight:
-                          FontWeight
-                              .w800,
-                    ),
-                  ),
-                ),
-              ],
+  children: [
+    Expanded(
+      child: Column(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Daily rental',
+            style:
+                GoogleFonts.manrope(
+              fontSize: 10,
+              fontWeight:
+                  FontWeight.w600,
+              color: muted,
             ),
+          ),
+          const SizedBox(
+            height: 2,
+          ),
+          Text(
+            _formatPrice(
+              car.pricePerDay,
+            ),
+            style:
+                GoogleFonts.manrope(
+              fontSize: 16,
+              fontWeight:
+                  FontWeight.w800,
+              color: heading,
+            ),
+          ),
+          Text(
+            '/ day',
+            style:
+                GoogleFonts.manrope(
+              fontSize: 9,
+              fontWeight:
+                  FontWeight.w600,
+              color: muted,
+            ),
+          ),
+        ],
+      ),
+    ),
+
+    // ========================================================
+    // BOOKINGS
+    // ========================================================
+
+    OutlinedButton.icon(
+      onPressed: () {
+        Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) =>
+                AdminCarBookingsScreen(
+              car: car,
+            ),
+          ),
+        );
+      },
+      style:
+          OutlinedButton.styleFrom(
+        foregroundColor:
+            primary,
+        backgroundColor:
+            softAccent,
+        side:
+            const BorderSide(
+          color: Color(
+            0xFFBFEDE7,
+          ),
+        ),
+        shape:
+            RoundedRectangleBorder(
+          borderRadius:
+              BorderRadius.circular(
+            12,
+          ),
+        ),
+        padding:
+            const EdgeInsets.symmetric(
+          horizontal: 12,
+          vertical: 9,
+        ),
+      ),
+      icon: const Icon(
+        Icons
+            .calendar_month_rounded,
+        size: 15,
+      ),
+      label: Text(
+        'Bookings',
+        style:
+            GoogleFonts.manrope(
+          fontSize: 11,
+          fontWeight:
+              FontWeight.w800,
+        ),
+      ),
+    ),
+
+    const SizedBox(
+      width: 8,
+    ),
+
+    // ========================================================
+    // EDIT
+    // ========================================================
+
+    OutlinedButton.icon(
+      onPressed: () {
+        _editCar(car);
+      },
+      style:
+          OutlinedButton.styleFrom(
+        foregroundColor:
+            primary,
+        side:
+            const BorderSide(
+          color: border,
+        ),
+        shape:
+            RoundedRectangleBorder(
+          borderRadius:
+              BorderRadius.circular(
+            12,
+          ),
+        ),
+        padding:
+            const EdgeInsets.symmetric(
+          horizontal: 12,
+          vertical: 9,
+        ),
+      ),
+      icon: const Icon(
+        Icons.edit_outlined,
+        size: 15,
+      ),
+      label: Text(
+        'Edit',
+        style:
+            GoogleFonts.manrope(
+          fontSize: 11,
+          fontWeight:
+              FontWeight.w800,
+        ),
+      ),
+    ),
+  ],
+),
           ],
         ),
       ),

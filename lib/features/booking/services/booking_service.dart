@@ -1573,66 +1573,75 @@ class BookingService {
     return bookings;
   }
 
-  Future<List<Booking>> getBookingsForAdminDateRange({
-    required String tenantId,
-    required DateTime start,
-    required DateTime end,
-    String? carId,
-    BookingStatus? status,
-  }) async {
-    await _requireTenantAdmin(
-      tenantId: tenantId,
+Future<List<Booking>> getBookingsForAdminDateRange({
+  required String tenantId,
+  required DateTime start,
+  required DateTime end,
+  String? carId,
+  BookingStatus? status,
+}) async {
+  await _requireTenantAdmin(
+    tenantId: tenantId,
+  );
+
+  if (!start.isBefore(end)) {
+    throw Exception(
+      'End date must be after start date.',
     );
-
-    if (!start.isBefore(end)) {
-      throw Exception(
-        'End date must be after start date.',
-      );
-    }
-
-    Query<Map<String, dynamic>> query =
-        _bookings(tenantId)
-            .where(
-              'pickupDateTime',
-              isLessThan: Timestamp.fromDate(end),
-            );
-
-    if (carId != null &&
-        carId.trim().isNotEmpty) {
-      query = query.where(
-        'carId',
-        isEqualTo: carId.trim(),
-      );
-    }
-
-    final snapshot = await query.get();
-
-    final result = snapshot.docs
-        .map(
-          (doc) => Booking.fromMap(
-            doc.id,
-            doc.data(),
-          ),
-        )
-        .where(
-          (booking) =>
-              booking.tenantId == tenantId &&
-              booking.returnDateTime.isAfter(start) &&
-              booking.pickupDateTime.isBefore(end) &&
-              (status == null ||
-                  booking.status == status),
-        )
-        .toList();
-
-    result.sort(
-      (a, b) =>
-          a.pickupDateTime.compareTo(
-        b.pickupDateTime,
-      ),
-    );
-
-    return result;
   }
+
+  Query<Map<String, dynamic>> query =
+      _bookings(tenantId)
+          // Booking starts before the month ends.
+          .where(
+            'pickupDateTime',
+            isLessThan: Timestamp.fromDate(end),
+          )
+          // Booking ends after the month starts.
+          //
+          // This means only bookings overlapping the requested
+          // date range are returned by Firestore.
+          .where(
+            'returnDateTime',
+            isGreaterThan: Timestamp.fromDate(start),
+          );
+
+  if (carId != null &&
+      carId.trim().isNotEmpty) {
+    query = query.where(
+      'carId',
+      isEqualTo: carId.trim(),
+    );
+  }
+
+  final snapshot = await query.get();
+
+  final result = snapshot.docs
+      .map(
+        (doc) => Booking.fromMap(
+          doc.id,
+          doc.data(),
+        ),
+      )
+      .where(
+        (booking) =>
+            booking.tenantId == tenantId &&
+            booking.pickupDateTime.isBefore(end) &&
+            booking.returnDateTime.isAfter(start) &&
+            (status == null ||
+                booking.status == status),
+      )
+      .toList();
+
+  result.sort(
+    (a, b) =>
+        a.pickupDateTime.compareTo(
+      b.pickupDateTime,
+    ),
+  );
+
+  return result;
+}
 
   Future<List<Booking>> getBookingsForCarForRange({
     required String tenantId,

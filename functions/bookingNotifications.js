@@ -77,7 +77,7 @@ function cleanNumber(value, fallback = 0) {
  * Formats an amount as Indian Rupees.
  *
  * Example:
- * 2360 -> ₹2,360
+ * 2360 -> 2,360
  *
  * @param {*} value
  * @return {string}
@@ -125,7 +125,7 @@ function toDate(value) {
 
 
 /**
- * Formats pickup date/time for the notification.
+ * Formats pickup date/time for the FCM notification.
  *
  * Example:
  * 24 Sep, 7:00 PM
@@ -198,6 +198,542 @@ function chunkArray(array, size) {
 
 
 // ============================================================
+// MSG91 WHATSAPP - ADMIN BOOKING NOTIFICATION
+// ============================================================
+
+/**
+ * Formats a phone number for WhatsApp.
+ *
+ * Examples:
+ * 8446442204
+ * -> +918446442204
+ *
+ * +918446442204
+ * -> +918446442204
+ *
+ * 00918446442204
+ * -> +918446442204
+ *
+ * @param {*} value
+ * @return {string}
+ */
+function normalizeWhatsAppPhone(value) {
+  const raw = cleanString(value);
+
+  if (!raw) {
+    return "";
+  }
+
+  // Keep digits and an optional +.
+  let digits = raw.replace(/[^\d+]/g, "");
+
+  if (!digits) {
+    return "";
+  }
+
+  if (digits.startsWith("00")) {
+    digits = `+${digits.slice(2)}`;
+  }
+
+  if (digits.startsWith("+")) {
+    return digits;
+  }
+
+  // Indian 10-digit mobile number.
+  if (digits.length === 10) {
+    return `+91${digits}`;
+  }
+
+  return `+${digits}`;
+}
+
+
+/**
+ * Gets active admin WhatsApp phone numbers.
+ *
+ * Admin structure:
+ *
+ * tenants/{tenantId}/admins/{adminId}
+ *
+ * The phone field is used as the WhatsApp recipient.
+ *
+ * @param {string} tenantId
+ * @return {Promise<Array>}
+ */
+async function getAdminWhatsAppRecipients(tenantId) {
+  const cleanTenantId = cleanString(tenantId);
+
+  if (!cleanTenantId) {
+    return [];
+  }
+
+  const adminsSnapshot = await db
+      .collection("tenants")
+      .doc(cleanTenantId)
+      .collection("admins")
+      .where("isActive", "==", true)
+      .get();
+
+  const phoneSet = new Set();
+
+  for (const adminDoc of adminsSnapshot.docs) {
+    const adminData = adminDoc.data() || {};
+
+    const phone = normalizeWhatsAppPhone(
+        adminData.phone,
+    );
+
+    if (phone) {
+      phoneSet.add(phone);
+    } else {
+      logger.warn(
+          "Active admin has no valid WhatsApp phone.",
+          {
+            tenantId: cleanTenantId,
+            adminId: adminDoc.id,
+          },
+      );
+    }
+  }
+
+  return Array.from(phoneSet);
+}
+
+
+/**
+ * Formats booking date/time in India time.
+ *
+ * Example:
+ * 26 Sep 2026, 3:00 PM
+ *
+ * @param {*} value
+ * @return {string}
+ */
+function formatBookingDateTime(value) {
+  const date = toDate(value);
+
+  if (!date) {
+    return "Not available";
+  }
+
+  return new Intl.DateTimeFormat(
+      "en-IN",
+      {
+        timeZone: "Asia/Kolkata",
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true,
+      },
+  ).format(date);
+}
+
+
+/**
+ * Sends the new booking WhatsApp template
+ * to all active admins.
+ *
+ * IMPORTANT:
+ * WhatsApp errors are completely isolated from FCM.
+ *
+ * @param {object} params
+ * @return {Promise<object>}
+ */
+async function sendAdminBookingWhatsApp({
+  tenantId,
+  bookingId,
+  customerName,
+  carName,
+  pickupDateTime,
+  returnDateTime,
+  pickupBranchName,
+  amount,
+  paymentStatus,
+}) {
+  try {
+    const cleanTenantId = cleanString(
+        tenantId,
+    );
+
+    const tenantSnapshot = await db
+        .collection("tenants")
+        .doc(cleanTenantId)
+        .get();
+
+    if (!tenantSnapshot.exists) {
+      logger.warn(
+          "Tenant not found for booking WhatsApp.",
+          {
+            tenantId: cleanTenantId,
+            bookingId,
+          },
+      );
+
+      return {
+        success: false,
+        sentCount: 0,
+        recipientCount: 0,
+      };
+    }
+
+    const tenantData =
+      tenantSnapshot.data() || {};
+
+    const msg91 =
+      cleanMap(tenantData.msg91);
+
+    // ----------------------------------------------------------
+    // MSG91 ENABLED
+    // ----------------------------------------------------------
+
+    if (msg91.enabled !== true) {
+      logger.info(
+          "MSG91 WhatsApp is disabled.",
+          {
+            tenantId: cleanTenantId,
+            bookingId,
+          },
+      );
+
+      return {
+        success: false,
+        skipped: true,
+        sentCount: 0,
+        recipientCount: 0,
+      };
+    }
+
+    // ----------------------------------------------------------
+    // CHANNEL
+    // ----------------------------------------------------------
+
+    if (
+      cleanString(msg91.channel).toLowerCase() !==
+      "whatsapp"
+    ) {
+      logger.warn(
+          "MSG91 channel is not WhatsApp.",
+          {
+            tenantId: cleanTenantId,
+            bookingId,
+            channel: msg91.channel,
+          },
+      );
+
+      return {
+        success: false,
+        skipped: true,
+        sentCount: 0,
+        recipientCount: 0,
+      };
+    }
+
+    // ----------------------------------------------------------
+    // MSG91 CONFIGURATION
+    // ----------------------------------------------------------
+
+    const authKey =
+      cleanString(msg91.authKey);
+
+    const integratedNumber =
+      cleanString(msg91.integratedNumber);
+
+    const templateName =
+      cleanString(
+          msg91.bookingTemplateName,
+          "new_booking_admin",
+      );
+
+    const languageCode =
+      cleanString(
+          msg91.bookingLanguageCode,
+          "en",
+      );
+
+    const namespace =
+      cleanString(
+          msg91.bookingNamespace,
+          cleanString(msg91.namespace),
+      );
+
+    if (
+      !authKey ||
+      !integratedNumber ||
+      !templateName ||
+      !languageCode ||
+      !namespace
+    ) {
+      logger.error(
+          "MSG91 booking WhatsApp configuration is incomplete.",
+          {
+            tenantId: cleanTenantId,
+            bookingId,
+            hasAuthKey: Boolean(authKey),
+            hasIntegratedNumber:
+              Boolean(integratedNumber),
+            templateName,
+            languageCode,
+            hasNamespace: Boolean(namespace),
+          },
+      );
+
+      return {
+        success: false,
+        skipped: true,
+        sentCount: 0,
+        recipientCount: 0,
+      };
+    }
+
+    // ----------------------------------------------------------
+    // ACTIVE ADMIN PHONE NUMBERS
+    // ----------------------------------------------------------
+
+    const recipients =
+      await getAdminWhatsAppRecipients(
+          cleanTenantId,
+      );
+
+    if (recipients.length === 0) {
+      logger.info(
+          "No active admin WhatsApp recipients found.",
+          {
+            tenantId: cleanTenantId,
+            bookingId,
+          },
+      );
+
+      return {
+        success: false,
+        skipped: true,
+        sentCount: 0,
+        recipientCount: 0,
+      };
+    }
+
+    // ----------------------------------------------------------
+    // TEMPLATE VARIABLES
+    //
+    // new_booking_admin
+    //
+    // {{1}} Booking ID
+    // {{2}} Customer Name
+    // {{3}} Vehicle
+    // {{4}} Pickup
+    // {{5}} Return
+    // {{6}} Location
+    // {{7}} Amount
+    // {{8}} Payment
+    // ----------------------------------------------------------
+
+    const components = {
+      body_1: {
+        type: "text",
+        value: cleanString(
+            bookingId,
+            "N/A",
+        ),
+      },
+
+      body_2: {
+        type: "text",
+        value: cleanString(
+            customerName,
+            "A customer",
+        ),
+      },
+
+      body_3: {
+        type: "text",
+        value: cleanString(
+            carName,
+            "Vehicle",
+        ),
+      },
+
+      body_4: {
+        type: "text",
+        value: formatBookingDateTime(
+            pickupDateTime,
+        ),
+      },
+
+      body_5: {
+        type: "text",
+        value: formatBookingDateTime(
+            returnDateTime,
+        ),
+      },
+
+      body_6: {
+        type: "text",
+        value: cleanString(
+            pickupBranchName,
+            "Rentocar",
+        ),
+      },
+
+      body_7: {
+        type: "text",
+        value: formatCurrency(
+            amount,
+        ),
+      },
+
+      body_8: {
+        type: "text",
+        value: cleanString(
+            paymentStatus,
+            "Pending",
+        ),
+      },
+    };
+
+    // ----------------------------------------------------------
+    // MSG91 REQUEST
+    // ----------------------------------------------------------
+
+    const response = await fetch(
+        "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/",
+        {
+          method: "POST",
+
+          headers: {
+            "Content-Type": "application/json",
+            "authkey": authKey,
+          },
+
+          body: JSON.stringify({
+            integrated_number:
+              integratedNumber,
+
+            content_type:
+              "template",
+
+            payload: {
+              messaging_product:
+                "whatsapp",
+
+              type:
+                "template",
+
+              template: {
+                name:
+                  templateName,
+
+                language: {
+                  code:
+                    languageCode,
+
+                  policy:
+                    "deterministic",
+                },
+
+                namespace:
+                  namespace,
+
+                to_and_components:
+                  recipients.map(
+                      (phone) => ({
+                        to: [
+                          phone,
+                        ],
+
+                        components:
+                          components,
+                      }),
+                  ),
+              },
+            },
+          }),
+        },
+    );
+
+    const responseText =
+      await response.text();
+
+    // ----------------------------------------------------------
+    // MSG91 ERROR
+    // ----------------------------------------------------------
+
+    if (!response.ok) {
+      logger.error(
+          "MSG91 booking WhatsApp request failed.",
+          {
+            tenantId: cleanTenantId,
+            bookingId,
+            status:
+              response.status,
+            response:
+              responseText,
+          },
+      );
+
+      return {
+        success: false,
+        sentCount: 0,
+        recipientCount:
+          recipients.length,
+      };
+    }
+
+    // ----------------------------------------------------------
+    // SUCCESS
+    // ----------------------------------------------------------
+
+    logger.info(
+        "Admin booking WhatsApp notification sent.",
+        {
+          tenantId: cleanTenantId,
+          bookingId,
+          recipientCount:
+            recipients.length,
+          templateName,
+          response:
+            responseText,
+        },
+    );
+
+    return {
+      success: true,
+      sentCount:
+        recipients.length,
+      recipientCount:
+        recipients.length,
+    };
+  } catch (error) {
+    // ----------------------------------------------------------
+    // VERY IMPORTANT:
+    //
+    // WhatsApp failure must NEVER throw into the
+    // booking trigger and must NOT break FCM.
+    // ----------------------------------------------------------
+
+    logger.error(
+        "Admin booking WhatsApp notification failed.",
+        {
+          tenantId,
+          bookingId,
+          error:
+            error &&
+            error.message ?
+              error.message :
+              String(error),
+        },
+    );
+
+    return {
+      success: false,
+      sentCount: 0,
+      recipientCount: 0,
+    };
+  }
+}
+
+
+// ============================================================
 // GET ADMIN DEVICE TOKENS
 // ============================================================
 
@@ -223,58 +759,81 @@ async function getAdminNotificationTokens(
     return [];
   }
 
-  const tenantRef = db
-      .collection("tenants")
-      .doc(cleanTenantId);
+  const tenantRef =
+    db
+        .collection("tenants")
+        .doc(cleanTenantId);
 
-  const adminsSnapshot = await tenantRef
-      .collection("admins")
-      .where("isActive", "==", true)
-      .get();
+  const adminsSnapshot =
+    await tenantRef
+        .collection("admins")
+        .where(
+            "isActive",
+            "==",
+            true,
+        )
+        .get();
 
   if (adminsSnapshot.empty) {
     logger.info(
         "No active admins found for tenant.",
         {
-          tenantId: cleanTenantId,
+          tenantId:
+            cleanTenantId,
         },
     );
 
     return [];
   }
 
-  const tokenSet = new Set();
+  const tokenSet =
+    new Set();
 
-  const deviceReads = [];
+  const deviceReads =
+    [];
 
   for (
-    const adminDoc of adminsSnapshot.docs
+    const adminDoc of
+    adminsSnapshot.docs
   ) {
-    const devicesRef = adminDoc.ref
-        .collection("notificationDevices");
+    const devicesRef =
+      adminDoc.ref
+          .collection(
+              "notificationDevices",
+          );
 
     deviceReads.push(
         devicesRef
-            .where("isActive", "==", true)
+            .where(
+                "isActive",
+                "==",
+                true,
+            )
             .get(),
     );
   }
 
   const deviceSnapshots =
-    await Promise.all(deviceReads);
+    await Promise.all(
+        deviceReads,
+    );
 
   for (
-    const devicesSnapshot of deviceSnapshots
+    const devicesSnapshot of
+    deviceSnapshots
   ) {
     for (
-      const deviceDoc of devicesSnapshot.docs
+      const deviceDoc of
+      devicesSnapshot.docs
     ) {
       const deviceData =
-        deviceDoc.data() || {};
+        deviceDoc.data() ||
+        {};
 
-      const token = cleanString(
-          deviceData.fcmToken,
-      );
+      const token =
+        cleanString(
+            deviceData.fcmToken,
+        );
 
       const deviceTenantId =
         cleanString(
@@ -301,25 +860,34 @@ async function getAdminNotificationTokens(
 
       if (
         deviceTenantId &&
-        deviceTenantId !== cleanTenantId
+        deviceTenantId !==
+          cleanTenantId
       ) {
         logger.warn(
             "Ignoring admin device with tenant mismatch.",
             {
-              tenantId: cleanTenantId,
+              tenantId:
+                cleanTenantId,
+
               deviceTenantId,
-              deviceId: deviceDoc.id,
+
+              deviceId:
+                deviceDoc.id,
             },
         );
 
         continue;
       }
 
-      tokenSet.add(token);
+      tokenSet.add(
+          token,
+      );
     }
   }
 
-  return Array.from(tokenSet);
+  return Array.from(
+      tokenSet,
+  );
 }
 
 
@@ -366,7 +934,9 @@ async function sendNewBookingNotification({
   }
 
   const formattedAmount =
-    formatCurrency(amount);
+    formatCurrency(
+        amount,
+    );
 
   const formattedPickup =
     formatPickupDateTime(
@@ -374,13 +944,16 @@ async function sendNewBookingNotification({
     );
 
   const safeCustomerName =
-    customerName || "A customer";
+    customerName ||
+    "A customer";
 
   const safeCarName =
-    carName || "Vehicle";
+    carName ||
+    "Vehicle";
 
   const safeBranchName =
-    pickupBranchName || "Rentocar";
+    pickupBranchName ||
+    "Rentocar";
 
   // ----------------------------------------------------------
   // PREMIUM NOTIFICATION
@@ -400,31 +973,46 @@ async function sendNewBookingNotification({
   // ----------------------------------------------------------
 
   const data = {
-    type: "booking_created",
+    type:
+      "booking_created",
 
     tenantId:
-      cleanString(tenantId),
+      cleanString(
+          tenantId,
+      ),
 
     bookingId:
-      cleanString(bookingId),
+      cleanString(
+          bookingId,
+      ),
 
     customerName:
-      cleanString(customerName),
+      cleanString(
+          customerName,
+      ),
 
     carName:
-      cleanString(carName),
+      cleanString(
+          carName,
+      ),
 
     amount:
       String(
-          cleanNumber(amount),
+          cleanNumber(
+              amount,
+          ),
       ),
 
-    currency: "INR",
+    currency:
+      "INR",
 
     pickupDateTime:
       pickupDateTime &&
-      typeof pickupDateTime.toDate === "function" ?
-        pickupDateTime.toDate().toISOString() :
+      typeof pickupDateTime.toDate ===
+        "function" ?
+        pickupDateTime
+            .toDate()
+            .toISOString() :
         cleanString(
             pickupDateTime,
         ),
@@ -446,6 +1034,7 @@ async function sendNewBookingNotification({
   };
 
   let successCount = 0;
+
   let failureCount = 0;
 
   const tokenChunks =
@@ -455,48 +1044,57 @@ async function sendNewBookingNotification({
     );
 
   for (
-    const tokenChunk of tokenChunks
+    const tokenChunk of
+    tokenChunks
   ) {
     try {
       const response =
-        await messaging.sendEachForMulticast({
-          tokens: tokenChunk,
+        await messaging
+            .sendEachForMulticast({
+              tokens:
+                tokenChunk,
 
-          notification: {
-            title,
-            body,
-          },
-
-          data,
-
-          android: {
-            priority: "high",
-
-            notification: {
-              channelId:
-                "booking_notifications",
-
-              sound: "default",
-
-              priority: "high",
-
-              defaultVibrateTimings: true,
-
-              notificationCount:
-                1,
-            },
-          },
-
-          apns: {
-            payload: {
-              aps: {
-                sound: "default",
-
-                badge: 1,
+              notification: {
+                title,
+                body,
               },
-            },
-          },
-        });
+
+              data,
+
+              android: {
+                priority:
+                  "high",
+
+                notification: {
+                  channelId:
+                    "booking_notifications",
+
+                  sound:
+                    "default",
+
+                  priority:
+                    "high",
+
+                  defaultVibrateTimings:
+                    true,
+
+                  notificationCount:
+                    1,
+                },
+              },
+
+              apns: {
+                payload: {
+                  aps: {
+                    sound:
+                      "default",
+
+                    badge:
+                      1,
+                  },
+                },
+              },
+            });
 
       successCount +=
         response.successCount;
@@ -509,19 +1107,27 @@ async function sendNewBookingNotification({
       // --------------------------------------------------------
 
       response.responses.forEach(
-          (result, index) => {
+          (
+              result,
+              index,
+          ) => {
             if (!result.success) {
               logger.warn(
                   "Admin FCM delivery failed.",
                   {
                     tenantId,
                     bookingId,
+
                     token:
-                      tokenChunk[index],
+                      tokenChunk[
+                          index
+                      ],
+
                     error:
-  result.error && result.error.message ?
-    result.error.message :
-    "Unknown FCM error",
+                      result.error &&
+                      result.error.message ?
+                        result.error.message :
+                        "Unknown FCM error",
                   },
               );
             }
@@ -533,11 +1139,12 @@ async function sendNewBookingNotification({
           {
             tenantId,
             bookingId,
+
             error:
-        error &&
-        error.message ?
-          error.message :
-          String(error),
+              error &&
+              error.message ?
+                error.message :
+                String(error),
           },
       );
 
@@ -549,7 +1156,8 @@ async function sendNewBookingNotification({
   return {
     successCount,
     failureCount,
-    tokenCount: tokens.length,
+    tokenCount:
+      tokens.length,
   };
 }
 
@@ -574,9 +1182,11 @@ exports.notifyAdminsOnNewBooking =
         document:
           "tenants/{tenantId}/bookings/{bookingId}",
 
-        region: REGION,
+        region:
+          REGION,
 
-        retry: true,
+        retry:
+          true,
       },
 
       async (event) => {
@@ -592,7 +1202,8 @@ exports.notifyAdminsOnNewBooking =
         }
 
         const data =
-          snapshot.data() || {};
+          snapshot.data() ||
+          {};
 
         const tenantId =
           cleanString(
@@ -616,7 +1227,8 @@ exports.notifyAdminsOnNewBooking =
               "New booking has no tenantId.",
               {
                 bookingId,
-                path: snapshot.ref.path,
+                path:
+                  snapshot.ref.path,
               },
           );
 
@@ -634,7 +1246,8 @@ exports.notifyAdminsOnNewBooking =
 
         if (
           documentTenantId &&
-          documentTenantId !== tenantId
+          documentTenantId !==
+            tenantId
         ) {
           logger.error(
               "Booking tenantId does not match document path.",
@@ -642,7 +1255,8 @@ exports.notifyAdminsOnNewBooking =
                 tenantId,
                 documentTenantId,
                 bookingId,
-                path: snapshot.ref.path,
+                path:
+                  snapshot.ref.path,
               },
           );
 
@@ -650,10 +1264,7 @@ exports.notifyAdminsOnNewBooking =
         }
 
         // ------------------------------------------------------
-        // Only process real customer/app bookings.
-        //
-        // If later you want admin-created bookings to also
-        // generate notifications, this can be changed.
+        // Booking source/channel.
         // ------------------------------------------------------
 
         const bookingSource =
@@ -674,7 +1285,9 @@ exports.notifyAdminsOnNewBooking =
               bookingSource,
               bookingChannel,
               status:
-                cleanString(data.status),
+                cleanString(
+                    data.status,
+                ),
             },
         );
 
@@ -693,7 +1306,9 @@ exports.notifyAdminsOnNewBooking =
         // ------------------------------------------------------
 
         const car =
-          cleanMap(data.car);
+          cleanMap(
+              data.car,
+          );
 
         const carName =
           cleanString(
@@ -708,7 +1323,7 @@ exports.notifyAdminsOnNewBooking =
         // IMPORTANT:
         // Use totalAmount.
         //
-        // Security deposit is NOT added to the rental amount.
+        // Security deposit is NOT added to rental amount.
         // ------------------------------------------------------
 
         const amount =
@@ -721,7 +1336,16 @@ exports.notifyAdminsOnNewBooking =
         // ------------------------------------------------------
 
         const pickupDateTime =
-          data.pickupDateTime || null;
+          data.pickupDateTime ||
+          null;
+
+        // ------------------------------------------------------
+        // Return
+        // ------------------------------------------------------
+
+        const returnDateTime =
+          data.returnDateTime ||
+          null;
 
         // ------------------------------------------------------
         // Pickup branch
@@ -755,7 +1379,10 @@ exports.notifyAdminsOnNewBooking =
           );
 
         // ------------------------------------------------------
-        // Send notification.
+        // SEND EXISTING FCM NOTIFICATION
+        //
+        // This remains independent and continues working
+        // exactly as before.
         // ------------------------------------------------------
 
         const result =
@@ -772,7 +1399,30 @@ exports.notifyAdminsOnNewBooking =
           });
 
         // ------------------------------------------------------
-        // Final logging
+        // SEND WHATSAPP NOTIFICATION
+        //
+        // This is deliberately separate from FCM.
+        //
+        // If MSG91 fails:
+        // - FCM has already been sent
+        // - function does not fail because of WhatsApp
+        // ------------------------------------------------------
+
+        const whatsappResult =
+          await sendAdminBookingWhatsApp({
+            tenantId,
+            bookingId,
+            customerName,
+            carName,
+            pickupDateTime,
+            returnDateTime,
+            pickupBranchName,
+            amount,
+            paymentStatus,
+          });
+
+        // ------------------------------------------------------
+        // FINAL LOGGING
         // ------------------------------------------------------
 
         logger.info(
@@ -786,12 +1436,26 @@ exports.notifyAdminsOnNewBooking =
               paymentStatus,
               bookingStatus,
               pickupBranchName,
+
+              // FCM
               successCount:
                 result.successCount,
+
               failureCount:
                 result.failureCount,
+
               tokenCount:
                 result.tokenCount,
+
+              // WhatsApp
+              whatsappSuccess:
+                whatsappResult.success,
+
+              whatsappSentCount:
+                whatsappResult.sentCount,
+
+              whatsappRecipientCount:
+                whatsappResult.recipientCount,
             },
         );
       },

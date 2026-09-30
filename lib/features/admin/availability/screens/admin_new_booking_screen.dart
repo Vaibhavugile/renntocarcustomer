@@ -827,10 +827,10 @@ class _AdminNewBookingScreenState extends State<AdminNewBookingScreen> {
 
     final returnDate = _dayOnly(selected);
 
-    if (!pickup && clean.isBefore(_dayOnly(_pickupDate))) {
-  _showError('Return date cannot be before pickup date.');
-  return;
-}
+    if (!returnDate.isAfter(_pickupDate)) {
+      _showError('Return date must be after pickup date.');
+      return;
+    }
 
     if (_rangeContainsBlockedDay(_pickupDate, returnDate)) {
       _showError('The selected period contains a booked or blocked day.');
